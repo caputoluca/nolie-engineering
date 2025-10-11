@@ -8,9 +8,7 @@ function asSchema(schema: z.ZodType) {
 
 declare module "fastify" {
 	interface FastifyInstance {
-		schemas: {
-			asSchema: typeof asSchema;
-		};
+		asSchema: typeof asSchema;
 	}
 }
 
