@@ -34,7 +34,7 @@ export const protectPlugin = fp(async (fastify) => {
 			request.session = session;
 		} catch (error) {
 			fastify.log.error(error, "Internal error in route protector plugin");
-			// TODO: handle error with custom error
+			fastify.errors.internal();
 		}
 	});
 });
