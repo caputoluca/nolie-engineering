@@ -1,14 +1,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { RouteOptions } from "fastify/types/route.js";
 import type { z } from "zod";
 
-type Method = "GET" | "POST" | "PUT" | "DELETE";
-type Role = "admin" | "user" | "entrant";
 type JSONOrZodSchema = z.ZodTypeAny | Record<string, unknown>;
-
-interface RouteConfig {
-	public?: boolean;
-	roles?: Role[];
-}
 
 interface CreateRouteSchema<
 	TBody extends JSONOrZodSchema | undefined = undefined,
@@ -36,10 +30,7 @@ interface CreateRouteOptions<
 		number,
 		JSONOrZodSchema
 	>,
-> {
-	method: Method | Method[];
-	url: string;
-	config?: RouteConfig;
+> extends Omit<RouteOptions, "handler"> {
 	schema?: CreateRouteSchema<TBody, TQuery, TParams, THeaders, TRes>;
 	handler: (
 		request: FastifyRequest<{
@@ -120,19 +111,16 @@ function createRoute<
 	fastify: FastifyInstance,
 	opts: CreateRouteOptions<TBody, TQuery, TParams, THeaders, TRes>,
 ) {
-	const { method, url, config, schema, handler } = opts;
+	const { schema, ...rest } = opts;
 
 	return fastify.route({
-		method,
-		url,
-		config,
 		schema: buildSchema(fastify, schema as Record<string, unknown>),
-		handler,
+		...rest,
 	});
 }
 
 // ---------------------------------------------
-// 🔥 Router type (shared by all helpers)
+// Router type (shared by all helpers)
 type RouterFn = <
 	TBody extends JSONOrZodSchema | undefined = undefined,
 	TQuery extends JSONOrZodSchema | undefined = undefined,
@@ -178,10 +166,9 @@ export function createRoutes(
 		const router: RouterFn = (opts) => createRoute(fastify, opts);
 
 		const makeMethod =
-			(method: Method): RouterMethod =>
+			(method: RouteOptions["method"]): RouterMethod =>
 			(url, opts) =>
 				createRoute(fastify, { ...opts, url, method });
-
 		const r = Object.assign(router, {
 			route: router,
 			get: makeMethod("GET"),
