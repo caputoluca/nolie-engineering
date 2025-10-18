@@ -29,6 +29,13 @@ interface CreateRouteSchema<
 	response?: TRes;
 }
 
+type _HandlerRequest<TBody, TQuery, TParams, THeaders> = FastifyRequest<{
+	Body: TBody extends z.ZodTypeAny ? z.infer<TBody> : unknown;
+	Querystring: TQuery extends z.ZodTypeAny ? z.infer<TQuery> : unknown;
+	Params: TParams extends z.ZodTypeAny ? z.infer<TParams> : unknown;
+	Headers: THeaders extends z.ZodTypeAny ? z.infer<THeaders> : unknown;
+}>;
+
 interface CreateRouteOptions<
 	TBody extends JSONOrZodSchema | undefined = undefined,
 	TQuery extends JSONOrZodSchema | undefined = undefined,
@@ -49,7 +56,7 @@ interface CreateRouteOptions<
 			Params: TParams extends z.ZodTypeAny ? z.infer<TParams> : unknown;
 			Headers: THeaders extends z.ZodTypeAny ? z.infer<THeaders> : unknown;
 		}> &
-			(TPublic extends true ? Record<string, never> : { session: SessionType }),
+			(TPublic extends true ? { session: null } : { session: SessionType }),
 		reply: FastifyReply,
 	) =>
 		| Promise<
