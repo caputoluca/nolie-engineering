@@ -1,16 +1,19 @@
 import fp from "fastify-plugin";
 import type { auth } from "../lib/auth.js";
 
+type Role = "admin" | "entrant" | "creator";
+export interface AuthConfig {
+	public?: boolean;
+	role?: Role | Role[];
+}
 declare module "fastify" {
 	interface FastifyRequest {
-		session: NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>;
+		session: NonNullable<
+			Awaited<ReturnType<typeof auth.api.getSession>>
+		> | null;
 	}
 	interface FastifyContextConfig {
-		/** Whether the route should skip authentication */
-		public?: boolean;
-
-		/** Restrict access to users with specific roles */
-		// roles?: string[];
+		auth?: AuthConfig;
 	}
 }
 
@@ -24,7 +27,8 @@ export const protectPlugin = fp(async (fastify) => {
 		) {
 			return; // this will pipe to default not found handler.
 		}
-		const isPublic = request.routeOptions.config?.public;
+		const { public: isPublic } = request.routeOptions.config?.auth || {};
+
 		if (isPublic) {
 			return;
 		}

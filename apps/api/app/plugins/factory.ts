@@ -1,9 +1,17 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { RouteOptions } from "fastify/types/route.js";
+import type { RouteHandler, RouteOptions } from "fastify/types/route.js";
 import type { z } from "zod";
+import type { auth } from "../lib/auth.js";
+import type { AuthConfig } from "./protect.js";
 
 type JSONOrZodSchema = z.ZodTypeAny | Record<string, unknown>;
 
+// Session type from the auth system
+type SessionType = NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>;
+
+interface CreateRouteAuth<TPublic extends boolean = false> extends AuthConfig {
+	public?: TPublic;
+}
 interface CreateRouteSchema<
 	TBody extends JSONOrZodSchema | undefined = undefined,
 	TQuery extends JSONOrZodSchema | undefined = undefined,
@@ -30,7 +38,9 @@ interface CreateRouteOptions<
 		number,
 		JSONOrZodSchema
 	>,
+	TPublic extends boolean = false,
 > extends Omit<RouteOptions, "handler"> {
+	auth?: CreateRouteAuth<TPublic>;
 	schema?: CreateRouteSchema<TBody, TQuery, TParams, THeaders, TRes>;
 	handler: (
 		request: FastifyRequest<{
@@ -38,13 +48,18 @@ interface CreateRouteOptions<
 			Querystring: TQuery extends z.ZodTypeAny ? z.infer<TQuery> : unknown;
 			Params: TParams extends z.ZodTypeAny ? z.infer<TParams> : unknown;
 			Headers: THeaders extends z.ZodTypeAny ? z.infer<THeaders> : unknown;
-		}>,
+		}> &
+			(TPublic extends true ? Record<string, never> : { session: SessionType }),
 		reply: FastifyReply,
-	) => Promise<
-		TRes extends Record<number, z.ZodTypeAny>
-			? z.infer<TRes[keyof TRes]>
-			: unknown
-	>;
+	) =>
+		| Promise<
+				TRes extends Record<number, z.ZodTypeAny>
+					? z.infer<TRes[keyof TRes]>
+					: unknown
+		  >
+		| (TRes extends Record<number, z.ZodTypeAny>
+				? z.infer<TRes[keyof TRes]>
+				: unknown);
 }
 
 // ---------------------------------------------
@@ -107,14 +122,17 @@ function createRoute<
 		number,
 		JSONOrZodSchema
 	>,
+	TPublic extends boolean = false,
 >(
 	fastify: FastifyInstance,
-	opts: CreateRouteOptions<TBody, TQuery, TParams, THeaders, TRes>,
+	opts: CreateRouteOptions<TBody, TQuery, TParams, THeaders, TRes, TPublic>,
 ) {
-	const { schema, ...rest } = opts;
+	const { schema, handler, auth, ...rest } = opts;
 
 	return fastify.route({
 		schema: buildSchema(fastify, schema as Record<string, unknown>),
+		config: { auth },
+		handler: handler as RouteHandler,
 		...rest,
 	});
 }
@@ -130,8 +148,9 @@ type RouterFn = <
 		number,
 		JSONOrZodSchema
 	>,
+	TPublic extends boolean = false,
 >(
-	opts: CreateRouteOptions<TBody, TQuery, TParams, THeaders, TRes>,
+	opts: CreateRouteOptions<TBody, TQuery, TParams, THeaders, TRes, TPublic>,
 ) => void;
 type RouterMethod = <
 	TBody extends JSONOrZodSchema | undefined = undefined,
@@ -142,10 +161,11 @@ type RouterMethod = <
 		number,
 		JSONOrZodSchema
 	>,
+	TPublic extends boolean = false,
 >(
 	url: string,
 	opts: Omit<
-		CreateRouteOptions<TBody, TQuery, TParams, THeaders, TRes>,
+		CreateRouteOptions<TBody, TQuery, TParams, THeaders, TRes, TPublic>,
 		"method" | "url"
 	>,
 ) => void;
