@@ -1,10 +1,10 @@
+import type { UserRoleType } from "@mazal/schemas/user";
 import fp from "fastify-plugin";
 import type { auth } from "../lib/auth.js";
 
-type Role = "admin" | "entrant" | "creator";
 export interface AuthConfig {
 	public?: boolean;
-	role?: Role | Role[];
+	role?: UserRoleType | UserRoleType[];
 }
 declare module "fastify" {
 	interface FastifyRequest {
