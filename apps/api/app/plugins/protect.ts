@@ -62,6 +62,16 @@ export const protectPlugin = fp(async (fastify) => {
 		);
 
 		try {
+			// Debug: Log all cookies being sent
+			const cookieHeader = request.headers.cookie;
+			fastify.log.debug(
+				{
+					cookieHeader,
+					allHeaders: Object.keys(request.headers),
+				},
+				"Cookies received for session validation",
+			);
+
 			const session = await fastify.auth.api.getSession({
 				headers: request.headers,
 			});
