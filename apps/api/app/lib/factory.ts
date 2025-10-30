@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { RouteHandler, RouteOptions } from "fastify/types/route.js";
 import type { z } from "zod";
 import type { auth } from "../lib/auth.js";
-import type { AuthConfig } from "./protect.js";
+import type { AuthConfig } from "../plugins/protect.js";
 
 type JSONOrZodSchema = z.ZodTypeAny | Record<string, unknown>;
 
