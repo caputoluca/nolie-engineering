@@ -20,6 +20,7 @@ declare module "fastify" {
 
 export const protectPlugin = fp(async (fastify) => {
 	fastify.addHook("preHandler", async (request, reply) => {
+		console.log("running protect plugin", request.url);
 		// Skip /auth routes (sign-in, callback, etc.)
 		if (request.url.startsWith("/auth")) {
 			fastify.log.debug(
@@ -28,7 +29,6 @@ export const protectPlugin = fp(async (fastify) => {
 			);
 			return;
 		}
-
 		// Skip Fastify's own 404 handler
 		if (
 			!fastify.hasRoute({
@@ -42,7 +42,6 @@ export const protectPlugin = fp(async (fastify) => {
 			);
 			return;
 		}
-
 		const authConfig = request.routeOptions.config?.auth || {};
 		if (authConfig?.public) {
 			fastify.log.debug(
@@ -138,7 +137,7 @@ export const protectPlugin = fp(async (fastify) => {
 				},
 				"Error in protectPlugin",
 			);
-			fastify.errors.internal();
+			throw fastify.errors.internal();
 		}
 	});
 });
