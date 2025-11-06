@@ -65,7 +65,11 @@ interface CreateRouteOptions<
 				: Record<string, unknown>;
 		}> &
 			(TPublic extends true ? { session: null } : { session: SessionType }),
-		reply: FastifyReply,
+		reply: FastifyReply<{
+			Reply: TRes extends Record<number, z.ZodTypeAny>
+				? z.infer<TRes[keyof TRes]>
+				: unknown;
+		}>,
 	) =>
 		| Promise<
 				TRes extends Record<number, z.ZodTypeAny>
