@@ -51,10 +51,18 @@ interface CreateRouteOptions<
 	schema?: CreateRouteSchema<TBody, TQuery, TParams, THeaders, TRes>;
 	handler: (
 		request: FastifyRequest<{
-			Body: TBody extends z.ZodTypeAny ? z.infer<TBody> : unknown;
-			Querystring: TQuery extends z.ZodTypeAny ? z.infer<TQuery> : unknown;
-			Params: TParams extends z.ZodTypeAny ? z.infer<TParams> : unknown;
-			Headers: THeaders extends z.ZodTypeAny ? z.infer<THeaders> : unknown;
+			Body: TBody extends z.ZodTypeAny
+				? z.infer<TBody>
+				: Record<string, unknown>;
+			Querystring: TQuery extends z.ZodTypeAny
+				? z.infer<TQuery>
+				: Record<string, unknown>;
+			Params: TParams extends z.ZodTypeAny
+				? z.infer<TParams>
+				: Record<string, unknown>;
+			Headers: THeaders extends z.ZodTypeAny
+				? z.infer<THeaders>
+				: Record<string, unknown>;
 		}> &
 			(TPublic extends true ? { session: null } : { session: SessionType }),
 		reply: FastifyReply,
