@@ -20,7 +20,6 @@ declare module "fastify" {
 
 export const protectPlugin = fp(async (fastify) => {
 	fastify.addHook("preHandler", async (request, reply) => {
-		console.log("running protect plugin", request.url);
 		// Skip /auth routes (sign-in, callback, etc.)
 		if (request.url.startsWith("/auth")) {
 			fastify.log.debug(
