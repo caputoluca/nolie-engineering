@@ -1,4 +1,5 @@
 import type { UserRoleType } from "@mazal/schemas/user";
+import type { RequestRouteOptions } from "fastify/types/request.js";
 import fp from "fastify-plugin";
 import type { auth } from "../lib/auth.js";
 
@@ -18,6 +19,10 @@ declare module "fastify" {
 	}
 }
 
+function routeExists({ method, url }: RequestRouteOptions) {
+	return Boolean(method || url);
+}
+
 export const protectPlugin = fp(async (fastify) => {
 	fastify.addHook("preHandler", async (request, reply) => {
 		// Skip /auth routes (sign-in, callback, etc.)
@@ -29,12 +34,7 @@ export const protectPlugin = fp(async (fastify) => {
 			return;
 		}
 		// Skip Fastify's own 404 handler
-		if (
-			!fastify.hasRoute({
-				method: request.method,
-				url: request.url,
-			})
-		) {
+		if (!routeExists(request.routeOptions)) {
 			fastify.log.debug(
 				{ url: request.url },
 				"Skipping auth protection for non-existent route",
