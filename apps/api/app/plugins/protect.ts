@@ -6,6 +6,7 @@ import type { auth } from "../lib/auth.js";
 export interface AuthConfig {
 	public?: boolean;
 	role?: UserRoleType | UserRoleType[];
+	requireOnboarded?: boolean;
 }
 
 declare module "fastify" {
@@ -82,9 +83,11 @@ export const protectPlugin = fp(async (fastify) => {
 					},
 					"Unauthorized access attempt",
 				);
-				return reply
-					.status(401)
-					.send({ error: "Unauthorized", code: "UNAUTHORIZED" });
+				reply.status(401).send({
+					code: "UNAUTHORIZED",
+					message: "Unauthorized",
+				});
+				return;
 			}
 
 			fastify.log.debug(
@@ -111,9 +114,10 @@ export const protectPlugin = fp(async (fastify) => {
 						},
 						"Insufficient permissions",
 					);
-					return reply
-						.status(403)
-						.send({ error: "Forbidden", code: "FORBIDDEN" });
+					return reply.status(403).send({
+						code: "INSUFFICIENT_PERMISSIONS",
+						message: "Forbidden",
+					});
 				}
 
 				fastify.log.debug(
@@ -124,6 +128,23 @@ export const protectPlugin = fp(async (fastify) => {
 					},
 					"Role authorization successful",
 				);
+			}
+
+			const { requireOnboarded } = authConfig;
+
+			if (requireOnboarded && session.user.needsOnboarding) {
+				fastify.log.warn(
+					{
+						userId: session.user.id,
+						userRole: session.user.role,
+						url: request.url,
+					},
+					"User tried to access resource without onboarding",
+				);
+				return reply.status(403).send({
+					code: "ONBOARDING_REQUIRED",
+					message: "Onboarding is required before accessing this resource.",
+				});
 			}
 
 			request.session = session;
