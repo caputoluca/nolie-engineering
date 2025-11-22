@@ -191,17 +191,16 @@ type RouterMethod = <
 	>,
 ) => void;
 
+export interface RouteCreator {
+	route: RouterFn;
+	get: RouterMethod;
+	post: RouterMethod;
+	put: RouterMethod;
+	delete: RouterMethod;
+}
+
 export function createRoutes(
-	define: (
-		r: {
-			route: RouterFn;
-			get: RouterMethod;
-			post: RouterMethod;
-			put: RouterMethod;
-			delete: RouterMethod;
-		},
-		fastify: FastifyInstance,
-	) => void,
+	define: (r: RouteCreator, fastify: FastifyInstance) => void,
 ) {
 	return (fastify: FastifyInstance) => {
 		const router: RouterFn = (opts) => createRoute(fastify, opts);
