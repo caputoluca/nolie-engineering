@@ -64,7 +64,9 @@ interface CreateRouteOptions<
 				? z.infer<THeaders>
 				: Record<string, unknown>;
 		}> &
-			(TPublic extends true ? { session: null } : { session: SessionType }),
+			(TPublic extends true
+				? { session: SessionType | null }
+				: { session: SessionType }),
 		reply: FastifyReply<{
 			Reply: TRes extends Record<number, z.ZodTypeAny>
 				? z.infer<TRes[keyof TRes]>
