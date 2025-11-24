@@ -2,7 +2,10 @@ import { type AuctionOut, AuctionStatus } from "@mazal/schemas/auction";
 import { auctionsConfig } from "./config";
 
 export function canBid(auction: Pick<AuctionOut, "status" | "endAt">) {
-	return auction.status === AuctionStatus.active && auction.endAt > new Date();
+	return (
+		auction.status === AuctionStatus.active &&
+		new Date(auction.endAt) > new Date()
+	);
 }
 
 export function shouldExtendAuction(
@@ -14,7 +17,7 @@ export function shouldExtendAuction(
 		return { shouldExtend: false, extendSeconds: 0 };
 	}
 
-	const timeLeftSeconds = (auction.endAt.getTime() - now) / 1000;
+	const timeLeftSeconds = (new Date(auction.endAt).getTime() - now) / 1000;
 
 	const shouldExtend = timeLeftSeconds <= auctionsConfig.extensionWindowSeconds;
 
