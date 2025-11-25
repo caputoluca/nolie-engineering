@@ -197,6 +197,7 @@ export interface RouteCreator {
 	post: RouterMethod;
 	put: RouterMethod;
 	delete: RouterMethod;
+	patch: RouterMethod;
 }
 
 export function createRoutes(
@@ -215,6 +216,7 @@ export function createRoutes(
 			post: makeMethod("POST"),
 			put: makeMethod("PUT"),
 			delete: makeMethod("DELETE"),
+			patch: makeMethod("PATCH"),
 		});
 
 		define(r, fastify);
