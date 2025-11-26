@@ -7,8 +7,13 @@ export class RealtimeClient {
 	connected = false;
 
 	async connect(opts: RealtimeClientOptions) {
-		this.connected = true;
-		await initializeClient(cache, () => createRealtimeClient(opts));
+		try {
+			await initializeClient(cache, () => createRealtimeClient(opts));
+			this.connected = true;
+		} catch (error) {
+			this.connected = false;
+			throw error;
+		}
 	}
 
 	disconnect(): void {
@@ -16,6 +21,8 @@ export class RealtimeClient {
 		if (client) {
 			client.close();
 		}
+		cache.clear();
+		this.connected = false;
 	}
 
 	auction = auctionSubscribers;
