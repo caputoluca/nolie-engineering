@@ -1,3 +1,5 @@
+import { isOnboardingComplete } from "@mazal/core/onboarding";
+import type { OnboardingStepType } from "@mazal/schemas/onboarding/step";
 import type { UserRoleType } from "@mazal/schemas/user";
 import type { RequestRouteOptions } from "fastify/types/request.js";
 import fp from "fastify-plugin";
@@ -20,57 +22,26 @@ declare module "fastify" {
 	}
 }
 
-function routeExists({ method, url }: RequestRouteOptions) {
-	return Boolean(method || url);
+/**
+ * Check if a route exists. Fastify sets both method and url for valid routes.
+ */
+function routeExists({ method, url }: RequestRouteOptions): boolean {
+	return Boolean(method && url);
 }
 
 export const protectPlugin = fp(async (fastify) => {
 	fastify.addHook("preHandler", async (request, reply) => {
-		// Skip /auth routes (sign-in, callback, etc.)
-		if (request.url.startsWith("/auth")) {
-			fastify.log.debug(
-				{ url: request.url },
-				"Skipping auth protection for auth route",
-			);
-			return;
-		}
 		// Skip Fastify's own 404 handler
 		if (!routeExists(request.routeOptions)) {
-			fastify.log.debug(
-				{ url: request.url },
-				"Skipping auth protection for non-existent route",
-			);
-			return;
-		}
-		const authConfig = request.routeOptions.config?.auth || {};
-		if (authConfig?.public) {
-			fastify.log.debug(
-				{ url: request.url },
-				"Skipping auth protection for public route",
-			);
 			return;
 		}
 
-		fastify.log.debug(
-			{
-				url: request.url,
-				method: request.method,
-				hasAuthHeader: !!request.headers.authorization,
-			},
-			"Checking authentication",
-		);
+		const authConfig = request.routeOptions.config?.auth;
+		if (authConfig?.public) {
+			return;
+		}
 
 		try {
-			// Debug: Log all cookies being sent
-			const cookieHeader = request.headers.cookie;
-			fastify.log.debug(
-				{
-					cookieHeader,
-					allHeaders: Object.keys(request.headers),
-				},
-				"Cookies received for session validation",
-			);
-
 			const session = await fastify.auth.api.getSession({
 				headers: request.headers,
 			});
@@ -83,23 +54,13 @@ export const protectPlugin = fp(async (fastify) => {
 					},
 					"Unauthorized access attempt",
 				);
-				reply.status(401).send({
+				return reply.status(401).send({
 					code: "UNAUTHORIZED",
 					message: "Unauthorized",
 				});
-				return;
 			}
 
-			fastify.log.debug(
-				{
-					userId: session.user.id,
-					role: session.user.role,
-					url: request.url,
-				},
-				"User authenticated successfully",
-			);
-
-			const { role } = authConfig;
+			const { role } = authConfig || {};
 			if (role) {
 				const requiredRoles = Array.isArray(role) ? role : [role];
 				const userRole = session.user.role as UserRoleType;
@@ -119,20 +80,15 @@ export const protectPlugin = fp(async (fastify) => {
 						message: "Forbidden",
 					});
 				}
-
-				fastify.log.debug(
-					{
-						userId: session.user.id,
-						userRole,
-						requiredRoles,
-					},
-					"Role authorization successful",
-				);
 			}
 
-			const { requireOnboarded } = authConfig;
+			const { requireOnboarded } = authConfig || {};
 
-			if (requireOnboarded && session.user.needsOnboarding) {
+			if (
+				requireOnboarded &&
+				session.user.onboardingStep &&
+				!isOnboardingComplete(session.user.onboardingStep as OnboardingStepType)
+			) {
 				fastify.log.warn(
 					{
 						userId: session.user.id,
@@ -157,7 +113,12 @@ export const protectPlugin = fp(async (fastify) => {
 				},
 				"Error in protectPlugin",
 			);
-			throw fastify.errors.internal();
+			// Safety check: ensure errors plugin is loaded
+			if (fastify.errors) {
+				throw fastify.errors.internal();
+			}
+			// Fallback if errors plugin not loaded (shouldn't happen, but fail-safe)
+			throw new Error("Internal server error");
 		}
 	});
 });
