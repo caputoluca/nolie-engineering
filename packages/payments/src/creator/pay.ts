@@ -1,19 +1,19 @@
 import { platformFees } from "@mazal/config";
-import { client } from "./client.js";
-import { PaymentErrorCode, type PaymentErrorCodeType } from "./errors.js";
+import { client } from "../client.js";
+import { PaymentErrorCode, type PaymentErrorCodeType } from "../errors.js";
 import {
 	createIdempotencyKey,
 	isStripeError,
 	shouldThrowError,
 	toCents,
-} from "./utils.js";
+} from "../utils.js";
 
 export interface PayCreatorInput {
 	amount: number; // in dollars
-	creatorStripeAccountId: string;
+	creatorConnectAccountId: string;
 	auctionId: string;
-	winnerId: string;
-	winningBidId: string;
+	fanId: string;
+	bidId: string;
 }
 
 export type PayCreatorResult =
@@ -57,9 +57,9 @@ export async function payCreator(
 
 	const idempotencyKey = createIdempotencyKey({
 		auctionId: input.auctionId,
-		winnerId: input.winnerId,
-		winningBidId: input.winningBidId,
-		resourceId: input.creatorStripeAccountId,
+		fanId: input.fanId,
+		bidId: input.bidId,
+		resourceId: input.creatorConnectAccountId,
 	});
 
 	try {
@@ -67,11 +67,11 @@ export async function payCreator(
 			{
 				amount: netAmount,
 				currency: "usd",
-				destination: input.creatorStripeAccountId,
+				destination: input.creatorConnectAccountId,
 				metadata: {
 					auctionId: input.auctionId,
-					winnerId: input.winnerId,
-					winningBidId: input.winningBidId,
+					fanId: input.fanId,
+					bidId: input.bidId,
 				},
 			},
 			{ idempotencyKey },
