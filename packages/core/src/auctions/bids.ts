@@ -32,12 +32,15 @@ export type ValidateBidResult =
 	| { valid: false; message: string; code: string };
 
 export function validateBid(
-	auction: Pick<
-		AuctionOut,
-		"status" | "endAt" | "startingBid" | "bids" | "creatorId"
-	>,
+	auction: Pick<AuctionOut, "status" | "endAt" | "startingBid" | "bids">,
 	amount: number,
-	userId: string,
+	{
+		creatorId,
+		userId,
+	}: {
+		creatorId: string;
+		userId: string;
+	},
 ): ValidateBidResult {
 	// 1. Cannot bid if auction not active
 	if (!canBid(auction)) {
@@ -49,7 +52,7 @@ export function validateBid(
 	}
 
 	// 2. Cannot bid on own auction
-	if (auction.creatorId === userId) {
+	if (creatorId === userId) {
 		return {
 			valid: false,
 			message: "Cannot bid on your own auction",
