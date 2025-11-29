@@ -191,34 +191,30 @@ type RouterMethod = <
 	>,
 ) => void;
 
-export interface RouteCreator {
-	route: RouterFn;
-	get: RouterMethod;
-	post: RouterMethod;
-	put: RouterMethod;
-	delete: RouterMethod;
-	patch: RouterMethod;
+function createRouter(fastify: FastifyInstance) {
+	const router: RouterFn = (opts) => createRoute(fastify, opts);
+
+	const makeMethod =
+		(method: RouteOptions["method"]): RouterMethod =>
+		(url, opts) =>
+			createRoute(fastify, { ...opts, url, method });
+	return Object.assign(router, {
+		route: router,
+		get: makeMethod("GET"),
+		post: makeMethod("POST"),
+		put: makeMethod("PUT"),
+		delete: makeMethod("DELETE"),
+		patch: makeMethod("PATCH"),
+	});
 }
+
+export type RouteCreator = ReturnType<typeof createRouter>;
 
 export function createRoutes(
 	define: (r: RouteCreator, fastify: FastifyInstance) => void,
 ) {
 	return (fastify: FastifyInstance) => {
-		const router: RouterFn = (opts) => createRoute(fastify, opts);
-
-		const makeMethod =
-			(method: RouteOptions["method"]): RouterMethod =>
-			(url, opts) =>
-				createRoute(fastify, { ...opts, url, method });
-		const r = Object.assign(router, {
-			route: router,
-			get: makeMethod("GET"),
-			post: makeMethod("POST"),
-			put: makeMethod("PUT"),
-			delete: makeMethod("DELETE"),
-			patch: makeMethod("PATCH"),
-		});
-
+		const r = createRouter(fastify);
 		define(r, fastify);
 	};
 }
