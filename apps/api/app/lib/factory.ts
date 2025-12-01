@@ -48,6 +48,7 @@ interface CreateRouteOptions<
 	TPublic extends boolean = false,
 > extends Omit<RouteOptions, "handler"> {
 	auth?: CreateRouteAuth<TPublic>;
+	config?: Omit<RouteOptions["config"], "auth">;
 	schema?: CreateRouteSchema<TBody, TQuery, TParams, THeaders, TRes>;
 	handler: (
 		request: FastifyRequest<{
@@ -148,11 +149,11 @@ function createRoute<
 	fastify: FastifyInstance,
 	opts: CreateRouteOptions<TBody, TQuery, TParams, THeaders, TRes, TPublic>,
 ) {
-	const { schema, handler, auth, ...rest } = opts;
+	const { schema, handler, auth, config, ...rest } = opts;
 
 	return fastify.route({
 		schema: buildSchema(fastify, schema as Record<string, unknown>),
-		config: { auth },
+		config: { ...(config ?? {}), auth },
 		handler: handler as RouteHandler,
 		...rest,
 	});
