@@ -20,11 +20,13 @@ export function usePlaceBid(
 	const { id } = useAuctionData();
 	const amount = useNextBidAmount();
 	const [showOutcome, setShowOutcome] = useState(false);
+	const [didSubmit, setDidSubmit] = useState(false);
 	const { isEnded } = useAuctionEnded();
 	const prevOpenRef = useRef(open);
 	const timeoutRef = useRef<NodeJS.Timeout | null>(null);
 
 	const baseAction = useCallback(async () => {
+		setDidSubmit(true);
 		if (isEnded) {
 			return fail<typeof BidCreateSchema>({
 				errors: {
@@ -38,17 +40,28 @@ export function usePlaceBid(
 		} else {
 			haptics.error();
 		}
-		setShowOutcome(true);
 		return res;
 	}, [amount, id, haptics, isEnded]);
 
 	const [state, action] = useAction(baseAction);
+	const [bidPlacedSuccessfully, setBidPlacedSuccessfully] = useState(false);
+
+	// Show outcome after submission and when state has result
+	useEffect(() => {
+		if (
+			didSubmit &&
+			(state.success || Object.keys(state.errors || {}).length > 0)
+		) {
+			setShowOutcome(true);
+		}
+	}, [didSubmit, state]);
 
 	useEffect(() => {
 		if (showOutcome && state.success) {
+			setBidPlacedSuccessfully(true);
 			const timeout = setTimeout(() => {
 				onOpenChange?.(false);
-			}, 1000);
+			}, 1500);
 			return () => clearTimeout(timeout);
 		}
 	}, [showOutcome, state.success, onOpenChange]);
@@ -68,6 +81,8 @@ export function usePlaceBid(
 		if (isOpening) {
 			// Modal is opening: reset immediately for fresh state
 			setShowOutcome(false);
+			setBidPlacedSuccessfully(false);
+			setDidSubmit(false);
 		} else if (isClosing) {
 			// Modal is closing: delay reset until exit animation completes
 			timeoutRef.current = setTimeout(() => {
@@ -88,5 +103,11 @@ export function usePlaceBid(
 		};
 	}, [open]);
 
-	return { state, action, showOutcome, setShowOutcome };
+	return {
+		state,
+		action,
+		showOutcome,
+		setShowOutcome,
+		bidPlacedSuccessfully,
+	};
 }
