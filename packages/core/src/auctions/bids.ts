@@ -26,6 +26,27 @@ export function shouldExtendAuction(
 		extendSeconds: shouldExtend ? auctionsConfig.extendBySeconds : 0,
 	};
 }
+export function getMinimumIncrement(amount: number): number {
+	if (amount < 100) return 1;
+	if (amount < 250) return 5;
+	if (amount < 500) return 10;
+	if (amount < 1000) return 25;
+	if (amount < 5000) return 50;
+	return 100;
+}
+
+export function computeNextBidAmount({
+	current,
+	startingBid,
+}: {
+	current: number | null;
+	startingBid: number;
+}): number {
+	if (current === null) {
+		return startingBid;
+	}
+	return current + getMinimumIncrement(current);
+}
 
 export type ValidateBidResult =
 	| { valid: true }
@@ -33,7 +54,7 @@ export type ValidateBidResult =
 
 export function validateBid(
 	auction: Pick<AuctionOut, "status" | "endAt" | "startingBid" | "bids">,
-	amount: number,
+	bid: { amount: number; currentHighest: number | null },
 	{
 		creatorId,
 		userId,
@@ -61,18 +82,21 @@ export function validateBid(
 	}
 
 	// 3. Amount must exceed highest bid
-	const currentHighest = auction.bids[0]?.amount ?? auction.startingBid ?? 0;
+	const nextBidAmount = computeNextBidAmount({
+		current: bid.currentHighest,
+		startingBid: auction.startingBid,
+	});
 
-	if (amount <= currentHighest) {
+	if (bid.amount <= nextBidAmount) {
 		return {
 			valid: false,
 			message: "Bid must be higher than current highest bid",
-			code: "LOW_BID",
+			code: "BID_TOO_LOW",
 		};
 	}
 
 	// 5. Reject absurdly high bids for safety
-	if (amount > auctionsConfig.maxBidAmount) {
+	if (bid.amount > auctionsConfig.maxBidAmount) {
 		return {
 			valid: false,
 			message: "Bid amount invalid",
