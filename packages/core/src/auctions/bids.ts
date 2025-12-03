@@ -87,10 +87,10 @@ export function validateBid(
 		startingBid: auction.startingBid,
 	});
 
-	if (bid.amount <= nextBidAmount) {
+	if (bid.amount < nextBidAmount) {
 		return {
 			valid: false,
-			message: "Bid must be higher than current highest bid",
+			message: "Your bid is too low",
 			code: "BID_TOO_LOW",
 		};
 	}
