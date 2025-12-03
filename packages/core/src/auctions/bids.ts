@@ -53,13 +53,13 @@ export type ValidateBidResult =
 	| { valid: false; message: string; code: string };
 
 export function validateBid(
-	auction: Pick<AuctionOut, "status" | "endAt" | "startingBid" | "bids">,
+	auction: Pick<AuctionOut, "status" | "endAt" | "startingBid" | "bids"> & {
+		creatorUserId: string;
+	},
 	bid: { amount: number; currentHighest: number | null },
 	{
-		creatorId,
 		userId,
 	}: {
-		creatorId: string;
 		userId: string;
 	},
 ): ValidateBidResult {
@@ -73,7 +73,7 @@ export function validateBid(
 	}
 
 	// 2. Cannot bid on own auction
-	if (creatorId === userId) {
+	if (userId === auction.creatorUserId) {
 		return {
 			valid: false,
 			message: "Cannot bid on your own auction",
