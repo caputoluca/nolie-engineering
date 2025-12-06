@@ -17,7 +17,7 @@ export interface PayCreatorInput {
 }
 
 export type PayCreatorResult =
-	| { success: true; transferId: string }
+	| { success: true; transferId: string; netAmount: number }
 	| {
 			success: false;
 			error: PaymentErrorCodeType;
@@ -77,7 +77,7 @@ export async function payCreator(
 			{ idempotencyKey },
 		);
 
-		return { success: true, transferId: transfer.id };
+		return { success: true, transferId: transfer.id, netAmount };
 	} catch (err: unknown) {
 		// Handle Stripe errors
 		if (isStripeError(err)) {
