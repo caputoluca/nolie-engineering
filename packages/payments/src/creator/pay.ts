@@ -1,7 +1,7 @@
-import { platformFees } from "@mazal/config";
 import { client } from "../client.js";
 import { PaymentErrorCode, type PaymentErrorCodeType } from "../errors.js";
 import {
+	computeFeesAndNetAmount,
 	createIdempotencyKey,
 	isStripeError,
 	shouldThrowError,
@@ -30,15 +30,12 @@ export type PayCreatorResult =
 			transferId?: string;
 	  };
 
-function calculateApplicationFee(amountInCents: number) {
-	return Math.round(amountInCents * platformFees.applicationFeeRate);
-}
-
 export async function payCreator(
 	input: PayCreatorInput,
 ): Promise<PayCreatorResult> {
 	const amountInCents = toCents(input.amount);
-	const feeInCents = calculateApplicationFee(amountInCents);
+	const { platformFee: feeInCents, netAmount } =
+		computeFeesAndNetAmount(amountInCents);
 
 	// Validate fee doesn't exceed amount (defensive programming)
 	if (feeInCents > amountInCents) {
@@ -48,8 +45,6 @@ export async function payCreator(
 			message: `Fee (${feeInCents} cents) exceeds amount (${amountInCents} cents)`,
 		};
 	}
-
-	const netAmount = amountInCents - feeInCents;
 
 	// Validate net amount is non-negative
 	if (netAmount < 0) {
