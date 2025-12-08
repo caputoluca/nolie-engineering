@@ -1,9 +1,20 @@
-import { prisma } from "@mazal/db";
-import { payments } from "@mazal/payments";
+import { type Prisma, prisma } from "@mazal/db";
+import { PaymentErrorCode, payments } from "@mazal/payments";
 import { EarningsPayoutStatus } from "@mazal/schemas/me/index";
-import { logger } from "@/logger.js";
-import { markPayoutAsFailed, RetryablePayoutError } from "./release-utils.js";
+import { logger } from "../logger.js";
+import {
+	markPayoutAsFailed,
+	RetryablePayoutError,
+	reschedulePayoutForInsufficientFunds,
+} from "./release-utils.js";
 import type { PayoutJob } from "./types.js";
+
+const WHERE_CLAUSE = {
+	payoutStatus: {
+		in: [EarningsPayoutStatus.in_review, EarningsPayoutStatus.pending],
+	},
+	stripeTransferId: null,
+} as const satisfies Prisma.CreatorEarningWhereInput;
 
 export async function release(job: PayoutJob<"release">) {
 	const { earningId } = job.data;
@@ -13,13 +24,14 @@ export async function release(job: PayoutJob<"release">) {
 	const earning = await prisma.creatorEarning.findUnique({
 		where: {
 			id: earningId,
-			payoutStatus: EarningsPayoutStatus.in_review,
-			stripeTransferId: null,
+			...WHERE_CLAUSE,
 		},
 		select: {
 			id: true,
 			netAmount: true, // amount in cents, creator's share
 			auctionId: true,
+			payoutRetryAttempts: true,
+			payoutStatus: true,
 			auction: {
 				select: {
 					winnerId: true,
@@ -100,9 +112,24 @@ export async function release(job: PayoutJob<"release">) {
 		auctionId: earning.auctionId,
 		fanId,
 		bidId,
+		retryAttempt: earning.payoutRetryAttempts,
 	});
 
 	if (!result.success) {
+		if (result.error === PaymentErrorCode.insufficient_funds) {
+			logger.warn(
+				{ earningId, amountInDollars },
+				"payout.release: insufficient funds; starting reschedule flow",
+			);
+			await reschedulePayoutForInsufficientFunds(prisma, payments, {
+				amountInDollars,
+				earningId,
+				currentAttempts: earning.payoutRetryAttempts,
+				currentPayoutStatus: earning.payoutStatus,
+			});
+			return;
+		}
+
 		logger.error(
 			{
 				earningId,
@@ -132,8 +159,7 @@ export async function release(job: PayoutJob<"release">) {
 		await prisma.creatorEarning.update({
 			where: {
 				id: earningId,
-				payoutStatus: EarningsPayoutStatus.in_review,
-				stripeTransferId: null,
+				...WHERE_CLAUSE,
 			},
 			data: {
 				payoutStatus: EarningsPayoutStatus.pending,

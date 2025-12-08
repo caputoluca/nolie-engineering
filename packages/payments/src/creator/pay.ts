@@ -3,6 +3,7 @@ import { PaymentErrorCode, type PaymentErrorCodeType } from "../errors.js";
 import {
 	computeFeesAndNetAmount,
 	createIdempotencyKey,
+	isInsufficientFundsError,
 	isStripeError,
 	shouldThrowError,
 	toCents,
@@ -14,6 +15,7 @@ export interface PayCreatorInput {
 	auctionId: string;
 	fanId: string;
 	bidId: string;
+	retryAttempt: number;
 }
 
 export type PayCreatorResult =
@@ -55,12 +57,14 @@ export async function payCreator(
 		};
 	}
 
-	const idempotencyKey = createIdempotencyKey({
+	const idempotencyKeyBase = createIdempotencyKey({
 		auctionId: input.auctionId,
 		fanId: input.fanId,
 		bidId: input.bidId,
 		resourceId: input.creatorConnectAccountId,
 	});
+
+	const idempotencyKey = `${idempotencyKeyBase}-${input.retryAttempt}`;
 
 	try {
 		const transfer = await client.transfers.create(
@@ -91,13 +95,22 @@ export async function payCreator(
 				throw err;
 			}
 
-			// Non-retryable business logic errors: return structured failure
-			// Examples: invalid account, insufficient funds, account restrictions
-			return {
-				success: false,
-				error: PaymentErrorCode.transfer_failed,
-				message: err.message ?? "Transfer failed",
-			};
+			if (isInsufficientFundsError(err)) {
+				// Insufficient funds error: return structured failure
+				return {
+					success: false,
+					error: PaymentErrorCode.insufficient_funds,
+					message: err.message,
+				};
+			} else {
+				// Non-retryable business logic errors: return structured failure
+				// Examples: invalid account, insufficient funds, account restrictions
+				return {
+					success: false,
+					error: PaymentErrorCode.transfer_failed,
+					message: err.message,
+				};
+			}
 		}
 
 		// Non-Stripe errors: check if retryable (network issues, timeouts)
