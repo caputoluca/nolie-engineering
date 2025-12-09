@@ -1,4 +1,4 @@
-import { RestClient } from "@mazal/realtime/server";
+import { RestClient } from "@nolie/realtime/server";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 

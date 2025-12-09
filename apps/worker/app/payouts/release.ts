@@ -1,6 +1,6 @@
-import { type Prisma, prisma } from "@mazal/db";
-import { PaymentErrorCode, payments } from "@mazal/payments";
-import { EarningsPayoutStatus } from "@mazal/schemas/me/index";
+import { type Prisma, prisma } from "@nolie/db";
+import { PaymentErrorCode, payments } from "@nolie/payments";
+import { EarningsPayoutStatus } from "@nolie/schemas/me/index";
 import { logger } from "../logger.js";
 import {
 	markPayoutAsFailed,

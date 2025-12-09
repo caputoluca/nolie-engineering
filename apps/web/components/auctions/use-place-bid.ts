@@ -1,7 +1,7 @@
 "use client";
 
-import { fail } from "@mazal/actions";
-import type { BidCreateSchema } from "@mazal/schemas/auction/bid";
+import { fail } from "@nolie/actions";
+import type { BidCreateSchema } from "@nolie/schemas/auction/bid";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAction } from "@/hooks/action";
 import { useHaptics } from "@/hooks/use-haptics";

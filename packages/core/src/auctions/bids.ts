@@ -1,4 +1,4 @@
-import { type AuctionOut, AuctionStatus } from "@mazal/schemas/auction";
+import { type AuctionOut, AuctionStatus } from "@nolie/schemas/auction";
 import { auctionsConfig } from "./config";
 
 export function canBid(auction: Pick<AuctionOut, "status" | "endAt">) {

@@ -1,6 +1,6 @@
-import { isOnboardingComplete } from "@mazal/core/onboarding";
-import type { OnboardingStepType } from "@mazal/schemas/onboarding/step";
-import type { UserRoleType } from "@mazal/schemas/user";
+import { isOnboardingComplete } from "@nolie/core/onboarding";
+import type { OnboardingStepType } from "@nolie/schemas/onboarding/step";
+import type { UserRoleType } from "@nolie/schemas/user";
 import type { RequestRouteOptions } from "fastify/types/request.js";
 import fp from "fastify-plugin";
 import type { auth } from "../lib/auth.js";
