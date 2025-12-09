@@ -36,6 +36,7 @@ export async function release(job: PayoutJob<"release">) {
 				select: {
 					winnerId: true,
 					winningBidId: true,
+					fulfillmentDispute: { select: { id: true } },
 				},
 			},
 			creator: {
@@ -48,6 +49,14 @@ export async function release(job: PayoutJob<"release">) {
 
 	if (!earning) {
 		logger.error({ earningId }, "payout.release: earning not found; skipping");
+		return;
+	}
+
+	if (earning.auction.fulfillmentDispute !== null) {
+		logger.warn(
+			{ earningId },
+			"payout.release: fulfillment dispute exists; skipping",
+		);
 		return;
 	}
 
