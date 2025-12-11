@@ -1,4 +1,4 @@
-import { type Prisma, prisma } from "@nolie/db";
+import { DisputeStatus, type Prisma, prisma } from "@nolie/db";
 import { PaymentErrorCode, payments } from "@nolie/payments";
 import { EarningsPayoutStatus } from "@nolie/schemas/me/index";
 import { logger } from "../logger.js";
@@ -36,7 +36,7 @@ export async function release(job: PayoutJob<"release">) {
 				select: {
 					winnerId: true,
 					winningBidId: true,
-					fulfillmentDispute: { select: { id: true } },
+					fulfillmentDispute: { select: { id: true, status: true } },
 				},
 			},
 			creator: {
@@ -52,9 +52,13 @@ export async function release(job: PayoutJob<"release">) {
 		return;
 	}
 
-	if (earning.auction.fulfillmentDispute !== null) {
+	const fulfillmentDisputeStatus = earning.auction.fulfillmentDispute?.status;
+	if (
+		fulfillmentDisputeStatus === DisputeStatus.pending ||
+		fulfillmentDisputeStatus === DisputeStatus.resolved_fan
+	) {
 		logger.warn(
-			{ earningId },
+			{ earningId, dispute: earning.auction.fulfillmentDispute },
 			"payout.release: fulfillment dispute exists; skipping",
 		);
 		return;
