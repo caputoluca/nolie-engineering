@@ -1,7 +1,6 @@
 import { client } from "../client.js";
 import { PaymentErrorCode, type PaymentErrorCodeType } from "../errors.js";
 import {
-	computeFeesAndNetAmount,
 	createIdempotencyKey,
 	isInsufficientFundsError,
 	isStripeError,
@@ -23,7 +22,6 @@ export type PayCreatorResult =
 			success: true;
 			transferId: string;
 			netAmount: number;
-			platformFee: number;
 	  }
 	| {
 			success: false;
@@ -36,24 +34,15 @@ export async function payCreator(
 	input: PayCreatorInput,
 ): Promise<PayCreatorResult> {
 	const amountInCents = toCents(input.amount);
-	const { platformFee: feeInCents, netAmount } =
-		computeFeesAndNetAmount(amountInCents);
 
-	// Validate fee doesn't exceed amount (defensive programming)
-	if (feeInCents > amountInCents) {
+	// Validate amount is positive
+	// Note: The amount passed here is already the final netAmount (grossAmount - platformFee - processingFee)
+	// Fee calculation happens in settle.ts when creating CreatorEarning, not here
+	if (amountInCents <= 0) {
 		return {
 			success: false,
 			error: PaymentErrorCode.transfer_failed,
-			message: `Fee (${feeInCents} cents) exceeds amount (${amountInCents} cents)`,
-		};
-	}
-
-	// Validate net amount is non-negative
-	if (netAmount < 0) {
-		return {
-			success: false,
-			error: PaymentErrorCode.transfer_failed,
-			message: `Net amount (${netAmount} cents) is negative`,
+			message: `Amount (${amountInCents} cents) must be positive`,
 		};
 	}
 
@@ -69,7 +58,7 @@ export async function payCreator(
 	try {
 		const transfer = await client.transfers.create(
 			{
-				amount: netAmount,
+				amount: amountInCents,
 				currency: "usd",
 				destination: input.creatorConnectAccountId,
 				metadata: {
@@ -84,8 +73,7 @@ export async function payCreator(
 		return {
 			success: true,
 			transferId: transfer.id,
-			netAmount,
-			platformFee: feeInCents,
+			netAmount: amountInCents,
 		};
 	} catch (err: unknown) {
 		// Handle Stripe errors
@@ -140,14 +128,12 @@ export async function payCreator(
  *    to using `transfer_data` in PaymentIntent (which we avoid per Stripe recommendations).
  *    Reference: https://docs.stripe.com/connect/separate-charges-and-transfers
  *
- * 2. **Fee Calculation**: Calculates application fee as percentage of total amount, then
- *    transfers the net amount (amount - fee) to the creator. This implements the fee-withheld
- *    model where the platform keeps the fee.
- *    Reference: https://docs.stripe.com/connect/payments-fees
+ * 2. **Amount Handling**: The `amount` parameter is already the final netAmount calculated in
+ *    settle.ts (grossAmount - platformFee - processingFee). This function simply transfers
+ *    that amount without recalculating fees. Fee calculation happens when creating CreatorEarning
+ *    records, not during transfer.
  *
- * 3. **Fee Validation**: Defensive checks ensure fee never exceeds amount and net amount
- *    is non-negative. While mathematically impossible with percentage < 100%, this prevents
- *    edge cases from causing invalid transfers.
+ * 3. **Validation**: Validates that the amount is positive before attempting transfer.
  *
  * 4. **Error Handling Strategy**:
  *    - **Retryable errors (THROW)**: Network issues, rate limits, API errors, idempotency errors
