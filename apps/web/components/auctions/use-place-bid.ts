@@ -35,13 +35,8 @@ export function usePlaceBid(
 			});
 		}
 		const res = await placeBid({ amount, auctionId: id });
-		if (res.success) {
-			haptics.success();
-		} else {
-			haptics.error();
-		}
 		return res;
-	}, [amount, id, haptics, isEnded]);
+	}, [amount, id, isEnded]);
 
 	const [state, action] = useAction(baseAction);
 	const [bidPlacedSuccessfully, setBidPlacedSuccessfully] = useState(false);
@@ -52,9 +47,14 @@ export function usePlaceBid(
 			didSubmit &&
 			(state.success || Object.keys(state.errors || {}).length > 0)
 		) {
+			if (state.success) {
+				haptics.success();
+			} else {
+				haptics.error();
+			}
 			setShowOutcome(true);
 		}
-	}, [didSubmit, state]);
+	}, [didSubmit, state, haptics]);
 
 	useEffect(() => {
 		if (showOutcome && state.success) {
