@@ -4,7 +4,6 @@ import { fail } from "@nolie/actions";
 import type { BidCreateSchema } from "@nolie/schemas/auction/bid";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAction } from "@/hooks/action";
-import { useHaptics } from "@/hooks/use-haptics";
 import { placeBid } from "@/lib/actions/bids";
 import { useAuctionData } from "./auction-provider";
 import { useAuctionEnded } from "./use-auction-ended";
@@ -16,7 +15,6 @@ export function usePlaceBid(
 	open: boolean,
 	onOpenChange?: (open: boolean) => void,
 ) {
-	const haptics = useHaptics();
 	const { id } = useAuctionData();
 	const amount = useNextBidAmount();
 	const [showOutcome, setShowOutcome] = useState(false);
@@ -47,14 +45,9 @@ export function usePlaceBid(
 			didSubmit &&
 			(state.success || Object.keys(state.errors || {}).length > 0)
 		) {
-			if (state.success) {
-				haptics.success();
-			} else {
-				haptics.error();
-			}
 			setShowOutcome(true);
 		}
-	}, [didSubmit, state, haptics]);
+	}, [didSubmit, state]);
 
 	useEffect(() => {
 		if (showOutcome && state.success) {
