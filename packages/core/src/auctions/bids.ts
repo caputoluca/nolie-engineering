@@ -10,7 +10,7 @@ export function canBid(auction: Pick<AuctionOut, "status" | "endAt">) {
 }
 
 export function shouldExtendAuction(
-	auction: Pick<AuctionOut, "status" | "endAt" | "bids">,
+	auction: Pick<AuctionOut, "status" | "endAt">,
 ) {
 	const now = Date.now();
 
@@ -53,16 +53,22 @@ export type ValidateBidResult =
 	| { valid: true }
 	| { valid: false; message: string; code: string };
 
+type ValidateBidAuction = Pick<
+	AuctionOut,
+	"status" | "endAt" | "startingBid"
+> & {
+	creatorUserId: string;
+};
+
+export interface ValidateBidInput {
+	amount: number;
+	currentHighest: number | null;
+	userId: string;
+}
+
 export function validateBid(
-	auction: Pick<AuctionOut, "status" | "endAt" | "startingBid" | "bids"> & {
-		creatorUserId: string;
-	},
-	bid: { amount: number; currentHighest: number | null },
-	{
-		userId,
-	}: {
-		userId: string;
-	},
+	auction: ValidateBidAuction,
+	{ userId, ...bid }: ValidateBidInput,
 ): ValidateBidResult {
 	// 1. Cannot bid if auction not active
 	if (!canBid(auction)) {
@@ -106,4 +112,29 @@ export function validateBid(
 	}
 
 	return { valid: true };
+}
+
+interface ValidateProxyBidInput extends ValidateBidInput {
+	proxyMaxAmount: number;
+	proxyBidAmount: number;
+}
+
+export function validateProxyBid(
+	auction: ValidateBidAuction,
+	{ proxyBidAmount, proxyMaxAmount, ...input }: ValidateProxyBidInput,
+): ValidateBidResult {
+	const validation = validateBid(auction, input);
+	if (!validation.valid) {
+		return validation;
+	}
+
+	// 4. Proxy max amount must exceed highest bid
+	if (proxyBidAmount > proxyMaxAmount) {
+		return {
+			valid: false,
+			message: "Proxy amount is too high",
+			code: "PROXY_AMOUNT_TOO_HIGH",
+		};
+	}
+	return validation;
 }
