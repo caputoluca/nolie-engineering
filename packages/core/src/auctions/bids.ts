@@ -1,5 +1,6 @@
 import { type AuctionOut, AuctionStatus } from "@nolie/schemas/auction";
 import { auctionsConfig } from "./config";
+import { auctionRequiresShipping } from "./helpers";
 
 export function canBid(auction: Pick<AuctionOut, "status" | "endAt">) {
 	return (
@@ -121,9 +122,13 @@ interface ValidateProxyBidInput extends ValidateBidInput {
 
 export function validateProxyBid(
 	auction: ValidateBidAuction,
-	{ proxyBidAmount, proxyMaxAmount, ...input }: ValidateProxyBidInput,
+	{
+		proxyBidAmount,
+		proxyMaxAmount,
+		...input
+	}: Omit<ValidateProxyBidInput, "amount">,
 ): ValidateBidResult {
-	const validation = validateBid(auction, input);
+	const validation = validateBid(auction, { ...input, amount: proxyBidAmount });
 	if (!validation.valid) {
 		return validation;
 	}
@@ -137,4 +142,34 @@ export function validateProxyBid(
 		};
 	}
 	return validation;
+}
+
+export interface ValidateUserInput {
+	billing: {
+		defaultPaymentMethodId: string | null;
+	} | null;
+	defaultShippingAddressId: string | null;
+}
+
+export function validateUserCanBid(
+	user: ValidateUserInput,
+	auction: Pick<AuctionOut, "itemType">,
+) {
+	if (!user.billing?.defaultPaymentMethodId) {
+		return {
+			valid: false,
+			message: "User has not specified a payment method",
+			code: "REQUIRES_PAYMENT_METHOD",
+		};
+	}
+	if (auctionRequiresShipping(auction)) {
+		if (!user.defaultShippingAddressId) {
+			return {
+				valid: false,
+				message: "User has not specified a shipping address",
+				code: "REQUIRES_SHIPPING_ADDRESS",
+			};
+		}
+	}
+	return { valid: true };
 }

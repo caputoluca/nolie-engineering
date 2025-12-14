@@ -1,8 +1,4 @@
-import {
-	auctionRequiresShipping,
-	shouldExtendAuction,
-	validateBid,
-} from "@nolie/core/auctions";
+import { shouldExtendAuction } from "@nolie/core/auctions";
 import type { PrismaClient } from "@nolie/db";
 import { errors } from "@nolie/errors/http";
 import type { QueueOf } from "@nolie/queues";
@@ -10,107 +6,79 @@ import type { RestClient } from "@nolie/realtime/server";
 import type { BidCreate } from "@nolie/schemas/auction/bid";
 import { logger } from "../../../logger.js";
 import { bidSelect } from "../select.js";
+import type { BidRecord } from "../transform.js";
 import { toBidEvent } from "../transform.js";
-import { getAuctionForBid } from "./utils.js";
-import { validateUser } from "./validate.js";
+import { extendAuction, getAuctionForBid, getUserForBid } from "./utils.js";
+import { validateBidOrThrow, validateUserCanBidOrThrow } from "./validate.js";
 
-async function extendAuction(
+/**
+ * Core function that places a bid (manual or proxy) with all common logic.
+ *
+ * This function handles the complete bid placement flow:
+ * 1. Re-reads auction state within a transaction (handles race conditions)
+ * 2. Validates auction is active and user can bid
+ * 3. Validates bid amount meets requirements
+ * 4. Handles auction extension if bid is placed near end time
+ * 5. Creates the bid record with `isProxy` flag
+ * 6. Publishes realtime events and triggers proxy processing
+ *
+ * **Proxy Processing Trigger**: After a successful bid, this function asynchronously
+ * triggers `processProxies` with `excludeUserId` set to the bidder. This ensures:
+ * - Other proxies can compete immediately
+ * - The bidder's own proxy won't reprocess (preventing loops)
+ * - Proxy processing happens in the background without blocking the API response
+ *
+ * @param db - Database client
+ * @param realtime - Realtime client for publishing events
+ * @param q - Queue client for auction operations
+ * @param params - Parameters including auctionId, userId, amount, and isProxy flag
+ * @returns The created bid record
+ * @throws {BadRequestError} If auction is not active or bid is invalid
+ */
+export async function placeBidCore(
 	db: PrismaClient,
 	realtime: RestClient,
 	q: QueueOf<"auction">,
-	extendedEvent: { auctionId: string },
-) {
-	const { auctionId } = extendedEvent;
-	// Re-read endAt from DB to get committed value (handles race conditions)
-	const auction = await db.auction.findUnique({
-		where: { id: auctionId },
-		select: { endAt: true },
-	});
-
-	if (!auction) {
-		logger.error(
-			{ auctionId },
-			"Auction not found after transaction (unexpected)",
-		);
-		return;
-	} else {
-		const newEndAt = auction.endAt;
-		// Use Promise.allSettled so both operations complete independently
-		const [realtimeResult, rescheduleResult] = await Promise.allSettled([
-			realtime.auction.extensions.publish({
-				auctionId,
-				newEndAt: newEndAt.toISOString(),
-			}),
-			q.extend({ auctionId, newEndAt }, logger),
-		]);
-
-		// Log any failures but don't throw (bid already succeeded)
-		if (realtimeResult.status === "rejected") {
-			logger.error(
-				{ auctionId, error: realtimeResult.reason },
-				"Failed to publish extension event (non-blocking)",
-			);
-		}
-
-		if (rescheduleResult.status === "rejected") {
-			logger.error(
-				{ auctionId, error: rescheduleResult.reason },
-				"Failed to reschedule close job (non-blocking)",
-			);
-		}
-	}
-}
-
-export async function placeBid(
-	db: PrismaClient,
-	data: BidCreate,
-	realtime: RestClient,
-	q: QueueOf<"auction">,
-	{ userId, auctionId }: { userId: string; auctionId: string },
-) {
+	{
+		auctionId,
+		userId,
+		amount,
+		isProxy,
+	}: {
+		auctionId: string;
+		userId: string;
+		amount: number;
+		isProxy: boolean;
+	},
+): Promise<BidRecord> {
 	let extendedEvent: { auctionId: string; newEndAt: string } | null = null;
 
-	const result = await db.$transaction(async (tx) => {
+	const bid = await db.$transaction(async (tx) => {
+		// Re-read auction state (handles race conditions)
 		const [auction, user] = await Promise.all([
 			getAuctionForBid(tx, auctionId),
-			tx.user.findUnique({
-				where: { id: userId },
-				select: {
-					billing: { select: { id: true, defaultPaymentMethodId: true } },
-					defaultShippingAddressId: true,
-				},
-			}),
+			getUserForBid(tx, userId),
 		]);
 
-		if (!auction) {
-			throw errors.notFound("Auction not found", {
-				code: "AUCTION_NOT_FOUND",
+		// Validate auction is still active (for proxy bids, manual bids validated elsewhere)
+		if (isProxy && auction.status !== "active") {
+			throw errors.badRequest("Auction is not active", {
+				code: "AUCTION_NOT_ACTIVE",
 			});
 		}
 
-		validateUser(user, { requiresShipping: auctionRequiresShipping(auction) });
+		// Validate user can still bid
+		validateUserCanBidOrThrow(user, { itemType: auction.itemType });
 
-		// 1. Validate bid
-		const validation = validateBid(
-			{
-				...auction,
-				creatorUserId: auction.creator.userId,
-				startingBid: auction.startingBid.toNumber(),
-				endAt: auction.endAt,
-			},
-			{
-				amount: data.amount,
-				currentHighest: auction.currentHighestBid,
-				userId,
-			},
-		);
-		if (!validation.valid) {
-			throw errors.badRequest(validation.message, { code: validation.code });
-		}
+		// Validate bid amount (reuse existing validation)
+		validateBidOrThrow({
+			auction,
+			userId,
+			amount,
+		});
 
-		// 2. Soft-close extension
+		// Handle auction extension (reuse existing logic)
 		const { shouldExtend, extendSeconds } = shouldExtendAuction(auction);
-
 		if (shouldExtend) {
 			const endTime = new Date(auction.endAt).getTime();
 			const newEndAt = new Date(endTime + extendSeconds * 1000);
@@ -120,33 +88,62 @@ export async function placeBid(
 				data: { endAt: newEndAt },
 			});
 
-			// store event to emit after transaction
 			extendedEvent = {
 				auctionId: auction.id,
 				newEndAt: new Date(newEndAt).toISOString(),
 			};
 		}
 
-		// 3. Create bid
+		// Create bid record with isProxy flag
 		return await tx.bid.create({
 			data: {
-				...data,
 				auctionId,
 				userId,
+				amount,
+				isProxy,
 			},
 			select: bidSelect,
 		});
 	});
 
-	// --- AFTER TRANSACTION ---
-
-	// 4A. If extended, publish extend event
+	// Handle auction extension event (after transaction)
 	if (extendedEvent) {
 		await extendAuction(db, realtime, q, extendedEvent);
 	}
 
-	// 4B. Always publish bid event
-	await realtime.auction.bids.publish(toBidEvent(result));
+	const [realtimeResult, processProxiesResult] = await Promise.allSettled([
+		realtime.auction.bids.publish(toBidEvent(bid)),
+		q.processProxies({ auctionId, excludeUserId: userId }),
+	]);
 
-	return result;
+	if (realtimeResult.status === "rejected") {
+		logger.error(
+			{ auctionId, userId, error: realtimeResult.reason },
+			"Failed to publish bid event (non-blocking)",
+		);
+	}
+
+	if (processProxiesResult.status === "rejected") {
+		logger.error(
+			{ auctionId, userId, error: processProxiesResult.reason },
+			"Failed to process proxies (non-blocking)",
+		);
+	}
+
+	return bid;
+}
+
+export async function placeBid(
+	db: PrismaClient,
+	data: BidCreate,
+	realtime: RestClient,
+	q: QueueOf<"auction">,
+	{ userId, auctionId }: { userId: string; auctionId: string },
+) {
+	return placeBidCore(db, realtime, q, {
+		auctionId,
+		userId,
+		amount: data.amount,
+		isProxy: false,
+	});
 }
