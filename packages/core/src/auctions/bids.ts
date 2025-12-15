@@ -65,6 +65,7 @@ export interface ValidateBidInput {
 	amount: number;
 	currentHighest: number | null;
 	userId: string;
+	allowEqualToCurrentBid: boolean;
 }
 
 export function validateBid(
@@ -96,6 +97,9 @@ export function validateBid(
 	});
 
 	if (bid.amount < nextBidAmount) {
+		if (bid.allowEqualToCurrentBid && bid.amount === bid.currentHighest) {
+			return { valid: true };
+		}
 		return {
 			valid: false,
 			message: "Your bid is too low",
@@ -126,9 +130,14 @@ export function validateProxyBid(
 		proxyBidAmount,
 		proxyMaxAmount,
 		...input
-	}: Omit<ValidateProxyBidInput, "amount">,
+	}: Omit<ValidateProxyBidInput, "amount" | "allowEqualToCurrentBid">,
 ): ValidateBidResult {
-	const validation = validateBid(auction, { ...input, amount: proxyBidAmount });
+	// for tie breaking proxies, we allow the bid to be equal to the current bid
+	const validation = validateBid(auction, {
+		...input,
+		amount: proxyBidAmount,
+		allowEqualToCurrentBid: true,
+	});
 	if (!validation.valid) {
 		return validation;
 	}

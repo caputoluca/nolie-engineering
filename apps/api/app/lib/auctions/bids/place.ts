@@ -8,7 +8,12 @@ import { logger } from "../../../logger.js";
 import { bidSelect } from "../select.js";
 import type { BidRecord } from "../transform.js";
 import { toBidEvent } from "../transform.js";
-import { extendAuction, getAuctionForBid, getUserForBid } from "./utils.js";
+import {
+	extendAuction,
+	getAuctionForBid,
+	getUserForBid,
+	triggerProxyProcessing,
+} from "./utils.js";
 import { validateBidOrThrow, validateUserCanBidOrThrow } from "./validate.js";
 
 /**
@@ -44,11 +49,13 @@ export async function placeBidCore(
 		userId,
 		amount,
 		isProxy,
+		shouldExcludeUserId = true,
 	}: {
 		auctionId: string;
 		userId: string;
 		amount: number;
 		isProxy: boolean;
+		shouldExcludeUserId?: boolean;
 	},
 ): Promise<BidRecord> {
 	let extendedEvent: { auctionId: string; newEndAt: string } | null = null;
@@ -113,7 +120,13 @@ export async function placeBidCore(
 
 	const [realtimeResult, processProxiesResult] = await Promise.allSettled([
 		realtime.auction.bids.publish(toBidEvent(bid)),
-		q.processProxies({ auctionId, excludeUserId: userId }),
+		triggerProxyProcessing(q, {
+			// Always exclude the userId who just bid to prevent reprocessing their proxy in the same cycle
+			// unless their bid comes from proxy creation,
+			// since their proxy will have to be processed immediately in the worker if they are losing
+			auctionId,
+			excludeUserId: shouldExcludeUserId ? userId : undefined,
+		}),
 	]);
 
 	if (realtimeResult.status === "rejected") {
@@ -145,5 +158,6 @@ export async function placeBid(
 		userId,
 		amount: data.amount,
 		isProxy: false,
+		shouldExcludeUserId: true,
 	});
 }
