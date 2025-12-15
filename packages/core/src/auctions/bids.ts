@@ -65,7 +65,7 @@ export interface ValidateBidInput {
 	amount: number;
 	currentHighest: number | null;
 	userId: string;
-	allowEqualToCurrentBid: boolean;
+	allowEqualToCurrentBid?: boolean;
 }
 
 export function validateBid(
