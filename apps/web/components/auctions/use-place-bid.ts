@@ -38,5 +38,7 @@ export function usePlaceBid(
 			"Something went wrong when placing your bid. Please try again",
 		open,
 		onOpenChange,
+		auctionId: id,
+		bidAmount: amount,
 	});
 }
