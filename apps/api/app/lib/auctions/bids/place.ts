@@ -71,9 +71,8 @@ export async function placeBidInTransaction(
 	}
 
 	// Create bid record with isProxy flag
-	// Note: For proxy bids, we use priorityAt (when proxy was created) as createdAt
-	// for tie-breaking correctness. This ensures consistent tie-breaking logic
-	// whether the bid is placed synchronously (API) or asynchronously (worker).
+	// createdAt = actual bid placement time (always)
+	// priorityAt = proxy creation time for proxy bids (for tie-breaking), same as createdAt for manual bids
 	return {
 		bid: await tx.bid.create({
 			data: {
@@ -81,7 +80,7 @@ export async function placeBidInTransaction(
 				userId,
 				amount,
 				isProxy,
-				...(priorityAt ? { createdAt: priorityAt } : {}),
+				...(priorityAt ? { priorityAt } : {}),
 			},
 			select: bidSelect,
 		}),
