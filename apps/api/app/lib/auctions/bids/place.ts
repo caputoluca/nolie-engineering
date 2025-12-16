@@ -50,12 +50,14 @@ export async function placeBidCore(
 		amount,
 		isProxy,
 		shouldExcludeUserId = true,
+		priorityAt,
 	}: {
 		auctionId: string;
 		userId: string;
 		amount: number;
 		isProxy: boolean;
 		shouldExcludeUserId?: boolean;
+		priorityAt?: Date;
 	},
 ): Promise<BidRecord> {
 	let extendedEvent: { auctionId: string; newEndAt: string } | null = null;
@@ -102,12 +104,16 @@ export async function placeBidCore(
 		}
 
 		// Create bid record with isProxy flag
+		// Note: For proxy bids, we use priorityAt (when proxy was created) as createdAt
+		// for tie-breaking correctness. This ensures consistent tie-breaking logic
+		// whether the bid is placed synchronously (API) or asynchronously (worker).
 		return await tx.bid.create({
 			data: {
 				auctionId,
 				userId,
 				amount,
 				isProxy,
+				...(priorityAt ? { createdAt: priorityAt } : {}),
 			},
 			select: bidSelect,
 		});
