@@ -1,7 +1,7 @@
 import { shouldExtendAuction } from "@nolie/core/auctions";
 import type { DbClient, PrismaClient } from "@nolie/db";
-import { withTxRetry } from "@nolie/db";
-import { errors } from "@nolie/errors/http";
+import { isPrismaTransactionAPIError } from "@nolie/db";
+import { errors, HttpError } from "@nolie/errors/http";
 import type { QueueOf } from "@nolie/queues";
 import type { RestClient } from "@nolie/realtime/server";
 import type { BidCreate } from "@nolie/schemas/auction/bid";
@@ -173,35 +173,38 @@ export async function placeBidCore(
 	q: QueueOf<"auction">,
 	params: PlaceBidCoreParams,
 ): Promise<BidRecord> {
-	const { bid, extendedEvent } = await withTxRetry(
-		() => apiTx(db, async (tx) => placeBidInTransaction(tx, params)),
-		{
-			retries: 5, // Increased retries to handle potential conflicts without serialization
-			baseDelayMs: 50, // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
-			onRetry: (attempt, delayMs) => {
-				logger.warn(
-					{
-						auctionId: params.auctionId,
-						userId: params.userId,
-						attempt,
-						delayMs,
-						errorCode: "P2028",
-					},
-					"Transaction retry due to P2028 (transaction timeout)",
-				);
-			},
-		},
-	);
+	try {
+		const { bid, extendedEvent } = await apiTx(db, async (tx) =>
+			placeBidInTransaction(tx, params),
+		);
+		await afterBidCreate(db, realtime, q, {
+			auctionId: params.auctionId,
+			userId: params.userId,
+			shouldExcludeUserId: params.shouldExcludeUserId ?? true,
+			extendedEvent,
+			bid,
+		});
 
-	await afterBidCreate(db, realtime, q, {
-		auctionId: params.auctionId,
-		userId: params.userId,
-		shouldExcludeUserId: params.shouldExcludeUserId ?? true,
-		extendedEvent,
-		bid,
-	});
-
-	return bid;
+		return bid;
+	} catch (error) {
+		if (isPrismaTransactionAPIError(error)) {
+			logger.info(
+				{
+					auctionId: params.auctionId,
+					userId: params.userId,
+				},
+				"Unable to place bid due to transaction conflict.",
+			);
+			throw new HttpError(
+				"Currently processing another bid. Please try again later.",
+				"CURRENTLY_PROCESSING_BID",
+				{
+					statusCode: 409,
+				},
+			);
+		}
+		throw error;
+	}
 }
 
 export async function placeBid(
