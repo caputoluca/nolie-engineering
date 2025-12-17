@@ -176,7 +176,7 @@ export async function placeBidCore(
 	const { bid, extendedEvent } = await withTxRetry(
 		() => apiTx(db, async (tx) => placeBidInTransaction(tx, params)),
 		{
-			retries: 5, // Increase from default 3 for high concurrency
+			retries: 5, // Increased retries to handle potential conflicts without serialization
 			baseDelayMs: 50, // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
 			onRetry: (attempt, delayMs) => {
 				logger.warn(
