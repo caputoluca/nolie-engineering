@@ -1,10 +1,12 @@
 import { shouldExtendAuction } from "@nolie/core/auctions";
 import type { DbClient, PrismaClient } from "@nolie/db";
+import { withTxRetry } from "@nolie/db";
 import { errors } from "@nolie/errors/http";
 import type { QueueOf } from "@nolie/queues";
 import type { RestClient } from "@nolie/realtime/server";
 import type { BidCreate } from "@nolie/schemas/auction/bid";
 import { logger } from "../../../logger.js";
+import { apiTx } from "../../db/tx.js";
 import { bidSelect } from "../select.js";
 import type { BidRecord } from "../transform.js";
 import { toBidEvent } from "../transform.js";
@@ -171,9 +173,25 @@ export async function placeBidCore(
 	q: QueueOf<"auction">,
 	params: PlaceBidCoreParams,
 ): Promise<BidRecord> {
-	const { bid, extendedEvent } = await db.$transaction(async (tx) => {
-		return await placeBidInTransaction(tx, params);
-	});
+	const { bid, extendedEvent } = await withTxRetry(
+		() => apiTx(db, async (tx) => placeBidInTransaction(tx, params)),
+		{
+			retries: 5, // Increase from default 3 for high concurrency
+			baseDelayMs: 50, // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
+			onRetry: (attempt, delayMs) => {
+				logger.warn(
+					{
+						auctionId: params.auctionId,
+						userId: params.userId,
+						attempt,
+						delayMs,
+						errorCode: "P2028",
+					},
+					"Transaction retry due to P2028 (transaction timeout)",
+				);
+			},
+		},
+	);
 
 	await afterBidCreate(db, realtime, q, {
 		auctionId: params.auctionId,
