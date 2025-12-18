@@ -1,3 +1,4 @@
+import type { AuctionState, CacheOf } from "@nolie/cache";
 import { shouldExtendAuction } from "@nolie/core/auctions";
 import type { DbClient, PrismaClient } from "@nolie/db";
 import { isPrismaTransactionAPIError } from "@nolie/db";
@@ -129,18 +130,21 @@ export async function afterBidCreate(
 	db: PrismaClient,
 	realtime: RestClient,
 	q: QueueOf<"auction">,
+	cache: CacheOf<"auctions"> | undefined,
 	{
 		auctionId,
 		userId,
 		shouldExcludeUserId,
 		extendedEvent,
 		bid,
+		cachedState,
 	}: {
 		auctionId: string;
 		userId: string;
 		shouldExcludeUserId: boolean;
 		extendedEvent: { auctionId: string; newEndAt: string } | null;
 		bid: BidRecord;
+		cachedState?: Omit<AuctionState, "auctionId" | "currentHighestBidAmount">;
 	},
 ): Promise<
 	// INSTRUMENTATION START
@@ -160,16 +164,30 @@ export async function afterBidCreate(
 	const realtimeStart = startTimer();
 	// INSTRUMENTATION END
 
-	const [realtimeResult, processProxiesResult] = await Promise.allSettled([
-		realtime.auction.bids.publish(toBidEvent(bid)),
-		triggerProxyProcessing(q, {
-			// Always exclude the userId who just bid to prevent reprocessing their proxy in the same cycle
-			// unless their bid comes from proxy creation,
-			// since their proxy will have to be processed immediately in the worker if they are losing
-			auctionId,
-			excludeUserId: shouldExcludeUserId ? userId : undefined,
-		}),
-	]);
+	const [realtimeResult, processProxiesResult, cacheUpdateResult] =
+		await Promise.allSettled([
+			realtime.auction.bids.publish(toBidEvent(bid)),
+			triggerProxyProcessing(q, {
+				// Always exclude the userId who just bid to prevent reprocessing their proxy in the same cycle
+				// unless their bid comes from proxy creation,
+				// since their proxy will have to be processed immediately in the worker if they are losing
+				auctionId,
+				excludeUserId: shouldExcludeUserId ? userId : undefined,
+			}),
+			// Update cache after successful bid (non-blocking)
+			cache && cachedState
+				? cache.update(auctionId, {
+						auctionId,
+						currentHighestBidAmount: bid.amount.toNumber(),
+						version: cachedState.version + 1,
+						startingBidAmount: cachedState.startingBidAmount,
+						creatorUserId: cachedState.creatorUserId,
+						itemType: cachedState.itemType,
+						status: cachedState.status,
+						endAt: extendedEvent?.newEndAt ?? cachedState.endAt,
+					})
+				: Promise.resolve(),
+		]);
 
 	// INSTRUMENTATION START
 	const realtimeMs = elapsedMs(realtimeStart);
@@ -189,6 +207,23 @@ export async function afterBidCreate(
 			{ auctionId, userId, error: processProxiesResult.reason },
 			"Failed to process proxies (non-blocking)",
 		);
+	}
+
+	if (cacheUpdateResult.status === "rejected") {
+		logger.error(
+			{ auctionId, userId, error: cacheUpdateResult.reason },
+			"Failed to update cache (non-blocking), invalidating to prevent stale data",
+		);
+		// Invalidate cache on update failure to prevent serving stale data
+		// Next request will load fresh data from DB
+		if (cache) {
+			await cache.invalidate(auctionId).catch((error) => {
+				logger.error(
+					{ auctionId, userId, error },
+					"Failed to invalidate cache after update failure (non-blocking)",
+				);
+			});
+		}
 	}
 
 	// INSTRUMENTATION START
@@ -242,6 +277,8 @@ export async function placeBidCore(
 	q: QueueOf<"auction">,
 	params: PlaceBidCoreParams,
 	timingContext?: BidTimingContext,
+	cache?: CacheOf<"auctions">,
+	cachedState?: Omit<AuctionState, "auctionId" | "currentHighestBidAmount">,
 ): Promise<BidRecord> {
 	// INSTRUMENTATION START
 	const preDbStart = startTimer();
@@ -266,12 +303,13 @@ export async function placeBidCore(
 		decrementActiveTransactions();
 		// INSTRUMENTATION END
 
-		const postDbTiming = await afterBidCreate(db, realtime, q, {
+		const postDbTiming = await afterBidCreate(db, realtime, q, cache, {
 			auctionId: params.auctionId,
 			userId: params.userId,
 			shouldExcludeUserId: params.shouldExcludeUserId ?? true,
 			extendedEvent,
 			bid,
+			cachedState,
 		});
 
 		// INSTRUMENTATION START
@@ -328,17 +366,88 @@ export async function placeBidCore(
 	}
 }
 
+async function validateBidFromCache(
+	cache: CacheOf<"auctions">,
+	db: PrismaClient,
+	{
+		auctionId,
+		userId,
+		amount,
+	}: {
+		auctionId: string;
+		userId: string;
+		amount: number;
+	},
+) {
+	const auction = await cache.get(auctionId, {
+		load: async () => {
+			const auction = await getAuctionForBid(db, auctionId);
+			return {
+				auctionId: auction.id,
+				currentHighestBidAmount: auction.currentHighestBid,
+				version: 1,
+				startingBidAmount: auction.startingBid.toNumber(),
+				creatorUserId: auction.creator.userId,
+				itemType: auction.itemType,
+				status: auction.status,
+				endAt: auction.endAt,
+			};
+		},
+	});
+
+	if (!auction) {
+		throw errors.notFound("Auction not found", {
+			code: "AUCTION_NOT_FOUND",
+		});
+	}
+
+	validateBidOrThrow({
+		auction: {
+			endAt: auction.endAt,
+			status: auction.status,
+			creator: { userId: auction.creatorUserId },
+			startingBid: auction.startingBidAmount,
+			currentHighestBid: auction.currentHighestBidAmount,
+		},
+		userId,
+		amount,
+	});
+
+	return auction;
+}
+
 export async function placeBid(
 	db: PrismaClient,
 	data: BidCreate,
 	realtime: RestClient,
 	q: QueueOf<"auction">,
+	cache: CacheOf<"auctions">,
 	{ userId, auctionId }: { userId: string; auctionId: string },
 	// INSTRUMENTATION START
 	timingContext?: BidTimingContext,
 	// INSTRUMENTATION END
-) {
-	return placeBidCore(
+): Promise<BidRecord> {
+	// INSTRUMENTATION START
+	const preDbStart = startTimer();
+	let cached: Awaited<ReturnType<typeof validateBidFromCache>>;
+	try {
+		// Fast path: validate using cache (fail fast for invalid bids)
+		cached = await validateBidFromCache(cache, db, {
+			auctionId,
+			userId,
+			amount: data.amount,
+		});
+	} finally {
+		// Always capture preDbMs timing, even if validation throws
+		if (timingContext) {
+			timingContext.preDbMs = elapsedMs(preDbStart);
+		}
+	}
+	// INSTRUMENTATION END
+
+	// Place bid (re-validates inside transaction using DB)
+	// placeBidCore handles realtime events, proxy processing, and cache updates
+	const bid = await placeBidCore(
 		db,
 		realtime,
 		q,
@@ -352,5 +461,16 @@ export async function placeBid(
 		// INSTRUMENTATION START
 		timingContext,
 		// INSTRUMENTATION END
+		cache,
+		{
+			version: cached.version,
+			startingBidAmount: cached.startingBidAmount,
+			endAt: cached.endAt,
+			creatorUserId: cached.creatorUserId,
+			itemType: cached.itemType,
+			status: cached.status,
+		},
 	);
+
+	return bid;
 }

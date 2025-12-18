@@ -5,6 +5,7 @@ import fastifyRawBody from "fastify-raw-body";
 import hyperid from "hyperid";
 import { logger } from "./logger.js";
 import { authPlugin } from "./plugins/auth.js";
+import { cachePlugin } from "./plugins/cache.js";
 import { envPlugin } from "./plugins/config.js";
 import { prismaPlugin } from "./plugins/db.js";
 import { errorsPlugin } from "./plugins/errors.js";
@@ -66,6 +67,9 @@ export async function buildApp() {
 
 	fastify.log.debug("Initializing queues");
 	await fastify.register(queuesPlugin); // connect to queues
+
+	fastify.log.debug("Initializing cache");
+	await fastify.register(cachePlugin); // connect to cache
 
 	fastify.log.debug("Registering error handling");
 	await fastify.register(errorsPlugin); // add errors to fastify instance
