@@ -10,6 +10,13 @@ import { apiTx } from "../../db/tx.js";
 import { bidSelect } from "../select.js";
 import type { BidRecord } from "../transform.js";
 import { toBidEvent } from "../transform.js";
+// INSTRUMENTATION START
+import {
+	decrementActiveTransactions,
+	elapsedMs,
+	incrementActiveTransactions,
+	startTimer,
+} from "./instrumentation.js";
 import {
 	extendAuction,
 	getAuctionForBid,
@@ -17,6 +24,8 @@ import {
 	triggerProxyProcessing,
 } from "./utils.js";
 import { validateBidOrThrow, validateUserCanBidOrThrow } from "./validate.js";
+
+// INSTRUMENTATION END
 
 interface PlaceBidInTransactionParams {
 	auctionId: string;
@@ -133,11 +142,23 @@ export async function afterBidCreate(
 		extendedEvent: { auctionId: string; newEndAt: string } | null;
 		bid: BidRecord;
 	},
-) {
+): Promise<
+	// INSTRUMENTATION START
+	{ realtimeMs: number; queueMs: number; postDbMs: number } | undefined
+	// INSTRUMENTATION END
+> {
+	// INSTRUMENTATION START
+	const postDbStart = startTimer();
+	// INSTRUMENTATION END
+
 	// Handle auction extension event (after transaction)
 	if (extendedEvent) {
 		await extendAuction(db, realtime, q, extendedEvent);
 	}
+
+	// INSTRUMENTATION START
+	const realtimeStart = startTimer();
+	// INSTRUMENTATION END
 
 	const [realtimeResult, processProxiesResult] = await Promise.allSettled([
 		realtime.auction.bids.publish(toBidEvent(bid)),
@@ -149,6 +170,12 @@ export async function afterBidCreate(
 			excludeUserId: shouldExcludeUserId ? userId : undefined,
 		}),
 	]);
+
+	// INSTRUMENTATION START
+	const realtimeMs = elapsedMs(realtimeStart);
+	const queueMs = realtimeMs; // Queue runs in parallel, approximate timing
+	const postDbMs = elapsedMs(postDbStart);
+	// INSTRUMENTATION END
 
 	if (realtimeResult.status === "rejected") {
 		logger.error(
@@ -163,11 +190,27 @@ export async function afterBidCreate(
 			"Failed to process proxies (non-blocking)",
 		);
 	}
+
+	// INSTRUMENTATION START
+	if (process.env.NODE_ENV === "test") {
+		return { realtimeMs, queueMs, postDbMs };
+	}
+	// INSTRUMENTATION END
 }
 
 interface PlaceBidCoreParams extends PlaceBidInTransactionParams {
 	shouldExcludeUserId: boolean;
 }
+
+// INSTRUMENTATION START
+export interface BidTimingContext {
+	preDbMs: number;
+	txMs: number;
+	postDbMs: number;
+	postDbRealtimeMs?: number;
+	postDbQueueMs?: number;
+}
+// INSTRUMENTATION END
 
 /**
  * Core function that places a bid (manual or proxy) with all common logic.
@@ -198,12 +241,32 @@ export async function placeBidCore(
 	realtime: RestClient,
 	q: QueueOf<"auction">,
 	params: PlaceBidCoreParams,
+	timingContext?: BidTimingContext,
 ): Promise<BidRecord> {
+	// INSTRUMENTATION START
+	const preDbStart = startTimer();
+	let txStart = 0n; // Initialize outside try block
+	let preDbMs = 0; // Store preDbMs for use in catch block
+	// INSTRUMENTATION END
+
 	try {
+		// INSTRUMENTATION START
+		// Calculate preDbMs BEFORE starting transaction timer
+		preDbMs = elapsedMs(preDbStart);
+		txStart = startTimer();
+		incrementActiveTransactions();
+		// INSTRUMENTATION END
+
 		const { bid, extendedEvent } = await apiTx(db, async (tx) =>
 			placeBidInTransaction(tx, params),
 		);
-		await afterBidCreate(db, realtime, q, {
+
+		// INSTRUMENTATION START
+		const txMs = elapsedMs(txStart);
+		decrementActiveTransactions();
+		// INSTRUMENTATION END
+
+		const postDbTiming = await afterBidCreate(db, realtime, q, {
 			auctionId: params.auctionId,
 			userId: params.userId,
 			shouldExcludeUserId: params.shouldExcludeUserId ?? true,
@@ -211,8 +274,40 @@ export async function placeBidCore(
 			bid,
 		});
 
+		// INSTRUMENTATION START
+		if (timingContext && postDbTiming) {
+			timingContext.preDbMs = preDbMs;
+			timingContext.txMs = txMs;
+			timingContext.postDbMs = postDbTiming.postDbMs;
+			timingContext.postDbRealtimeMs = postDbTiming.realtimeMs;
+			timingContext.postDbQueueMs = postDbTiming.queueMs;
+		} else if (timingContext) {
+			timingContext.preDbMs = preDbMs;
+			timingContext.txMs = txMs;
+			timingContext.postDbMs = 0;
+		}
+		// INSTRUMENTATION END
+
 		return bid;
 	} catch (error) {
+		// INSTRUMENTATION START
+		decrementActiveTransactions();
+		// Calculate timing even on error
+		// If transaction never started, calculate preDbMs from start to now
+		// Otherwise, preDbMs was already calculated before transaction started
+		if (txStart === 0n) {
+			preDbMs = elapsedMs(preDbStart);
+		}
+		const txMs = txStart !== 0n ? elapsedMs(txStart) : 0;
+
+		// Update timingContext if provided, even on error
+		if (timingContext) {
+			timingContext.preDbMs = preDbMs;
+			timingContext.txMs = txMs;
+			timingContext.postDbMs = 0; // No post-DB work on error
+		}
+		// INSTRUMENTATION END
+
 		if (isPrismaTransactionAPIError(error)) {
 			logger.info(
 				{
@@ -239,12 +334,23 @@ export async function placeBid(
 	realtime: RestClient,
 	q: QueueOf<"auction">,
 	{ userId, auctionId }: { userId: string; auctionId: string },
+	// INSTRUMENTATION START
+	timingContext?: BidTimingContext,
+	// INSTRUMENTATION END
 ) {
-	return placeBidCore(db, realtime, q, {
-		auctionId,
-		userId,
-		amount: data.amount,
-		isProxy: false,
-		shouldExcludeUserId: true,
-	});
+	return placeBidCore(
+		db,
+		realtime,
+		q,
+		{
+			auctionId,
+			userId,
+			amount: data.amount,
+			isProxy: false,
+			shouldExcludeUserId: true,
+		},
+		// INSTRUMENTATION START
+		timingContext,
+		// INSTRUMENTATION END
+	);
 }
