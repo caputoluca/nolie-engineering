@@ -61,15 +61,41 @@ export async function placeBidInTransaction(
 		const endTime = new Date(auction.endAt).getTime();
 		const newEndAt = new Date(endTime + extendSeconds * 1000);
 
-		await tx.auction.update({
-			where: { id: auction.id },
+		logger.info(
+			{
+				auctionId: auction.id,
+				extendSeconds,
+				newEndAt,
+				originalEndAt: auction.endAt,
+			},
+			"extending auction",
+		);
+		// Use optimistic locking: only update if endAt hasn't changed since we read it
+		// This prevents multiple concurrent transactions from extending multiple times
+		const updated = await tx.auction.updateMany({
+			where: {
+				id: auction.id,
+				endAt: auction.endAt,
+			},
 			data: { endAt: newEndAt },
 		});
 
-		extendedEvent = {
-			auctionId: auction.id,
-			newEndAt: new Date(newEndAt).toISOString(),
-		};
+		// Only create extendedEvent if we actually updated the row
+		// If updated.count === 0, another transaction already extended it, so we don't need to publish
+		// This prevents duplicate realtime events from being published
+		if (updated.count > 0) {
+			logger.info(
+				{
+					auctionId: auction.id,
+					newEndAt,
+				},
+				"extended auction",
+			);
+			extendedEvent = {
+				auctionId: auction.id,
+				newEndAt: new Date(newEndAt).toISOString(),
+			};
+		}
 	}
 
 	// Create bid record with isProxy flag
