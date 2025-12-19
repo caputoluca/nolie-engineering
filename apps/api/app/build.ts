@@ -9,6 +9,7 @@ import { cachePlugin } from "./plugins/cache.js";
 import { envPlugin } from "./plugins/config.js";
 import { prismaPlugin } from "./plugins/db.js";
 import { errorsPlugin } from "./plugins/errors.js";
+import { inboxPlugin } from "./plugins/inbox.js";
 import { paymentsPlugin } from "./plugins/payments.js";
 import { protectPlugin } from "./plugins/protect.js";
 import { queuesPlugin } from "./plugins/queues.js";
@@ -70,6 +71,9 @@ export async function buildApp() {
 
 	fastify.log.debug("Initializing cache");
 	await fastify.register(cachePlugin); // connect to cache
+
+	fastify.log.debug("Initializing inbox");
+	await fastify.register(inboxPlugin); // connect to inbox
 
 	fastify.log.debug("Registering error handling");
 	await fastify.register(errorsPlugin); // add errors to fastify instance

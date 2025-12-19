@@ -3,6 +3,7 @@ import { shouldExtendAuction } from "@nolie/core/auctions";
 import type { DbClient, PrismaClient } from "@nolie/db";
 import { isPrismaTransactionAPIError } from "@nolie/db";
 import { errors, HttpError } from "@nolie/errors/http";
+import type { InboxOf } from "@nolie/inbox";
 import type { QueueOf } from "@nolie/queues";
 import type { RestClient } from "@nolie/realtime/server";
 import type { BidCreate } from "@nolie/schemas/auction/bid";
@@ -480,19 +481,19 @@ export async function placeBid(
 	q: QueueOf<"bids">,
 	cache: CacheOf<"auctions">,
 	db: PrismaClient,
+	inbox: InboxOf<"bids">,
 	data: { userId: string; auctionId: string; amount: number },
 ) {
 	await validateBidFromCache(cache, db, data);
 	const requestId = uuidv7();
+	await inbox.pushAndMarkDirty(data.auctionId, {
+		userId: data.userId,
+		auctionId: data.auctionId,
+		amount: data.amount,
+		requestId,
+	});
 
-	await q.place(
-		{
-			...data,
-			requestId,
-			timestamp: Date.now(),
-		},
-		{ removeOnComplete: true },
-	);
+	await q.drain({ auctionId: data.auctionId }, { removeOnComplete: true });
 
 	return {
 		status: "processing",

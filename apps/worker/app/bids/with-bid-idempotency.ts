@@ -1,18 +1,18 @@
+import type { BidInboxItem } from "@nolie/inbox";
 import {
 	acquireIdempotency,
 	markIdempotencyProcessed,
 	releaseIdempotency,
 } from "@nolie/redis/idempotency";
 import { logger } from "../logger.js";
-import type { BidJob } from "./types.js";
 
 const TTL_SECONDS = 3600;
 
 export function withBidIdempotency<T>(
-	handler: (job: BidJob) => Promise<T>,
-): (job: BidJob) => Promise<T | undefined> {
-	return async (job: BidJob) => {
-		const requestId = job.data.requestId;
+	handler: (item: BidInboxItem) => Promise<T>,
+): (item: BidInboxItem) => Promise<T | undefined> {
+	return async (item: BidInboxItem) => {
+		const requestId = item.requestId;
 		const idempotencyKey = `bid:${requestId}`;
 
 		const result = await acquireIdempotency(idempotencyKey, TTL_SECONDS);
@@ -27,7 +27,7 @@ export function withBidIdempotency<T>(
 		}
 
 		try {
-			const output = await handler(job);
+			const output = await handler(item);
 
 			// Mark success (do NOT delete)
 			await markIdempotencyProcessed(idempotencyKey, TTL_SECONDS);
