@@ -6,6 +6,7 @@ import { errors, HttpError } from "@nolie/errors/http";
 import type { QueueOf } from "@nolie/queues";
 import type { RestClient } from "@nolie/realtime/server";
 import type { BidCreate } from "@nolie/schemas/auction/bid";
+import { v7 as uuidv7 } from "uuid";
 import { logger } from "../../../logger.js";
 import { apiTx } from "../../db/tx.js";
 import { bidSelect } from "../select.js";
@@ -416,7 +417,7 @@ async function validateBidFromCache(
 	return auction;
 }
 
-export async function placeBid(
+export async function __placeBid(
 	db: PrismaClient,
 	data: BidCreate,
 	realtime: RestClient,
@@ -473,4 +474,28 @@ export async function placeBid(
 	);
 
 	return bid;
+}
+
+export async function placeBid(
+	q: QueueOf<"bids">,
+	cache: CacheOf<"auctions">,
+	db: PrismaClient,
+	data: { userId: string; auctionId: string; amount: number },
+) {
+	await validateBidFromCache(cache, db, data);
+	const requestId = uuidv7();
+
+	await q.place(
+		{
+			...data,
+			requestId,
+			timestamp: Date.now(),
+		},
+		{ removeOnComplete: true },
+	);
+
+	return {
+		status: "processing",
+		requestId,
+	};
 }
