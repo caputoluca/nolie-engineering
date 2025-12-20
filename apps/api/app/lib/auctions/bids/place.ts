@@ -132,7 +132,7 @@ export async function afterBidCreate(
 	db: PrismaClient,
 	realtime: RestClient,
 	q: QueueOf<"auction">,
-	cache: CacheOf<"auctions"> | undefined,
+	cache: CacheOf<"auctionState"> | undefined,
 	{
 		auctionId,
 		userId,
@@ -279,7 +279,7 @@ export async function placeBidCore(
 	q: QueueOf<"auction">,
 	params: PlaceBidCoreParams,
 	timingContext?: BidTimingContext,
-	cache?: CacheOf<"auctions">,
+	cache?: CacheOf<"auctionState">,
 	cachedState?: Omit<AuctionState, "auctionId" | "currentHighestBidAmount">,
 ): Promise<BidRecord> {
 	// INSTRUMENTATION START
@@ -369,7 +369,7 @@ export async function placeBidCore(
 }
 
 async function validateBidFromCache(
-	cache: CacheOf<"auctions">,
+	cache: CacheOf<"auctionState">,
 	db: PrismaClient,
 	{
 		auctionId,
@@ -423,7 +423,7 @@ export async function __placeBid(
 	data: BidCreate,
 	realtime: RestClient,
 	q: QueueOf<"auction">,
-	cache: CacheOf<"auctions">,
+	cache: CacheOf<"auctionState">,
 	{ userId, auctionId }: { userId: string; auctionId: string },
 	// INSTRUMENTATION START
 	timingContext?: BidTimingContext,
@@ -479,7 +479,7 @@ export async function __placeBid(
 
 export async function placeBid(
 	q: QueueOf<"bids">,
-	cache: CacheOf<"auctions">,
+	cache: CacheOf<"auctionState">,
 	db: PrismaClient,
 	inbox: InboxOf<"bids">,
 	data: { userId: string; auctionId: string; amount: number },
