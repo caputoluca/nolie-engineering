@@ -2,6 +2,7 @@ import { initializeClient } from "../client/init.js";
 import { cache } from "./cache.js";
 import { createRealtimeClient, type RealtimeClientOptions } from "./client.js";
 import { auctionSubscribers } from "./subscribers/auction.js";
+import { userBidSubscribers } from "./subscribers/user.js";
 
 export class RealtimeClient {
 	connected = false;
@@ -26,4 +27,5 @@ export class RealtimeClient {
 	}
 
 	auction = auctionSubscribers;
+	bid = userBidSubscribers;
 }
