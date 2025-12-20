@@ -1,4 +1,8 @@
 import { type AuctionOut, AuctionStatus } from "@nolie/schemas/auction";
+import {
+	BidValidationCode,
+	type BidValidationCodeType,
+} from "@nolie/schemas/auction/bid-validation";
 import { auctionsConfig } from "./config";
 import { auctionRequiresShipping } from "./helpers";
 
@@ -52,7 +56,7 @@ export function computeNextBidAmount({
 
 export type ValidateBidResult =
 	| { valid: true }
-	| { valid: false; message: string; code: string };
+	| { valid: false; message: string; code: BidValidationCodeType };
 
 type ValidateBidAuction = Pick<
 	AuctionOut,
@@ -77,7 +81,7 @@ export function validateBid(
 		return {
 			valid: false,
 			message: "Auction has ended",
-			code: "AUCTION_ENDED",
+			code: BidValidationCode.auction_ended,
 		};
 	}
 
@@ -86,7 +90,7 @@ export function validateBid(
 		return {
 			valid: false,
 			message: "Cannot bid on your own auction",
-			code: "CANNOT_BID_ON_OWN_AUCTION",
+			code: BidValidationCode.cannot_bid_on_own_auction,
 		};
 	}
 
@@ -103,7 +107,7 @@ export function validateBid(
 		return {
 			valid: false,
 			message: "Your bid is too low",
-			code: "BID_TOO_LOW",
+			code: BidValidationCode.bid_too_low,
 		};
 	}
 
@@ -112,7 +116,7 @@ export function validateBid(
 		return {
 			valid: false,
 			message: "Bid amount invalid",
-			code: "BID_TOO_HIGH",
+			code: BidValidationCode.bid_too_high,
 		};
 	}
 
@@ -147,7 +151,7 @@ export function validateProxyBid(
 		return {
 			valid: false,
 			message: "Proxy amount is too high",
-			code: "PROXY_AMOUNT_TOO_HIGH",
+			code: BidValidationCode.proxy_amount_too_high,
 		};
 	}
 	return validation;
@@ -160,15 +164,19 @@ export interface ValidateUserInput {
 	defaultShippingAddressId: string | null;
 }
 
+export type UserCanBidResult =
+	| { valid: true }
+	| { valid: false; message: string; code: BidValidationCodeType };
+
 export function validateUserCanBid(
 	user: ValidateUserInput,
 	auction: Pick<AuctionOut, "itemType">,
-) {
+): UserCanBidResult {
 	if (!user.billing?.defaultPaymentMethodId) {
 		return {
 			valid: false,
 			message: "User has not specified a payment method",
-			code: "REQUIRES_PAYMENT_METHOD",
+			code: BidValidationCode.requires_payment_method,
 		};
 	}
 	if (auctionRequiresShipping(auction)) {
@@ -176,7 +184,7 @@ export function validateUserCanBid(
 			return {
 				valid: false,
 				message: "User has not specified a shipping address",
-				code: "REQUIRES_SHIPPING_ADDRESS",
+				code: BidValidationCode.requires_shipping_address,
 			};
 		}
 	}
