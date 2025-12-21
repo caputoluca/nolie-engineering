@@ -20,6 +20,7 @@ import { auctionRoutes } from "./routes/auctions/index.js";
 import { authRoutes } from "./routes/auth/index.js";
 import { contactRoutes } from "./routes/contact.js";
 import { handlesRoutes } from "./routes/handles.js";
+import { internalRoutes } from "./routes/internal.js"; // TEMPORARY — SAFE TO DELETE
 import { meRoutes } from "./routes/me/index.js";
 import { realtimeRoutes } from "./routes/realtime.js";
 import { stripeRoutes } from "./routes/stripe.js";
@@ -103,6 +104,7 @@ export async function buildApp() {
 	await fastify.register(auctionRoutes, { prefix: "/auctions" });
 	await fastify.register(waitlistRoutes, { prefix: "/waitlist" });
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
+	await fastify.register(internalRoutes, { prefix: "/internal" }); // TEMPORARY — SAFE TO DELETE
 	/* ------------------- End Routes ------------------- */
 	fastify.log.info(
 		{
