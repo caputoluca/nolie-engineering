@@ -6,6 +6,7 @@ import { errors, HttpError } from "@nolie/errors/http";
 import type { InboxOf } from "@nolie/inbox";
 import type { QueueOf } from "@nolie/queues";
 import type { RestClient } from "@nolie/realtime/server";
+import { isRedisConnectionError } from "@nolie/redis/utils";
 import type { BidCreate } from "@nolie/schemas/auction/bid";
 import type { AuctionItemTypeType } from "@nolie/schemas/auction/type";
 import { v7 as uuidv7 } from "uuid";
@@ -552,39 +553,47 @@ export async function placeBid(
 	inbox: InboxOf<"bids">,
 	data: { userId: string; auctionId: string; amount: number },
 ) {
-	// Validate auction first to get itemType for user eligibility check
-	const auction = await validateBidFromCache(stateCache, db, data);
+	try {
+		// Validate auction first to get itemType for user eligibility check
+		const auction = await validateBidFromCache(stateCache, db, data);
 
-	// Validate user eligibility and get profile (single DB query if cache miss)
-	const { profile } = await validateUserFromCache(
-		userEligibilityCache,
-		userProfileCache,
-		db,
-		{
+		// Validate user eligibility and get profile (single DB query if cache miss)
+		const { profile } = await validateUserFromCache(
+			userEligibilityCache,
+			userProfileCache,
+			db,
+			{
+				userId: data.userId,
+				itemType: auction.itemType,
+			},
+		);
+
+		const requestId = uuidv7();
+		await inbox.pushAndMarkDirty(data.auctionId, {
 			userId: data.userId,
-			itemType: auction.itemType,
-		},
-	);
+			auctionId: data.auctionId,
+			amount: data.amount,
+			requestId,
+			// Include profile for realtime publish in worker
+			user: {
+				firstName: profile.firstName,
+				lastName: profile.lastName,
+				handle: profile.handle,
+				image: profile.image,
+			},
+		});
 
-	const requestId = uuidv7();
-	await inbox.pushAndMarkDirty(data.auctionId, {
-		userId: data.userId,
-		auctionId: data.auctionId,
-		amount: data.amount,
-		requestId,
-		// Include profile for realtime publish in worker
-		user: {
-			firstName: profile.firstName,
-			lastName: profile.lastName,
-			handle: profile.handle,
-			image: profile.image,
-		},
-	});
-
-	await q.drain({ auctionId: data.auctionId }, { removeOnComplete: true });
-
-	return {
-		status: "processing",
-		requestId,
-	};
+		await q.drain({ auctionId: data.auctionId }, { removeOnComplete: true });
+		return {
+			status: "processing",
+			requestId,
+		};
+	} catch (error) {
+		if (isRedisConnectionError(error)) {
+			throw errors.serviceUnavailable("Unable to store bid for processing", {
+				code: "REDIS_CONNECTION_ERROR",
+			});
+		}
+		throw error;
+	}
 }

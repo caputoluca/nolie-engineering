@@ -34,7 +34,7 @@ export function withBidIdempotency<T>(
 
 			return output;
 		} catch (error) {
-			await releaseIdempotency(idempotencyKey);
+			await releaseIdempotency(idempotencyKey).catch(() => {});
 			throw error; // let BullMQ retry the job
 		}
 	};
