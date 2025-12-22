@@ -7,6 +7,7 @@ import type { InboxOf } from "@nolie/inbox";
 import type { QueueOf } from "@nolie/queues";
 import type { RestClient } from "@nolie/realtime/server";
 import type { BidCreate } from "@nolie/schemas/auction/bid";
+import type { AuctionItemTypeType } from "@nolie/schemas/auction/type";
 import { v7 as uuidv7 } from "uuid";
 import { logger } from "../../../logger.js";
 import { apiTx } from "../../db/tx.js";
@@ -24,6 +25,7 @@ import {
 	extendAuction,
 	getAuctionForBid,
 	getUserForBid,
+	getUserForBidWithProfile,
 	triggerProxyProcessing,
 } from "./utils.js";
 import { validateBidOrThrow, validateUserCanBidOrThrow } from "./validate.js";
@@ -181,6 +183,7 @@ export async function afterBidCreate(
 				? cache.update(auctionId, {
 						auctionId,
 						currentHighestBidAmount: bid.amount.toNumber(),
+						highestBidUserId: userId,
 						version: cachedState.version + 1,
 						startingBidAmount: cachedState.startingBidAmount,
 						creatorUserId: cachedState.creatorUserId,
@@ -387,6 +390,7 @@ async function validateBidFromCache(
 			return {
 				auctionId: auction.id,
 				currentHighestBidAmount: auction.currentHighestBid,
+				highestBidUserId: auction.currentHighestBidUserId,
 				version: 1,
 				startingBidAmount: auction.startingBid.toNumber(),
 				creatorUserId: auction.creator.userId,
@@ -416,6 +420,67 @@ async function validateBidFromCache(
 	});
 
 	return auction;
+}
+
+async function validateUserFromCache(
+	eligibilityCache: CacheOf<"userEligibility">,
+	profileCache: CacheOf<"userProfile">,
+	db: PrismaClient,
+	{
+		userId,
+		itemType,
+	}: {
+		userId: string;
+		itemType: AuctionItemTypeType;
+	},
+) {
+	// Try to get both from cache first
+	let [eligibility, profile] = await Promise.all([
+		eligibilityCache.get(userId),
+		profileCache.get(userId),
+	]);
+
+	// If either is missing, fetch from DB and populate both caches
+	if (!eligibility || !profile) {
+		const user = await getUserForBidWithProfile(db, userId);
+
+		eligibility = {
+			userId,
+			hasPaymentMethod: !!user.billing?.defaultPaymentMethodId,
+			hasShippingAddress: !!user.defaultShippingAddressId,
+		};
+
+		profile = {
+			userId,
+			firstName: user.firstName,
+			lastName: user.lastName,
+			handle: user.handle,
+			image: user.image,
+		};
+
+		// Populate both caches (fire-and-forget, don't block validation)
+		Promise.all([
+			eligibilityCache.update(userId, eligibility),
+			profileCache.update(userId, profile),
+		]).catch((err) => {
+			logger.warn({ err, userId }, "Failed to cache user eligibility/profile");
+		});
+	}
+
+	// Validate eligibility
+	if (!eligibility.hasPaymentMethod) {
+		throw errors.badRequest("Payment method required to place bids", {
+			code: "REQUIRES_PAYMENT_METHOD",
+		});
+	}
+
+	if (itemType === "physical" && !eligibility.hasShippingAddress) {
+		throw errors.badRequest("Shipping address required for physical items", {
+			code: "REQUIRES_SHIPPING_ADDRESS",
+		});
+	}
+
+	return { eligibility, profile };
 }
 
 export async function __placeBid(
@@ -471,6 +536,7 @@ export async function __placeBid(
 			creatorUserId: cached.creatorUserId,
 			itemType: cached.itemType,
 			status: cached.status,
+			highestBidUserId: cached.highestBidUserId,
 		},
 	);
 
@@ -479,18 +545,40 @@ export async function __placeBid(
 
 export async function placeBid(
 	q: QueueOf<"bids">,
-	cache: CacheOf<"auctionState">,
+	stateCache: CacheOf<"auctionState">,
+	userEligibilityCache: CacheOf<"userEligibility">,
+	userProfileCache: CacheOf<"userProfile">,
 	db: PrismaClient,
 	inbox: InboxOf<"bids">,
 	data: { userId: string; auctionId: string; amount: number },
 ) {
-	await validateBidFromCache(cache, db, data);
+	// Validate auction first to get itemType for user eligibility check
+	const auction = await validateBidFromCache(stateCache, db, data);
+
+	// Validate user eligibility and get profile (single DB query if cache miss)
+	const { profile } = await validateUserFromCache(
+		userEligibilityCache,
+		userProfileCache,
+		db,
+		{
+			userId: data.userId,
+			itemType: auction.itemType,
+		},
+	);
+
 	const requestId = uuidv7();
 	await inbox.pushAndMarkDirty(data.auctionId, {
 		userId: data.userId,
 		auctionId: data.auctionId,
 		amount: data.amount,
 		requestId,
+		// Include profile for realtime publish in worker
+		user: {
+			firstName: profile.firstName,
+			lastName: profile.lastName,
+			handle: profile.handle,
+			image: profile.image,
+		},
 	});
 
 	await q.drain({ auctionId: data.auctionId }, { removeOnComplete: true });
