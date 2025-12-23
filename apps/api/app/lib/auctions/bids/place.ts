@@ -10,16 +10,6 @@ import { logger } from "../../../logger.js";
 import { getAuctionForBid, getUserForBidWithProfile } from "./utils.js";
 import { validateBidOrThrow } from "./validate.js";
 
-// INSTRUMENTATION START
-export interface BidTimingContext {
-	preDbMs: number;
-	txMs: number;
-	postDbMs: number;
-	postDbRealtimeMs?: number;
-	postDbQueueMs?: number;
-}
-// INSTRUMENTATION END
-
 export async function validateBidFromCache(
 	cache: CacheOf<"auctionState">,
 	db: PrismaClient,
