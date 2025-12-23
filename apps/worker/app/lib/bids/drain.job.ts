@@ -106,17 +106,42 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 			if (!result.accepted) {
 				logger.info({
 					event: "bids_drain_bid_rejected",
+					bidAmount: amount,
 					...result,
 				});
-				await ctx.realtime().bid.result.publish({
-					userId,
-					success: false,
-					requestId,
-					auctionId,
-					reason: result.reason,
-				});
+				void ctx
+					.realtime()
+					.bid.result.publish({
+						userId,
+						success: false,
+						requestId,
+						auctionId,
+						reason: result.reason,
+					})
+					.catch((error) => {
+						logger.error(
+							{
+								error,
+								auctionId,
+								userId,
+								requestId,
+								event: "bids_drain_publish_bid_result_failed",
+							},
+							"Failed to publish bid result",
+						);
+					});
 				return;
 			}
+
+			// Log accepted bid for load test analytics
+			logger.info({
+				event: "bids_drain_bid_accepted",
+				auctionId,
+				userId,
+				amount: result.newAmount,
+				previousHighest: result.previousHighest,
+				requestId,
+			});
 
 			// Use requestId as bidId for idempotency
 			const bidId = requestId;
@@ -231,7 +256,7 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 				.catch((err) => {
 					logger.error({
 						err,
-						event: "bids_drain_publish_event_failed",
+						event: "bids_drain_publish_auction_bids_failed",
 						bidId,
 						auctionId,
 						userId,
@@ -250,7 +275,7 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 					logger.error(
 						{
 							err,
-							event: "bids_drain_publish_result_failed",
+							event: "bids_drain_publish_bid_result_failed",
 							bidId,
 							auctionId,
 							userId,
