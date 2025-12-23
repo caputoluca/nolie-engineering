@@ -14,6 +14,7 @@ export async function persist(job: BidJob<"persist">) {
 		priorityAt,
 		isProxy,
 		extendToEndAt,
+		isExhaustion,
 	} = job.data;
 
 	try {
@@ -37,6 +38,14 @@ export async function persist(job: BidJob<"persist">) {
 							tx.auction.update({
 								where: { id: auctionId },
 								data: { endAt: new Date(extendToEndAt) },
+							}),
+						]
+					: []),
+				...(isExhaustion
+					? [
+							tx.bidProxy.update({
+								where: { auctionId_userId: { auctionId, userId } },
+								data: { exhausted: true },
 							}),
 						]
 					: []),

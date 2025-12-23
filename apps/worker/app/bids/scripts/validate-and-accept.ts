@@ -28,6 +28,12 @@ if not status or status ~= "active" then
   return { "rejected", ${BidValidationCode.auction_not_active}, currentHighestRaw or "0" }
 end
 
+if ARGV[3] == "1" then
+  -- Exhaustion: skip validation, don't update highest
+  redis.call("INCR", pendingBidsKey)
+  return { "accepted", tostring(ARGV[1]), tostring(currentHighestRaw or 0) }
+end
+
 if ARGV[2] == creatorUserId then
   return { "rejected", ${BidValidationCode.cannot_bid_on_own_auction}, currentHighestRaw or "0" }
 end

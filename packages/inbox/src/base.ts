@@ -103,16 +103,23 @@ export async function clearDirty(namespace: string, id: string): Promise<void> {
 export async function pushAndMarkDirty<T>(
 	namespace: string,
 	id: string,
-	item: T,
+	items: T | T[],
 	ttlSeconds: number = DIRTY_TTL_SECONDS,
 ): Promise<number> {
+	const list = Array.isArray(items) ? items : [items];
+	if (list.length === 0) return 0;
+
+	const key = inboxKey(namespace, id);
+	const dirty = dirtyKey(namespace, id);
+
+	const payload = list.map((item) => JSON.stringify(item));
+
 	const results = await redis
 		.multi()
-		.rpush(inboxKey(namespace, id), JSON.stringify(item))
-		.set(dirtyKey(namespace, id), "1", "EX", ttlSeconds)
+		.rpush(key, ...payload)
+		.set(dirty, "1", "EX", ttlSeconds)
 		.exec();
 
-	// results is [[error, reply], [error, reply]] or null
 	if (!results || results.length < 2) {
 		throw new Error("Redis transaction aborted or incomplete");
 	}
@@ -165,10 +172,10 @@ export function createInbox<T>(namespace: string) {
 		},
 		pushAndMarkDirty: (
 			id: string,
-			item: T,
+			items: T | T[],
 			ttlSeconds: number = DIRTY_TTL_SECONDS,
 		): Promise<number> => {
-			return pushAndMarkDirty<T>(namespace, id, item, ttlSeconds);
+			return pushAndMarkDirty<T>(namespace, id, items, ttlSeconds);
 		},
 	};
 }
