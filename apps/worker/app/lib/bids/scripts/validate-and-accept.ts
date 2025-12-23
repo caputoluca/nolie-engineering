@@ -25,7 +25,7 @@ local startingBidRaw = state[3]
 local creatorUserId = state[4]
 
 if not status or status ~= "active" then
-  return { "rejected", ${BidValidationCode.auction_not_active}, currentHighestRaw or "0" }
+  return { "rejected", "${BidValidationCode.auction_not_active}", currentHighestRaw or "0" }
 end
 
 if ARGV[3] == "1" then
@@ -35,7 +35,7 @@ if ARGV[3] == "1" then
 end
 
 if ARGV[2] == creatorUserId then
-  return { "rejected", ${BidValidationCode.cannot_bid_on_own_auction}, currentHighestRaw or "0" }
+  return { "rejected", "${BidValidationCode.cannot_bid_on_own_auction}", currentHighestRaw or "0" }
 end
 
 local bidAmount = tonumber(ARGV[1])
@@ -50,7 +50,7 @@ else
 end
 
 if bidAmount < minBid then
-  return { "rejected", ${BidValidationCode.bid_too_low}, tostring(currentHighest or 0) }
+  return { "rejected", "${BidValidationCode.bid_too_low}", tostring(currentHighest or 0) }
 end
 
 redis.call(
