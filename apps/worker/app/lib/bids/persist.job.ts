@@ -1,10 +1,10 @@
-import { cache } from "@nolie/cache";
-import { isPrismaUniqueError, prisma } from "@nolie/db";
+import { isPrismaUniqueError } from "@nolie/db";
 import { logger } from "../../logger.js";
+import type { BidsContext } from "./context.js";
 import { pendingBidsCache } from "./pending-bids-cache.js";
 import type { BidJob } from "./types.js";
 
-export async function persist(job: BidJob<"persist">) {
+export async function persist(job: BidJob<"persist">, ctx: BidsContext) {
 	const {
 		bidId,
 		auctionId,
@@ -19,7 +19,7 @@ export async function persist(job: BidJob<"persist">) {
 
 	try {
 		// Use transaction to atomically create bid and update auction endAt
-		await prisma.$transaction(async (tx) => {
+		await ctx.prisma.$transaction(async (tx) => {
 			await Promise.all([
 				tx.bid.create({
 					data: {
@@ -53,7 +53,7 @@ export async function persist(job: BidJob<"persist">) {
 		});
 
 		// Invalidate auctionView AFTER bid is in DB (no race condition)
-		await cache.auctionView.invalidate(auctionId).catch((err) => {
+		await ctx.cache.auctionView.invalidate(auctionId).catch((err) => {
 			logger.warn(
 				{ err, auctionId, bidId },
 				"bids.persist: Failed to invalidate auctionView cache",
@@ -74,7 +74,7 @@ export async function persist(job: BidJob<"persist">) {
 			);
 
 			// Still invalidate - previous attempt may have failed to invalidate
-			await cache.auctionView.invalidate(auctionId).catch((err) => {
+			await ctx.cache.auctionView.invalidate(auctionId).catch((err) => {
 				logger.warn(
 					{ err, auctionId, bidId },
 					"bids.persist: Failed to invalidate auctionView cache (duplicate)",

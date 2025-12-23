@@ -1,5 +1,5 @@
-import { type BidInboxItem, inbox } from "@nolie/inbox";
-import { logger } from "../../logger.js";
+import type { BidInboxItem, NoLieInbox } from "@nolie/inbox";
+import type { NoLieLogger } from "@nolie/logger";
 import type { BidJob } from "./types.js";
 
 const MAX_ROUNDS = 25;
@@ -19,6 +19,8 @@ function elapsedMs(start: bigint): number {
 
 export function drainBidsInbox(
 	process: (item: BidInboxItem) => Promise<void>,
+	inbox: NoLieInbox,
+	logger: NoLieLogger,
 ): (job: BidJob) => Promise<void> {
 	return async (job: BidJob) => {
 		const auctionId = job.data.auctionId;

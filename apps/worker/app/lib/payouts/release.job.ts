@@ -1,7 +1,8 @@
-import { DisputeStatus, isPrismaRecordNotFoundError, prisma } from "@nolie/db";
-import { PaymentErrorCode, payments } from "@nolie/payments";
+import { DisputeStatus, isPrismaRecordNotFoundError } from "@nolie/db";
+import { PaymentErrorCode } from "@nolie/payments";
 import { EarningsPayoutStatus } from "@nolie/schemas/me/index";
 import { logger } from "../../logger.js";
+import type { PayoutsContext } from "./context.js";
 import {
 	markPayoutAsFailed,
 	RetryablePayoutError,
@@ -10,12 +11,12 @@ import {
 } from "./release-utils.js";
 import type { PayoutJob } from "./types.js";
 
-export async function release(job: PayoutJob<"release">) {
+export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	const { earningId } = job.data;
 
 	logger.info({ earningId }, "payout.release: starting");
 
-	const earning = await prisma.creatorEarning.findUnique({
+	const earning = await ctx.prisma.creatorEarning.findUnique({
 		where: {
 			id: earningId,
 		},
@@ -95,7 +96,7 @@ export async function release(job: PayoutJob<"release">) {
 			{ earningId },
 			"payout.release: creator has no connect account; marking as failed",
 		);
-		await markPayoutAsFailed(prisma, { earningId });
+		await markPayoutAsFailed(ctx.prisma, { earningId });
 		return;
 	}
 
@@ -105,7 +106,7 @@ export async function release(job: PayoutJob<"release">) {
 			{ earningId },
 			"payout.release: earning has no auction; failing",
 		);
-		await markPayoutAsFailed(prisma, { earningId });
+		await markPayoutAsFailed(ctx.prisma, { earningId });
 		return;
 	}
 
@@ -117,7 +118,7 @@ export async function release(job: PayoutJob<"release">) {
 			{ earningId, auctionId: earning.auctionId, fanId, bidId },
 			"payout.release: auction missing winner or winningBidId; failing",
 		);
-		await markPayoutAsFailed(prisma, { earningId });
+		await markPayoutAsFailed(ctx.prisma, { earningId });
 		return;
 	}
 
@@ -133,12 +134,17 @@ export async function release(job: PayoutJob<"release">) {
 			"payout.release: processingFee is null; rescheduling with time-aware backoff",
 		);
 
-		await reschedulePayoutForMissingProcessingFee(prisma, payments, {
-			earningId,
-			currentAttempts: earning.processingFeeRetryAttempts,
-			createdAt: earning.createdAt,
-			paymentIntentId: earning.auction.paymentIntentId,
-		});
+		await reschedulePayoutForMissingProcessingFee(
+			ctx.prisma,
+			ctx.payments,
+			ctx.queues,
+			{
+				earningId,
+				currentAttempts: earning.processingFeeRetryAttempts,
+				createdAt: earning.createdAt,
+				paymentIntentId: earning.auction.paymentIntentId,
+			},
+		);
 		return;
 	}
 
@@ -152,7 +158,7 @@ export async function release(job: PayoutJob<"release">) {
 			},
 			"payout.release: netAmount is null but processingFee is set; this should not happen",
 		);
-		await markPayoutAsFailed(prisma, { earningId });
+		await markPayoutAsFailed(ctx.prisma, { earningId });
 		return;
 	}
 
@@ -163,7 +169,7 @@ export async function release(job: PayoutJob<"release">) {
 			{ earningId, auctionId: earning.auctionId, amountInDollars },
 			"payout.release: amount is less than or equal to 0; failing",
 		);
-		await markPayoutAsFailed(prisma, { earningId });
+		await markPayoutAsFailed(ctx.prisma, { earningId });
 		return;
 	}
 
@@ -179,7 +185,7 @@ export async function release(job: PayoutJob<"release">) {
 		"payout.release: calling payments.creator.pay",
 	);
 
-	const result = await payments.creator.pay({
+	const result = await ctx.payments.creator.pay({
 		amount: amountInDollars,
 		creatorConnectAccountId: connectAccountId,
 		auctionId: earning.auctionId,
@@ -194,12 +200,17 @@ export async function release(job: PayoutJob<"release">) {
 				{ earningId, amountInDollars },
 				"payout.release: insufficient funds; starting reschedule flow",
 			);
-			await reschedulePayoutForInsufficientFunds(prisma, payments, {
-				amountInDollars,
-				earningId,
-				currentAttempts: earning.insufficientFundsRetryAttempts,
-				currentPayoutStatus: earning.payoutStatus,
-			});
+			await reschedulePayoutForInsufficientFunds(
+				ctx.prisma,
+				ctx.payments,
+				ctx.queues,
+				{
+					amountInDollars,
+					earningId,
+					currentAttempts: earning.insufficientFundsRetryAttempts,
+					currentPayoutStatus: earning.payoutStatus,
+				},
+			);
 			return;
 		}
 
@@ -213,7 +224,7 @@ export async function release(job: PayoutJob<"release">) {
 			"payout.release: payout failed",
 		);
 
-		await markPayoutAsFailed(prisma, { earningId });
+		await markPayoutAsFailed(ctx.prisma, { earningId });
 
 		return;
 	}
@@ -229,7 +240,7 @@ export async function release(job: PayoutJob<"release">) {
 	);
 
 	try {
-		await prisma.creatorEarning.update({
+		await ctx.prisma.creatorEarning.update({
 			where: {
 				id: earningId,
 				payoutStatus: {
