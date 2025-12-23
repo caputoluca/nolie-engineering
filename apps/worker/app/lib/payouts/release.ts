@@ -1,7 +1,7 @@
 import { DisputeStatus, isPrismaRecordNotFoundError, prisma } from "@nolie/db";
 import { PaymentErrorCode, payments } from "@nolie/payments";
 import { EarningsPayoutStatus } from "@nolie/schemas/me/index";
-import { logger } from "../logger.js";
+import { logger } from "../../logger.js";
 import {
 	markPayoutAsFailed,
 	RetryablePayoutError,

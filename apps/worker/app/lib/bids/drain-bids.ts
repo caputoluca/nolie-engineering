@@ -1,5 +1,5 @@
 import { type BidInboxItem, inbox } from "@nolie/inbox";
-import { logger } from "../logger.js";
+import { logger } from "../../logger.js";
 import type { BidJob } from "./types.js";
 
 const MAX_ROUNDS = 25;

@@ -1,6 +1,6 @@
 import { cache } from "@nolie/cache";
 import { isPrismaUniqueError, prisma } from "@nolie/db";
-import { logger } from "../logger.js";
+import { logger } from "../../logger.js";
 import { pendingBidsCache } from "./pending-bids-cache.js";
 import type { BidJob } from "./types.js";
 

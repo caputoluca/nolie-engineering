@@ -4,7 +4,7 @@ import {
 	markIdempotencyProcessed,
 	releaseIdempotency,
 } from "@nolie/redis/idempotency";
-import { logger } from "../logger.js";
+import { logger } from "../../logger.js";
 
 const TTL_SECONDS = 3600;
 
