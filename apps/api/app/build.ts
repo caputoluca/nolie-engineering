@@ -1,5 +1,7 @@
 import fastifyCookie from "@fastify/cookie";
 import corsPlugin from "@fastify/cors";
+import type { PaymentsClient } from "@nolie/payments";
+import type { RestClient } from "@nolie/realtime/server";
 import Fastify from "fastify";
 import fastifyRawBody from "fastify-raw-body";
 import hyperid from "hyperid";
@@ -30,7 +32,12 @@ const REQUEST_TIMEOUT = 20_000; // 20 seconds
 
 const idGenerator = hyperid();
 
-export async function buildApp() {
+export interface BuildAppOptions {
+	realtime?: RestClient;
+	payments?: PaymentsClient;
+}
+
+export async function buildApp(options?: BuildAppOptions) {
 	const fastify = Fastify({
 		loggerInstance: logger,
 		genReqId: idGenerator,
@@ -64,7 +71,7 @@ export async function buildApp() {
 	await fastify.register(prismaPlugin); // connect to db
 
 	fastify.log.debug("Initializing realtime client");
-	await fastify.register(realtimePlugin); // connect to realtime
+	await fastify.register(realtimePlugin, { instance: options?.realtime }); // connect to realtime
 
 	fastify.log.debug("Initializing queues");
 	await fastify.register(queuesPlugin); // connect to queues
@@ -88,7 +95,7 @@ export async function buildApp() {
 	await fastify.register(schemasPlugin);
 
 	fastify.log.debug("Initializing payments");
-	await fastify.register(paymentsPlugin);
+	await fastify.register(paymentsPlugin, { instance: options?.payments });
 	/* ------------------- End Plugins ------------------- */
 
 	/* --------------- Routes --------------- */
