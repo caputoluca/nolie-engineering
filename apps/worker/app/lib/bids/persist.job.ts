@@ -1,4 +1,5 @@
 import { isPrismaUniqueError } from "@nolie/db";
+import { workerTx } from "../../db/tx.js";
 import { logger } from "../../logger.js";
 import type { BidsContext } from "./context.js";
 import { pendingBidsCache } from "./pending-bids-cache.js";
@@ -19,7 +20,7 @@ export async function persist(job: BidJob<"persist">, ctx: BidsContext) {
 
 	try {
 		// Use transaction to atomically create bid and update auction endAt
-		await ctx.prisma.$transaction(async (tx) => {
+		await workerTx(ctx.prisma, async (tx) => {
 			await Promise.all([
 				tx.bid.create({
 					data: {
