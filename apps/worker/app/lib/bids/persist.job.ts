@@ -3,9 +3,9 @@ import { workerTx } from "../../db/tx.js";
 import { logger } from "../../logger.js";
 import type { BidsContext } from "./context.js";
 import { pendingBidsCache } from "./pending-bids-cache.js";
-import type { BidJob } from "./types.js";
+import type { BidPersistJob } from "./types.js";
 
-export async function persist(job: BidJob<"persist">, ctx: BidsContext) {
+export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 	const {
 		bidId,
 		auctionId,
