@@ -98,6 +98,27 @@ export async function clearDirty(namespace: string, id: string): Promise<void> {
 }
 
 /**
+ * Delete an inbox and its dirty flag completely.
+ * Used for cleanup after an auction is settled.
+ * Returns the number of items that were in the inbox (0 if empty/didn't exist).
+ */
+export async function deleteAll(
+	namespace: string,
+	id: string,
+): Promise<number> {
+	const key = inboxKey(namespace, id);
+	const dirty = dirtyKey(namespace, id);
+
+	// Get length before deleting (for logging orphaned items)
+	const len = await redis.llen(key);
+
+	// Delete both keys
+	await redis.del(key, dirty);
+
+	return len;
+}
+
+/**
  * Atomically push an item to inbox and mark it dirty.
  */
 export async function pushAndMarkDirty<T>(
@@ -176,6 +197,9 @@ export function createInbox<T>(namespace: string) {
 			ttlSeconds: number = DIRTY_TTL_SECONDS,
 		): Promise<number> => {
 			return pushAndMarkDirty<T>(namespace, id, items, ttlSeconds);
+		},
+		deleteAll: (id: string): Promise<number> => {
+			return deleteAll(namespace, id);
 		},
 	};
 }
