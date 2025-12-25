@@ -15,6 +15,7 @@ import { inboxPlugin } from "./plugins/inbox.js";
 import { paymentsPlugin } from "./plugins/payments.js";
 import { protectPlugin } from "./plugins/protect.js";
 import { queuesPlugin } from "./plugins/queues.js";
+import { rateLimitPlugin } from "./plugins/rate-limit.js";
 import { realtimePlugin } from "./plugins/realtime.js";
 import { schemasPlugin } from "./plugins/schemas.js";
 import { agreementsRoutes } from "./routes/agreements.js";
@@ -78,6 +79,9 @@ export async function buildApp(options?: BuildAppOptions) {
 
 	fastify.log.debug("Initializing cache");
 	await fastify.register(cachePlugin); // connect to cache
+
+	fastify.log.debug("Initializing rate limiting");
+	await fastify.register(rateLimitPlugin); // rate limiting with Redis
 
 	fastify.log.debug("Initializing inbox");
 	await fastify.register(inboxPlugin); // connect to inbox

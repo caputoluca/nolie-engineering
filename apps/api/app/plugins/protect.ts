@@ -29,96 +29,101 @@ function routeExists({ method, url }: RequestRouteOptions): boolean {
 	return Boolean(method && url);
 }
 
-export const protectPlugin = fp(async (fastify) => {
-	fastify.addHook("preHandler", async (request, reply) => {
-		// Skip Fastify's own 404 handler
-		if (!routeExists(request.routeOptions)) {
-			return;
-		}
-
-		const authConfig = request.routeOptions.config?.auth;
-		if (authConfig?.public) {
-			return;
-		}
-
-		try {
-			const session = await fastify.auth.api.getSession({
-				headers: request.headers,
-			});
-
-			if (!session) {
-				fastify.log.warn(
-					{
-						url: request.url,
-						ip: request.ip,
-					},
-					"Unauthorized access attempt",
-				);
-				return reply.status(401).send({
-					code: "UNAUTHORIZED",
-					message: "Unauthorized",
-				});
+export const protectPlugin = fp(
+	async (fastify) => {
+		fastify.addHook("preHandler", async (request, reply) => {
+			// Skip Fastify's own 404 handler
+			if (!routeExists(request.routeOptions)) {
+				return;
 			}
 
-			const { role } = authConfig || {};
-			if (role) {
-				const requiredRoles = Array.isArray(role) ? role : [role];
-				const userRole = session.user.role as UserRoleType;
+			const authConfig = request.routeOptions.config?.auth;
+			if (authConfig?.public) {
+				return;
+			}
 
-				if (!requiredRoles.includes(userRole)) {
+			try {
+				const session = await fastify.auth.api.getSession({
+					headers: request.headers,
+				});
+
+				if (!session) {
+					fastify.log.warn(
+						{
+							url: request.url,
+							ip: request.ip,
+						},
+						"Unauthorized access attempt",
+					);
+					return reply.status(401).send({
+						code: "UNAUTHORIZED",
+						message: "Unauthorized",
+					});
+				}
+
+				const { role } = authConfig || {};
+				if (role) {
+					const requiredRoles = Array.isArray(role) ? role : [role];
+					const userRole = session.user.role as UserRoleType;
+
+					if (!requiredRoles.includes(userRole)) {
+						fastify.log.warn(
+							{
+								userId: session.user.id,
+								userRole,
+								requiredRoles,
+								url: request.url,
+							},
+							"Insufficient permissions",
+						);
+						return reply.status(403).send({
+							code: "INSUFFICIENT_PERMISSIONS",
+							message: "Forbidden",
+						});
+					}
+				}
+
+				const { requireOnboarded } = authConfig || {};
+
+				if (
+					requireOnboarded &&
+					session.user.onboardingStep &&
+					!isOnboardingComplete(
+						session.user.onboardingStep as OnboardingStepType,
+					)
+				) {
 					fastify.log.warn(
 						{
 							userId: session.user.id,
-							userRole,
-							requiredRoles,
+							userRole: session.user.role,
 							url: request.url,
 						},
-						"Insufficient permissions",
+						"User tried to access resource without onboarding",
 					);
 					return reply.status(403).send({
-						code: "INSUFFICIENT_PERMISSIONS",
-						message: "Forbidden",
+						code: "ONBOARDING_REQUIRED",
+						message: "Onboarding is required before accessing this resource.",
 					});
 				}
-			}
 
-			const { requireOnboarded } = authConfig || {};
-
-			if (
-				requireOnboarded &&
-				session.user.onboardingStep &&
-				!isOnboardingComplete(session.user.onboardingStep as OnboardingStepType)
-			) {
-				fastify.log.warn(
+				request.session = session;
+			} catch (error) {
+				fastify.log.error(
 					{
-						userId: session.user.id,
-						userRole: session.user.role,
+						error,
 						url: request.url,
+						method: request.method,
 					},
-					"User tried to access resource without onboarding",
+					"Error in protectPlugin",
 				);
-				return reply.status(403).send({
-					code: "ONBOARDING_REQUIRED",
-					message: "Onboarding is required before accessing this resource.",
-				});
+				// Safety check: ensure errors plugin is loaded
+				if (fastify.errors) {
+					throw fastify.errors.internal();
+				}
+				// Fallback if errors plugin not loaded (shouldn't happen, but fail-safe)
+				throw new Error("Internal server error");
 			}
-
-			request.session = session;
-		} catch (error) {
-			fastify.log.error(
-				{
-					error,
-					url: request.url,
-					method: request.method,
-				},
-				"Error in protectPlugin",
-			);
-			// Safety check: ensure errors plugin is loaded
-			if (fastify.errors) {
-				throw fastify.errors.internal();
-			}
-			// Fallback if errors plugin not loaded (shouldn't happen, but fail-safe)
-			throw new Error("Internal server error");
-		}
-	});
-});
+		});
+	},
+	{ name: "protect-plugin" },
+);
