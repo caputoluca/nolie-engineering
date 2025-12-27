@@ -8,8 +8,9 @@ import { auctionRequiresShipping } from "./helpers";
 
 export function canBid(auction: Pick<AuctionOut, "status" | "endAt">) {
 	return (
-		auction.status === AuctionStatus.scheduled ||
-		auction.status === AuctionStatus.active
+		(auction.status === AuctionStatus.scheduled ||
+			auction.status === AuctionStatus.active) &&
+		new Date(auction.endAt) > new Date()
 	);
 }
 
@@ -157,21 +158,22 @@ export function validateProxyBid(
 }
 
 export interface ValidateUserInput {
-	billing: {
-		defaultPaymentMethodId: string | null;
-	} | null;
-	defaultShippingAddressId: string | null;
+	hasPaymentMethod: boolean;
+	hasShippingAddress: boolean;
+	shippingCountry: string | null;
 }
 
 export type UserCanBidResult =
 	| { valid: true }
 	| { valid: false; message: string; code: BidValidationCodeType };
 
+const COUNTRY_CODE_US = "US";
+
 export function validateUserCanBid(
 	user: ValidateUserInput,
 	auction: Pick<AuctionOut, "itemType">,
 ): UserCanBidResult {
-	if (!user.billing?.defaultPaymentMethodId) {
+	if (!user.hasPaymentMethod) {
 		return {
 			valid: false,
 			message: "User has not specified a payment method",
@@ -179,11 +181,19 @@ export function validateUserCanBid(
 		};
 	}
 	if (auctionRequiresShipping(auction)) {
-		if (!user.defaultShippingAddressId) {
+		if (!user.hasShippingAddress) {
 			return {
 				valid: false,
 				message: "User has not specified a shipping address",
 				code: BidValidationCode.requires_shipping_address,
+			};
+		}
+
+		if (user.shippingCountry?.toUpperCase() !== COUNTRY_CODE_US) {
+			return {
+				valid: false,
+				message: "Shipping is only available in the United States",
+				code: BidValidationCode.shipping_country_not_supported,
 			};
 		}
 	}

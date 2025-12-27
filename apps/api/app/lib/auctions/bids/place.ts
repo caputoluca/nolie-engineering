@@ -1,4 +1,5 @@
 import type { CacheOf } from "@nolie/cache";
+import { validateUserCanBid } from "@nolie/core/auctions";
 import type { PrismaClient } from "@nolie/db";
 import { errors, isHttpError } from "@nolie/errors/http";
 import type { InboxOf } from "@nolie/inbox";
@@ -96,6 +97,7 @@ export async function validateUserFromCache(
 			userId,
 			hasPaymentMethod: !!user.billing?.defaultPaymentMethodId,
 			hasShippingAddress: !!user.defaultShippingAddressId,
+			shippingCountry: user.defaultShippingAddress?.country ?? null,
 		};
 
 		profile = {
@@ -115,16 +117,11 @@ export async function validateUserFromCache(
 		});
 	}
 
-	// Validate eligibility
-	if (!eligibility.hasPaymentMethod) {
-		throw errors.badRequest("Payment method required to place bids", {
-			code: "REQUIRES_PAYMENT_METHOD",
-		});
-	}
+	const validationResult = validateUserCanBid(eligibility, { itemType });
 
-	if (itemType === "physical" && !eligibility.hasShippingAddress) {
-		throw errors.badRequest("Shipping address required for physical items", {
-			code: "REQUIRES_SHIPPING_ADDRESS",
+	if (!validationResult.valid) {
+		throw errors.badRequest(validationResult.message, {
+			code: validationResult.code,
 		});
 	}
 
