@@ -98,6 +98,20 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			"payout.release: creator has no connect account; marking as failed",
 		);
 		await markPayoutAsFailed(ctx.prisma, { earningId });
+
+		// Fire-and-forget: queue payoutFailed notification
+		void ctx.queues.notifications
+			.payoutFailed({
+				auctionId: earning.auctionId,
+				userId: earning.creator.userId,
+			})
+			.catch((err) => {
+				logger.warn(
+					{ err, earningId, auctionId: earning.auctionId },
+					"payout.release: Failed to queue payoutFailed notification",
+				);
+			});
+
 		return;
 	}
 
@@ -226,6 +240,19 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		);
 
 		await markPayoutAsFailed(ctx.prisma, { earningId });
+
+		// Fire-and-forget: queue payoutFailed notification (likely bank account issue)
+		void ctx.queues.notifications
+			.payoutFailed({
+				auctionId: earning.auctionId,
+				userId: earning.creator.userId,
+			})
+			.catch((err) => {
+				logger.warn(
+					{ err, earningId, auctionId: earning.auctionId },
+					"payout.release: Failed to queue payoutFailed notification",
+				);
+			});
 
 		return;
 	}
