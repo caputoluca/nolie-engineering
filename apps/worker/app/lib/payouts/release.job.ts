@@ -40,6 +40,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			},
 			creator: {
 				select: {
+					userId: true,
 					connectAccountId: true,
 				},
 			},
@@ -253,6 +254,19 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 				stripeTransferId: result.transferId,
 			},
 		});
+
+		// Fire-and-forget: queue payoutProcessed notification to creator
+		void ctx.queues.notifications
+			.payoutProcessed({
+				auctionId: earning.auctionId,
+				userId: earning.creator.userId,
+			})
+			.catch((err) => {
+				logger.warn(
+					{ err, earningId, auctionId: earning.auctionId },
+					"payout.release: Failed to queue payoutProcessed notification",
+				);
+			});
 	} catch (err) {
 		if (isPrismaRecordNotFoundError(err)) {
 			logger.warn(
