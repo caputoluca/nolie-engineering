@@ -61,6 +61,16 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 			);
 		});
 		await pendingBidsCache.decrement(auctionId);
+
+		// Fire-and-forget: queue notification
+		void ctx.queues.notifications
+			.bidPlaced({ auctionId, userId, amount, isProxy }, { jobId: bidId })
+			.catch((err) => {
+				logger.warn(
+					{ err, auctionId, bidId, userId },
+					"bids.persist: Failed to queue bid placed notification",
+				);
+			});
 	} catch (error) {
 		if (isPrismaUniqueError(error)) {
 			// Idempotency: bid already exists = success, don't throw
