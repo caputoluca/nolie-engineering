@@ -40,5 +40,6 @@ export function usePlaceBid(
 		onOpenChange,
 		auctionId: id,
 		bidAmount: amount,
+		bidType: "bid_now",
 	});
 }
