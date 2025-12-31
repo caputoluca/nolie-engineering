@@ -17,12 +17,14 @@ import { protectPlugin } from "./plugins/protect.js";
 import { queuesPlugin } from "./plugins/queues.js";
 import { rateLimitPlugin } from "./plugins/rate-limit.js";
 import { realtimePlugin } from "./plugins/realtime.js";
+import { redisPlugin } from "./plugins/redis.js";
 import { schemasPlugin } from "./plugins/schemas.js";
 import { agreementsRoutes } from "./routes/agreements.js";
 import { auctionRoutes } from "./routes/auctions/index.js";
 import { authRoutes } from "./routes/auth/index.js";
 import { contactRoutes } from "./routes/contact.js";
 import { handlesRoutes } from "./routes/handles.js";
+import { healthRoutes } from "./routes/health.js";
 import { meRoutes } from "./routes/me/index.js";
 import { realtimeRoutes } from "./routes/realtime.js";
 import { stripeRoutes } from "./routes/stripe.js";
@@ -68,6 +70,9 @@ export async function buildApp(options?: BuildAppOptions) {
 	fastify.log.debug("Configuring raw body support");
 	await fastify.register(fastifyRawBody, { global: false });
 
+	fastify.log.debug("Verifying Redis connection");
+	await fastify.register(redisPlugin);
+
 	fastify.log.debug("Connecting to database");
 	await fastify.register(prismaPlugin); // connect to db
 
@@ -104,6 +109,7 @@ export async function buildApp(options?: BuildAppOptions) {
 
 	/* --------------- Routes --------------- */
 	fastify.log.debug("Registering API routes");
+	await fastify.register(healthRoutes, { prefix: "/health" });
 	await fastify.register(authRoutes, { prefix: "/api/auth" });
 	await fastify.register(meRoutes, { prefix: "/me" });
 	await fastify.register(agreementsRoutes, { prefix: "/agreements" });
