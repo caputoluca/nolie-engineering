@@ -8,6 +8,7 @@ import { isRedisConnectionError } from "@nolie/redis/utils";
 import type { AuctionItemTypeType } from "@nolie/schemas/auction/type";
 import { v7 as uuidv7 } from "uuid";
 import { logger } from "../../../logger.js";
+import { reportWarning } from "../../observability/sentry/report.js";
 import { getAuctionForBid, getUserForBidWithProfile } from "./utils.js";
 import { validateBidOrThrow } from "./validate.js";
 
@@ -113,6 +114,11 @@ export async function validateUserFromCache(
 			eligibilityCache.update(userId, eligibility),
 			profileCache.update(userId, profile),
 		]).catch((err) => {
+			reportWarning("Failed to cache user caches", {
+				operation: "update_user_caches",
+				extra: { userId },
+				error: err,
+			});
 			logger.warn({ err, userId }, "Failed to cache user eligibility/profile");
 		});
 	}
