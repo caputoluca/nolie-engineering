@@ -1,6 +1,7 @@
 import { isPrismaUniqueError } from "@nolie/db";
 import { workerTx } from "../../db/tx.js";
 import { logger } from "../../logger.js";
+import { reportError } from "../observability/sentry/report.js";
 import type { BidsContext } from "./context.js";
 import { pendingBidsCache } from "./pending-bids-cache.js";
 import type { BidPersistJob } from "./types.js";
@@ -55,6 +56,10 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 
 		// Invalidate auctionView AFTER bid is in DB (no race condition)
 		await ctx.cache.auctionView.invalidate(auctionId).catch((err) => {
+			reportError(err, {
+				operation: "invalidate_auction_view_cache",
+				extra: { auctionId, bidId },
+			});
 			logger.warn(
 				{ err, auctionId, bidId },
 				"bids.persist: Failed to invalidate auctionView cache",
@@ -66,6 +71,10 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 		void ctx.queues.notifications
 			.bidPlaced({ auctionId, userId, amount, isProxy }, { jobId: bidId })
 			.catch((err) => {
+				reportError(err, {
+					operation: "queue_bid_placed_notification",
+					extra: { auctionId, bidId, userId, amount, isProxy },
+				});
 				logger.warn(
 					{ err, auctionId, bidId, userId },
 					"bids.persist: Failed to queue bid placed notification",
@@ -86,6 +95,10 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 
 			// Still invalidate - previous attempt may have failed to invalidate
 			await ctx.cache.auctionView.invalidate(auctionId).catch((err) => {
+				reportError(err, {
+					operation: "invalidate_auction_view_cache_duplicate",
+					extra: { auctionId, bidId },
+				});
 				logger.warn(
 					{ err, auctionId, bidId },
 					"bids.persist: Failed to invalidate auctionView cache (duplicate)",

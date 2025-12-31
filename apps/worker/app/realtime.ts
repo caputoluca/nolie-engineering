@@ -1,5 +1,6 @@
 import { RestClient } from "@nolie/realtime/server";
 import { config } from "./config.js";
+import { reportError } from "./lib/observability/sentry/report.js";
 import { logger } from "./logger.js";
 
 let realtimeInstance: RestClient | null = null;
@@ -22,6 +23,10 @@ export async function initializeRealtime(): Promise<void> {
 		await realtimeInstance.connect({ key: config.ably_publish_key });
 		logger.info("✅ Realtime client connected");
 	} catch (err) {
+		reportError(err, {
+			level: "warning",
+			tags: { operation: "connect_realtime" },
+		});
 		logger.error({ err }, "❌ Failed to connect realtime client");
 		// Don't throw - realtime is not critical for core functionality
 		// The worker can still function without it

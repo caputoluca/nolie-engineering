@@ -3,6 +3,7 @@ import { JobIdUnique } from "@nolie/queues";
 import { isRedisConnectionError } from "@nolie/redis/utils";
 import { logger } from "../../logger.js";
 import { createAssetURL } from "../auctions/utils.js";
+import { reportError } from "../observability/sentry/report.js";
 import type { BidsContext } from "./context.js";
 import { drainBidsInbox } from "./drain-bids.js";
 import { extendAuction } from "./extend-auction.js";
@@ -119,6 +120,10 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 						reason: result.reason,
 					})
 					.catch((error) => {
+						reportError(error, {
+							operation: "publish_bid_result_rejected",
+							extra: { auctionId, userId, requestId, reason: result.reason },
+						});
 						logger.error(
 							{
 								error,
@@ -168,6 +173,10 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 						ctx.cache.auctionView,
 						{ auctionId, newEndAt: extendToEndAt },
 					).catch((err) => {
+						reportError(err, {
+							operation: "extend_auction",
+							extra: { auctionId, newEndAt: extendToEndAt },
+						});
 						logger.error({ err, auctionId }, "Failed to extend auction");
 					});
 				}
@@ -199,6 +208,10 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 				void ctx.cache.auctionProxies
 					.exhaust(auctionId, userId)
 					.catch((err) => {
+						reportError(err, {
+							operation: "exhaust_proxy_cache",
+							extra: { auctionId, userId, bidId, isExhaustion },
+						});
 						logger.error({
 							err,
 							event: "bids_drain_exhaust_proxy_failed",
@@ -216,6 +229,10 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 						highestBidUserId: userId,
 					})
 					.catch((err) => {
+						reportError(err, {
+							operation: "update_auction_state_cache",
+							extra: { auctionId, userId, bidId, newAmount: result.newAmount },
+						});
 						logger.error({
 							err,
 							event: "bids_drain_update_state_failed",
@@ -254,6 +271,10 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 				.realtime()
 				.auction.bids.publish(bidEvent)
 				.catch((err) => {
+					reportError(err, {
+						operation: "publish_auction_bids",
+						extra: { auctionId, userId, bidId, amount: result.newAmount },
+					});
 					logger.error({
 						err,
 						event: "bids_drain_publish_auction_bids_failed",
@@ -272,6 +293,10 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 					bid: bidEvent,
 				})
 				.catch((err) => {
+					reportError(err, {
+						operation: "publish_bid_result_accepted",
+						extra: { auctionId, userId, bidId, requestId },
+					});
 					logger.error(
 						{
 							err,
@@ -297,6 +322,10 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 						{ removeOnComplete: true },
 					)
 					.catch((err) => {
+						reportError(err, {
+							operation: "queue_trigger_proxies",
+							extra: { auctionId, userId, newAmount: result.newAmount },
+						});
 						logger.error(
 							{ err, auctionId, event: "bids_drain_trigger_proxies_failed" },
 							"Failed to trigger proxy responses",

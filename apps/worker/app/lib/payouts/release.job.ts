@@ -1,12 +1,12 @@
 import { DisputeStatus, isPrismaRecordNotFoundError } from "@nolie/db";
 import { PaymentErrorCode } from "@nolie/payments";
 import { EarningsPayoutStatus } from "@nolie/schemas/me/index";
-import dedent from "dedent";
 import { logger } from "../../logger.js";
+import { RetryableError } from "../../retryable-error.js";
+import { reportError, reportWarning } from "../observability/sentry/report.js";
 import type { PayoutsContext } from "./context.js";
 import {
 	markPayoutAsFailed,
-	RetryablePayoutError,
 	reschedulePayoutForInsufficientFunds,
 	reschedulePayoutForMissingProcessingFee,
 } from "./release-utils.js";
@@ -94,6 +94,10 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 	const connectAccountId = earning.creator.connectAccountId;
 	if (!connectAccountId) {
+		reportWarning("Creator has no connect account for payout", {
+			operation: "release_payout",
+			extra: { earningId, auctionId: earning.auctionId },
+		});
 		logger.error(
 			{ earningId },
 			"payout.release: creator has no connect account; marking as failed",
@@ -107,6 +111,10 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 				userId: earning.creator.userId,
 			})
 			.catch((err) => {
+				reportError(err, {
+					operation: "queue_payout_failed_notification",
+					extra: { earningId, auctionId: earning.auctionId },
+				});
 				logger.warn(
 					{ err, earningId, auctionId: earning.auctionId },
 					"payout.release: Failed to queue payoutFailed notification",
@@ -124,31 +132,10 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		);
 		await markPayoutAsFailed(ctx.prisma, { earningId });
 
-		// Fire-and-forget: queue internal alert
-		void ctx.queues.notifications
-			.internalAlert({
-				earningId,
-				auctionId: earning.auctionId,
-				creatorId: earning.creator.userId,
-				alertType: "auction_not_found",
-				subject: "Payout Failed: Auction Not Found",
-				body: dedent`
-					Data integrity issue detected.
-
-					Earning ID: ${earningId}
-					Auction ID: ${earning.auctionId}
-					Creator ID: ${earning.creator.userId}
-					Reason: Auction not found in database
-
-					Action required: Investigate data corruption and manually process payout.
-				`,
-			})
-			.catch((err) => {
-				logger.warn(
-					{ err, earningId },
-					"payout.release: Failed to queue internal alert",
-				);
-			});
+		reportWarning("Auction not found in payout release job", {
+			operation: "release_payout",
+			extra: { earningId },
+		});
 
 		return;
 	}
@@ -161,35 +148,14 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			{ earningId, auctionId: earning.auctionId, fanId, bidId },
 			"payout.release: auction missing winner or winningBidId; failing",
 		);
+		reportWarning(
+			"Auction missing winner or winningBidId in payout release job",
+			{
+				operation: "release_payout",
+				extra: { earningId },
+			},
+		);
 		await markPayoutAsFailed(ctx.prisma, { earningId });
-
-		// Fire-and-forget: queue internal alert
-		void ctx.queues.notifications
-			.internalAlert({
-				earningId,
-				auctionId: earning.auctionId,
-				creatorId: earning.creator.userId,
-				alertType: "missing_winner_bid",
-				subject: "Payout Failed: Missing Winner or Bid",
-				body: dedent`
-					Data integrity issue detected.
-
-					Earning ID: ${earningId}
-					Auction ID: ${earning.auctionId}
-					Creator ID: ${earning.creator.userId}
-					Winner ID: ${fanId || "null"}
-					Winning Bid ID: ${bidId || "null"}
-					Reason: Auction has no winner or winning bid
-
-					Action required: Investigate data corruption and manually process payout.
-				`,
-			})
-			.catch((err) => {
-				logger.warn(
-					{ err, earningId },
-					"payout.release: Failed to queue internal alert",
-				);
-			});
 
 		return;
 	}
@@ -213,7 +179,6 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			{
 				earningId,
 				auctionId: earning.auctionId,
-				creatorId: earning.creator.userId,
 				currentAttempts: earning.processingFeeRetryAttempts,
 				createdAt: earning.createdAt,
 				paymentIntentId: earning.auction.paymentIntentId,
@@ -232,35 +197,16 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			},
 			"payout.release: netAmount is null but processingFee is set; this should not happen",
 		);
+		reportWarning(
+			"Net amount is null but processingFee is set in payout release job",
+			{
+				level: "fatal",
+				operation: "release_payout",
+				extra: { earningId },
+				tags: { critical: "true" },
+			},
+		);
 		await markPayoutAsFailed(ctx.prisma, { earningId });
-
-		// Fire-and-forget: queue internal alert
-		void ctx.queues.notifications
-			.internalAlert({
-				earningId,
-				auctionId: earning.auctionId,
-				creatorId: earning.creator.userId,
-				alertType: "invalid_net_amount",
-				subject: "Payout Failed: Invalid Net Amount",
-				body: dedent`
-					Data integrity issue detected.
-
-					Earning ID: ${earningId}
-					Auction ID: ${earning.auctionId}
-					Creator ID: ${earning.creator.userId}
-					Processing Fee: ${earning.processingFee}
-					Net Amount: null
-					Reason: netAmount is null but processingFee is set
-
-					Action required: Investigate calculation bug and manually process payout.
-				`,
-			})
-			.catch((err) => {
-				logger.warn(
-					{ err, earningId },
-					"payout.release: Failed to queue internal alert",
-				);
-			});
 
 		return;
 	}
@@ -272,36 +218,12 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			{ earningId, auctionId: earning.auctionId, amountInDollars },
 			"payout.release: amount is less than or equal to 0; failing",
 		);
+		reportWarning("Net amount is <= 0 in payout release job", {
+			level: "error",
+			operation: "release_payout",
+			extra: { earningId },
+		});
 		await markPayoutAsFailed(ctx.prisma, { earningId });
-
-		// Fire-and-forget: queue internal alert
-		void ctx.queues.notifications
-			.internalAlert({
-				earningId,
-				auctionId: earning.auctionId,
-				creatorId: earning.creator.userId,
-				alertType: "zero_or_negative_amount",
-				subject: "Payout Failed: Zero or Negative Amount",
-				body: dedent`
-					Fee calculation issue detected.
-
-					Earning ID: ${earningId}
-					Auction ID: ${earning.auctionId}
-					Creator ID: ${earning.creator.userId}
-					Net Amount (cents): ${earning.netAmount}
-					Net Amount (dollars): $${amountInDollars}
-					Processing Fee: ${earning.processingFee}
-					Reason: Net amount is zero or negative (fees exceeded gross amount)
-
-					Action required: Review fee calculation and manually process payout if appropriate.
-				`,
-			})
-			.catch((err) => {
-				logger.warn(
-					{ err, earningId },
-					"payout.release: Failed to queue internal alert",
-				);
-			});
 
 		return;
 	}
@@ -340,8 +262,6 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 				{
 					amountInDollars,
 					earningId,
-					auctionId: earning.auctionId,
-					creatorId: earning.creator.userId,
 					currentAttempts: earning.insufficientFundsRetryAttempts,
 					currentPayoutStatus: earning.payoutStatus,
 				},
@@ -349,6 +269,15 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			return;
 		}
 
+		reportWarning("Payout to creator failed", {
+			operation: "release_payout",
+			extra: {
+				earningId,
+				auctionId: earning.auctionId,
+				error: result.error,
+				message: result.message,
+			},
+		});
 		logger.error(
 			{
 				earningId,
@@ -368,6 +297,10 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 				userId: earning.creator.userId,
 			})
 			.catch((err) => {
+				reportError(err, {
+					operation: "queue_payout_failed_notification",
+					extra: { earningId, auctionId: earning.auctionId },
+				});
 				logger.warn(
 					{ err, earningId, auctionId: earning.auctionId },
 					"payout.release: Failed to queue payoutFailed notification",
@@ -409,6 +342,10 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 				userId: earning.creator.userId,
 			})
 			.catch((err) => {
+				reportError(err, {
+					operation: "queue_payout_processed_notification",
+					extra: { earningId, auctionId: earning.auctionId },
+				});
 				logger.warn(
 					{ err, earningId, auctionId: earning.auctionId },
 					"payout.release: Failed to queue payoutProcessed notification",
@@ -434,8 +371,6 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			},
 			"Failed to update creator earning, retrying...",
 		);
-		throw new RetryablePayoutError(
-			"Failed to update creator earning, retrying...",
-		);
+		throw new RetryableError("Failed to update creator earning, retrying...");
 	}
 }
