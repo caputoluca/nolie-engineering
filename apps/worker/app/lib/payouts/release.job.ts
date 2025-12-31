@@ -203,7 +203,6 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 				level: "fatal",
 				operation: "release_payout",
 				extra: { earningId },
-				tags: { critical: "true" },
 			},
 		);
 		await markPayoutAsFailed(ctx.prisma, { earningId });
