@@ -25,6 +25,7 @@ import { authRoutes } from "./routes/auth/index.js";
 import { contactRoutes } from "./routes/contact.js";
 import { handlesRoutes } from "./routes/handles.js";
 import { healthRoutes } from "./routes/health.js";
+import { helpRoutes } from "./routes/help.js";
 import { meRoutes } from "./routes/me/index.js";
 import { realtimeRoutes } from "./routes/realtime.js";
 import { stripeRoutes } from "./routes/stripe.js";
@@ -120,6 +121,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(auctionRoutes, { prefix: "/auctions" });
 	await fastify.register(waitlistRoutes, { prefix: "/waitlist" });
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
+	await fastify.register(helpRoutes, { prefix: "/help" });
 	/* ------------------- End Routes ------------------- */
 	fastify.log.info(
 		{
