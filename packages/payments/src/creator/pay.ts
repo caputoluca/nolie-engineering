@@ -22,6 +22,7 @@ export type PayCreatorResult =
 			success: true;
 			transferId: string;
 			netAmount: number;
+			destinationPaymentId: string;
 	  }
 	| {
 			success: false;
@@ -70,9 +71,25 @@ export async function payCreator(
 			{ idempotencyKey },
 		);
 
+		let destPaymentId: string;
+		if (typeof transfer.destination_payment === "string") {
+			destPaymentId = transfer.destination_payment;
+		} else if (transfer.destination_payment) {
+			destPaymentId = transfer.destination_payment.id;
+		} else {
+			// This should never happen for transfers to Connect accounts
+			// destination_payment is always present when destination is a Stripe account
+			return {
+				success: false,
+				error: PaymentErrorCode.unknown,
+				message: "Failed to retrieve destination payment id",
+			};
+		}
+
 		return {
 			success: true,
 			transferId: transfer.id,
+			destinationPaymentId: destPaymentId,
 			netAmount: amountInCents,
 		};
 	} catch (err: unknown) {
