@@ -24,7 +24,7 @@ local currentHighestRaw = state[2]
 local startingBidRaw = state[3]
 local creatorUserId = state[4]
 
-if not status or status ~= "active" then
+if not status or (status ~= "active" and status ~= "scheduled") then
   return { "rejected", "${BidValidationCode.auction_not_active}", currentHighestRaw or "0" }
 end
 
