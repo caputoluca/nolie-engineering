@@ -1,12 +1,12 @@
 import { shouldExtendAuction } from "@nolie/core/auctions";
 import { JobIdUnique } from "@nolie/queues";
-import { isRedisConnectionError } from "@nolie/redis/utils";
 import { logger } from "../../logger.js";
 import { createAssetURL } from "../auctions/utils.js";
 import { reportError } from "../observability/sentry/report.js";
 import type { BidsContext } from "./context.js";
 import { drainBidsInbox } from "./drain-bids.js";
 import { extendAuction } from "./extend-auction.js";
+import { getCachedAuctionState } from "./get-cached-auction-state.js";
 import type { BidJob } from "./types.js";
 import { validateAndAcceptBid } from "./validate-and-accept-bid.js";
 import { withBidIdempotency } from "./with-bid-idempotency.js";
@@ -25,71 +25,12 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 			} = item;
 
 			// Get auction state (from cache or DB fallback)
-			let auctionState: Awaited<ReturnType<typeof ctx.cache.auctionState.get>>;
-			try {
-				auctionState = await ctx.cache.auctionState.get(auctionId, {
-					load: async () => {
-						const res = await ctx.prisma.auction.findUnique({
-							where: { id: auctionId },
-							select: {
-								id: true,
-								endAt: true,
-								status: true,
-								startingBid: true,
-								itemType: true,
-								creator: { select: { userId: true } },
-								bids: {
-									orderBy: [{ amount: "desc" }, { priorityAt: "asc" }],
-									take: 1,
-									select: { amount: true, userId: true },
-								},
-							},
-						});
-						if (!res) {
-							throw Error("Auction not found");
-						}
-						const highestBid = res.bids[0];
-						return {
-							itemType: res.itemType,
-							status: res.status,
-							auctionId: res.id,
-							version: 1,
-							endAt: res?.endAt?.toISOString(),
-							currentHighestBidAmount: highestBid?.amount?.toNumber() ?? null,
-							highestBidUserId: highestBid?.userId ?? null,
-							startingBidAmount: res.startingBid.toNumber(),
-							creatorUserId: res.creator.userId,
-						};
-					},
-				});
-				if (!auctionState) {
-					throw Error("Auction not found");
-				}
-			} catch (error) {
-				if (isRedisConnectionError(error)) {
-					logger.error(
-						{
-							auctionId,
-							userId,
-							amount,
-							requestId,
-							error,
-							event: "bids_drain_redis_error",
-						},
-						"bids.drain: Redis connection error, failing job for retry",
-					);
-					throw error;
-				}
-				logger.error(
-					{
-						auctionId,
-						userId,
-						amount,
-						requestId,
-						event: "bids_drain_cache_not_found",
-					},
-					"bids.drain: Cached state not found, assuming auction does not exist and skipping.",
-				);
+			const auctionState = await getCachedAuctionState(
+				auctionId,
+				ctx.cache.auctionState,
+				ctx.prisma,
+			);
+			if (!auctionState) {
 				return;
 			}
 
