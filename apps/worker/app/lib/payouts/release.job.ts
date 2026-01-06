@@ -279,6 +279,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			data: {
 				payoutStatus: EarningsPayoutStatus.pending,
 				stripeTransferId: result.transferId,
+				stripeDestinationPaymentId: result.destinationPaymentId,
 			},
 		});
 
