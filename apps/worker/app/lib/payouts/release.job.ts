@@ -8,7 +8,6 @@ import type { PayoutsContext } from "./context.js";
 import {
 	markPayoutAsFailed,
 	reschedulePayoutForInsufficientFunds,
-	reschedulePayoutForMissingProcessingFee,
 } from "./release-utils.js";
 import type { PayoutJob } from "./types.js";
 
@@ -27,7 +26,6 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			processingFee: true, // Stripe processing fee (nullable)
 			auctionId: true,
 			insufficientFundsRetryAttempts: true,
-			processingFeeRetryAttempts: true,
 			payoutStatus: true,
 			stripeTransferId: true, // For validation
 			createdAt: true, // For calculating age-based backoff
@@ -160,56 +158,6 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	// Check if processingFee is null - if so, reschedule with time-aware backoff
-	if (earning.processingFee === null) {
-		logger.warn(
-			{
-				earningId,
-				auctionId: earning.auctionId,
-				paymentIntentId: earning.auction.paymentIntentId,
-				ageHours: (Date.now() - earning.createdAt.getTime()) / (60 * 60 * 1000),
-			},
-			"payout.release: processingFee is null; rescheduling with time-aware backoff",
-		);
-
-		await reschedulePayoutForMissingProcessingFee(
-			ctx.prisma,
-			ctx.payments,
-			ctx.queues,
-			{
-				earningId,
-				auctionId: earning.auctionId,
-				currentAttempts: earning.processingFeeRetryAttempts,
-				createdAt: earning.createdAt,
-				paymentIntentId: earning.auction.paymentIntentId,
-			},
-		);
-		return;
-	}
-
-	// Check if netAmount is null (shouldn't happen if processingFee is set, but defensive check)
-	if (earning.netAmount === null) {
-		logger.error(
-			{
-				earningId,
-				auctionId: earning.auctionId,
-				processingFee: earning.processingFee,
-			},
-			"payout.release: netAmount is null but processingFee is set; this should not happen",
-		);
-		reportWarning(
-			"Net amount is null but processingFee is set in payout release job",
-			{
-				level: "fatal",
-				operation: "release_payout",
-				extra: { earningId },
-			},
-		);
-		await markPayoutAsFailed(ctx.prisma, { earningId });
-
-		return;
-	}
-
 	const amountInDollars = earning.netAmount / 100; // creator's share in dollars
 
 	if (amountInDollars <= 0) {
@@ -331,6 +279,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			data: {
 				payoutStatus: EarningsPayoutStatus.pending,
 				stripeTransferId: result.transferId,
+				stripeDestinationPaymentId: result.destinationPaymentId,
 			},
 		});
 
