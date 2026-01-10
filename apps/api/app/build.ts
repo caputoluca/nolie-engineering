@@ -63,7 +63,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	fastify.log.debug("Configuring CORS");
 	await fastify.register(corsPlugin, {
 		origin: fastify.config.trusted_origins,
-		methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+		methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 		allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
 		credentials: true,
 		maxAge: 86400,
