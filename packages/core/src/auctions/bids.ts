@@ -6,6 +6,9 @@ import {
 import { auctionsConfig } from "./config";
 import { auctionRequiresShipping } from "./helpers";
 
+/**
+ * Checks if a bid can be placed on an auction
+ */
 export function canBid(auction: Pick<AuctionOut, "status" | "endAt">) {
 	return (
 		(auction.status === AuctionStatus.scheduled ||
@@ -14,24 +17,45 @@ export function canBid(auction: Pick<AuctionOut, "status" | "endAt">) {
 	);
 }
 
+/**
+ * Determines if an auction should be extended due to a late bid (anti-sniping).
+ *
+ * If a bid is placed within the extension window (last N seconds of the auction),
+ * the auction end time is reset to N seconds from now. This prevents last-second
+ * sniping by giving all bidders a fair opportunity to respond.
+ *
+ * @param auction - The auction to check
+ * @returns Object containing:
+ *   - shouldExtend: Whether the auction should be extended
+ *   - newEndAt: New end date/time if extending, null otherwise
+ */
 export function shouldExtendAuction(
 	auction: Pick<AuctionOut, "status" | "endAt">,
 ) {
-	const now = Date.now();
-
 	if (auction.status !== AuctionStatus.active) {
-		return { shouldExtend: false, extendSeconds: 0 };
+		return { shouldExtend: false, newEndAt: null } as const;
 	}
 
-	const timeLeftSeconds = (new Date(auction.endAt).getTime() - now) / 1000;
+	const timeLeftSeconds =
+		(new Date(auction.endAt).getTime() - Date.now()) / 1000;
 
 	const shouldExtend = timeLeftSeconds <= auctionsConfig.extensionWindowSeconds;
 
+	if (shouldExtend) {
+		return {
+			shouldExtend: true,
+			newEndAt: new Date(
+				Date.now() + auctionsConfig.extensionWindowSeconds * 1000,
+			),
+		} as const;
+	}
+
 	return {
-		shouldExtend,
-		extendSeconds: shouldExtend ? auctionsConfig.extendBySeconds : 0,
-	};
+		shouldExtend: false,
+		newEndAt: null,
+	} as const;
 }
+
 export function getMinimumIncrement(amount: number): number {
 	if (amount < 100) return 1;
 	if (amount < 250) return 5;

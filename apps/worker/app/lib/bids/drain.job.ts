@@ -96,15 +96,12 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 			// Check if auction should extend (anti-sniping)
 			let extendToEndAt: string | null = null;
 			if (!isExhaustion) {
-				const { shouldExtend, extendSeconds } = shouldExtendAuction({
+				const { shouldExtend, newEndAt } = shouldExtendAuction({
 					status: auctionState.status,
 					endAt: auctionState.endAt,
 				});
 				if (shouldExtend) {
-					const endTime = new Date(auctionState.endAt).getTime();
-					extendToEndAt = new Date(
-						endTime + extendSeconds * 1000,
-					).toISOString();
+					extendToEndAt = newEndAt.toISOString();
 
 					// Immediate effects: reschedule close job, update Redis, publish event
 					extendAuction(
