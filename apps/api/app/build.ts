@@ -23,6 +23,7 @@ import { agreementsRoutes } from "./routes/agreements.js";
 import { auctionRoutes } from "./routes/auctions/index.js";
 import { authRoutes } from "./routes/auth/index.js";
 import { contactRoutes } from "./routes/contact.js";
+import { creatorsRoutes } from "./routes/creators.js";
 import { handlesRoutes } from "./routes/handles.js";
 import { healthRoutes } from "./routes/health.js";
 import { helpRoutes } from "./routes/help.js";
@@ -62,7 +63,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	fastify.log.debug("Configuring CORS");
 	await fastify.register(corsPlugin, {
 		origin: fastify.config.trusted_origins,
-		methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+		methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 		allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
 		credentials: true,
 		maxAge: 86400,
@@ -112,6 +113,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	fastify.log.debug("Registering API routes");
 	await fastify.register(healthRoutes, { prefix: "/health" });
 	await fastify.register(authRoutes, { prefix: "/api/auth" });
+	await fastify.register(creatorsRoutes, { prefix: "/creators" });
 	await fastify.register(meRoutes, { prefix: "/me" });
 	await fastify.register(agreementsRoutes, { prefix: "/agreements" });
 	await fastify.register(contactRoutes, { prefix: "/contact" });
