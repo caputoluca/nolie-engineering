@@ -12,6 +12,7 @@ import { envPlugin } from "./plugins/config.js";
 import { prismaPlugin } from "./plugins/db.js";
 import { errorsPlugin } from "./plugins/errors.js";
 import { inboxPlugin } from "./plugins/inbox.js";
+import { moderationPlugin } from "./plugins/moderations.js";
 import { paymentsPlugin } from "./plugins/payments.js";
 import { protectPlugin } from "./plugins/protect.js";
 import { queuesPlugin } from "./plugins/queues.js";
@@ -28,6 +29,7 @@ import { handlesRoutes } from "./routes/handles.js";
 import { healthRoutes } from "./routes/health.js";
 import { helpRoutes } from "./routes/help.js";
 import { meRoutes } from "./routes/me/index.js";
+import { moderationRoutes } from "./routes/moderations.js";
 import { realtimeRoutes } from "./routes/realtime.js";
 import { stripeRoutes } from "./routes/stripe.js";
 import { uploadsRoutes } from "./routes/uploads.js";
@@ -93,6 +95,9 @@ export async function buildApp(options?: BuildAppOptions) {
 	fastify.log.debug("Initializing inbox");
 	await fastify.register(inboxPlugin); // connect to inbox
 
+	fastify.log.debug("Initializing content moderation");
+	await fastify.register(moderationPlugin); // content moderation
+
 	fastify.log.debug("Registering error handling");
 	await fastify.register(errorsPlugin); // add errors to fastify instance
 
@@ -124,6 +129,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(waitlistRoutes, { prefix: "/waitlist" });
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
 	await fastify.register(helpRoutes, { prefix: "/help" });
+	await fastify.register(moderationRoutes, { prefix: "/moderations" });
 	/* ------------------- End Routes ------------------- */
 	fastify.log.info(
 		{
