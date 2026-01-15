@@ -12,7 +12,10 @@ import { envPlugin } from "./plugins/config.js";
 import { prismaPlugin } from "./plugins/db.js";
 import { errorsPlugin } from "./plugins/errors.js";
 import { inboxPlugin } from "./plugins/inbox.js";
-import { moderationPlugin } from "./plugins/moderations.js";
+import {
+	type ModerationClient,
+	moderationPlugin,
+} from "./plugins/moderations.js";
 import { paymentsPlugin } from "./plugins/payments.js";
 import { protectPlugin } from "./plugins/protect.js";
 import { queuesPlugin } from "./plugins/queues.js";
@@ -42,6 +45,7 @@ const idGenerator = hyperid();
 export interface BuildAppOptions {
 	realtime?: RestClient;
 	payments?: PaymentsClient;
+	moderation?: ModerationClient;
 }
 
 export async function buildApp(options?: BuildAppOptions) {
@@ -96,7 +100,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(inboxPlugin); // connect to inbox
 
 	fastify.log.debug("Initializing content moderation");
-	await fastify.register(moderationPlugin); // content moderation
+	await fastify.register(moderationPlugin, { instance: options?.moderation }); // content moderation
 
 	fastify.log.debug("Registering error handling");
 	await fastify.register(errorsPlugin); // add errors to fastify instance
