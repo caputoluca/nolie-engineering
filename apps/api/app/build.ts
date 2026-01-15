@@ -6,6 +6,7 @@ import Fastify from "fastify";
 import fastifyRawBody from "fastify-raw-body";
 import hyperid from "hyperid";
 import { logger } from "./logger.js";
+import { type AIClient, aiPlugin } from "./plugins/ai.js";
 import { authPlugin } from "./plugins/auth.js";
 import { cachePlugin } from "./plugins/cache.js";
 import { envPlugin } from "./plugins/config.js";
@@ -45,6 +46,7 @@ const idGenerator = hyperid();
 export interface BuildAppOptions {
 	realtime?: RestClient;
 	payments?: PaymentsClient;
+	ai?: AIClient;
 	moderation?: ModerationClient;
 }
 
@@ -98,6 +100,9 @@ export async function buildApp(options?: BuildAppOptions) {
 
 	fastify.log.debug("Initializing inbox");
 	await fastify.register(inboxPlugin); // connect to inbox
+
+	fastify.log.debug("Initializing AI client");
+	await fastify.register(aiPlugin, { instance: options?.ai }); // AI client (OpenAI)
 
 	fastify.log.debug("Initializing content moderation");
 	await fastify.register(moderationPlugin, { instance: options?.moderation }); // content moderation
