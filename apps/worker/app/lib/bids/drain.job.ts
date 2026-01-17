@@ -134,6 +134,7 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 					isProxy: !!isProxy,
 					extendToEndAt, // DB update happens in persist job
 					isExhaustion,
+					previousHighestUserId: result.previousHighestUserId,
 				},
 				{ jobId: JobIdUnique, removeOnComplete: true },
 			);

@@ -17,6 +17,7 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 		isProxy,
 		extendToEndAt,
 		isExhaustion,
+		previousHighestUserId,
 	} = job.data;
 
 	try {
@@ -67,7 +68,7 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 		});
 		await pendingBidsCache.decrement(auctionId);
 
-		// Fire-and-forget: queue notification
+		// Fire-and-forget: queue notifications
 		void ctx.queues.notifications
 			.bidPlaced({ auctionId, userId, amount, isProxy }, { jobId: bidId })
 			.catch((err) => {
@@ -80,6 +81,36 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 					"bids.persist: Failed to queue bid placed notification",
 				);
 			});
+		if (isExhaustion) {
+			// Exhaustion bid = proxy couldn't keep up, user lost
+			// Notify the proxy owner (userId) that they've been outbid
+			void ctx.queues.notifications
+				.outbid({ auctionId, userId, bidId }, { jobId: `${bidId}-${userId}` })
+				.catch((err) => {
+					reportError(err, {
+						operation: "queue_outbid_notification_exhaustion",
+						extra: { auctionId, bidId, userId },
+					});
+				});
+		} else if (previousHighestUserId && previousHighestUserId !== userId) {
+			const hasActiveProxy = await ctx.cache.auctionProxies
+				.hasActive(auctionId, previousHighestUserId)
+				.catch(() => false);
+
+			if (!hasActiveProxy) {
+				void ctx.queues.notifications
+					.outbid(
+						{ auctionId, userId: previousHighestUserId, bidId },
+						{ jobId: `${bidId}-${previousHighestUserId}` },
+					)
+					.catch((err) => {
+						reportError(err, {
+							operation: "queue_outbid_notification",
+							extra: { auctionId, bidId, userId },
+						});
+					});
+			}
+		}
 	} catch (error) {
 		if (isPrismaUniqueError(error)) {
 			// Idempotency: bid already exists = success, don't throw
