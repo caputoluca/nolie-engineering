@@ -16,6 +16,7 @@ local state = redis.call(
   "currentHighestBidAmount",
   "startingBidAmount",
   "creatorUserId",
+  "highestBidUserId",
   "version"
 )
 
@@ -23,6 +24,7 @@ local status = state[1]
 local currentHighestRaw = state[2]
 local startingBidRaw = state[3]
 local creatorUserId = state[4]
+local currentHighestBidUserId = state[5]
 
 if not status or (status ~= "active" and status ~= "scheduled") then
   return { "rejected", "${BidValidationCode.auction_not_active}", currentHighestRaw or "0" }
@@ -31,7 +33,7 @@ end
 if ARGV[3] == "1" then
   -- Exhaustion: skip validation, don't update highest
   redis.call("INCR", pendingBidsKey)
-  return { "accepted", tostring(ARGV[1]), tostring(currentHighestRaw or 0) }
+  return { "accepted", tostring(ARGV[1]), tostring(currentHighestRaw or 0), currentHighestBidUserId or "" }
 end
 
 if ARGV[2] == creatorUserId then
@@ -64,5 +66,5 @@ redis.call("HINCRBY", stateKey, "version", 1)
 
 redis.call("INCR", pendingBidsKey)
 
-return { "accepted", tostring(bidAmount), tostring(currentHighest or 0) }
+return { "accepted", tostring(bidAmount), tostring(currentHighest or 0), currentHighestBidUserId }
 `;
