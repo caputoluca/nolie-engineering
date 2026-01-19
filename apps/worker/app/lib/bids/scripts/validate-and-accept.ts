@@ -44,9 +44,16 @@ local bidAmount = tonumber(ARGV[1])
 local currentHighest = tonumber(currentHighestRaw)
 local startingBid = tonumber(startingBidRaw)
 
+-- Calculate minimum required bid amount.
+-- Proxy bids may tie-break at the current amount (allowEqualToCurrentBid = true),
+-- while manual bids must strictly exceed it.
 local minBid
 if currentHighest then
-  minBid = currentHighest + 1
+  if ARGV[4] == "1" then
+    minBid = currentHighest
+  else
+    minBid = currentHighest + 1
+  end
 else
   minBid = startingBid
 end
