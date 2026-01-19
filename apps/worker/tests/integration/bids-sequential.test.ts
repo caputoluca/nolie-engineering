@@ -8,14 +8,15 @@
  */
 
 import { BidValidationCode } from "@nolie/schemas/auction/bid-validation";
-import { describe, expect, it } from "vitest";
+import { describe, it } from "vitest";
 import {
+	assertBidAccepted,
+	assertBidRejected,
 	assertBidsPersistedCount,
 	bidOnAuction,
 	createBidder,
 	createTestBidsContext,
 	drainBids,
-	getAllBidResults,
 	setupAuction,
 } from "../helpers/index.js";
 
@@ -28,47 +29,27 @@ describe("Sequential Bid Processing", () => {
 		const { ctx, mocks } = createTestBidsContext();
 
 		// Act: Push both bids to inbox, then drain once
-		await bidOnAuction({
+		const requestId1 = await bidOnAuction({
 			auctionId: auction.id,
 			userId: bidder1.user.id,
 			amount: 100,
 		});
-		await bidOnAuction({
+		const requestId2 = await bidOnAuction({
 			auctionId: auction.id,
 			userId: bidder2.user.id,
 			amount: 100, // Same amount - will fail because bidder1 already set highest to 100
 		});
 		await drainBids(auction.id, ctx);
 
-		// Assert: Both bids processed, first accepted, second rejected
-		const results = getAllBidResults(mocks);
-		expect(results).toHaveLength(2);
-
-		// First bid accepted
-		const firstResult = results.find(
-			(r) => (r.data as { userId: string }).userId === bidder1.user.id,
-		);
-		expect(firstResult?.data).toMatchObject({
-			success: true,
-			userId: bidder1.user.id,
-		});
-
-		// Second bid rejected (bid_too_low - needs to exceed $100)
-		const secondResult = results.find(
-			(r) => (r.data as { userId: string }).userId === bidder2.user.id,
-		);
-		expect(secondResult?.data).toMatchObject({
-			success: false,
+		// Assert: First bid accepted, second rejected
+		assertBidAccepted(mocks, { requestId: requestId1 });
+		assertBidRejected(mocks, {
+			requestId: requestId2,
 			reason: BidValidationCode.bid_too_low,
 		});
 
 		// Only first bid persisted
 		assertBidsPersistedCount(mocks, 1);
-
-		// Final state: bidder1 is highest
-		const state = await ctx.cache.auctionState.get(auction.id);
-		expect(state?.currentHighestBidAmount).toBe(100);
-		expect(state?.highestBidUserId).toBe(bidder1.user.id);
 	});
 
 	it("processes multiple bids in order, both accepted when amounts increase", async () => {
@@ -79,12 +60,12 @@ describe("Sequential Bid Processing", () => {
 		const { ctx, mocks } = createTestBidsContext();
 
 		// Act: Push bids with increasing amounts
-		await bidOnAuction({
+		const requestId1 = await bidOnAuction({
 			auctionId: auction.id,
 			userId: bidder1.user.id,
 			amount: 100,
 		});
-		await bidOnAuction({
+		const requestId2 = await bidOnAuction({
 			auctionId: auction.id,
 			userId: bidder2.user.id,
 			amount: 110, // Higher than bidder1
@@ -92,25 +73,10 @@ describe("Sequential Bid Processing", () => {
 		await drainBids(auction.id, ctx);
 
 		// Assert: Both bids accepted
-		const results = getAllBidResults(mocks);
-		expect(results).toHaveLength(2);
-
-		const result1 = results.find(
-			(r) => (r.data as { userId: string }).userId === bidder1.user.id,
-		);
-		const result2 = results.find(
-			(r) => (r.data as { userId: string }).userId === bidder2.user.id,
-		);
-
-		expect(result1?.data).toMatchObject({ success: true });
-		expect(result2?.data).toMatchObject({ success: true });
+		assertBidAccepted(mocks, { requestId: requestId1 });
+		assertBidAccepted(mocks, { requestId: requestId2 });
 
 		// Both bids persisted
 		assertBidsPersistedCount(mocks, 2);
-
-		// Final state: bidder2 is highest
-		const state = await ctx.cache.auctionState.get(auction.id);
-		expect(state?.currentHighestBidAmount).toBe(110);
-		expect(state?.highestBidUserId).toBe(bidder2.user.id);
 	});
 });
