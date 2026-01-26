@@ -5,7 +5,7 @@ import {
 	type BidCreateResponse,
 	BidCreateSchema,
 } from "@nolie/schemas/auction/bid";
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BID_ERROR_MESSAGES, placeBid } from "@/lib/mutations/bids";
 import { useAuctionData } from "./auction-provider";
 import { useBidResultSubscription } from "./bid-result-subscription-provider";
@@ -33,6 +33,20 @@ export function usePlaceBid(
 	const { id } = useAuctionData();
 	const amount = useNextBidAmount();
 	const { waitForResult } = useBidResultSubscription();
+	const [submittedAmount, setSubmittedAmount] = useState<number | null>(null);
+	const prevOpenRef = useRef(open);
+
+	// Reset submitted amount when modal opens
+	useEffect(() => {
+		const prevOpen = prevOpenRef.current;
+		const isOpening = !prevOpen && open;
+
+		if (isOpening) {
+			setSubmittedAmount(null);
+		}
+
+		prevOpenRef.current = open;
+	}, [open]);
 
 	// AbortController for cancelling the wait if modal closes
 	const abortControllerRef = useRef<AbortController | null>(null);
@@ -59,6 +73,9 @@ export function usePlaceBid(
 						},
 					});
 				}
+
+				// Track the submitted amount for confirmation display
+				setSubmittedAmount(amount);
 
 				// Step 1: Call API to queue the bid
 				const apiResponse = await placeBid({ amount, auctionId: id });
@@ -136,7 +153,7 @@ export function usePlaceBid(
 		[amount, id, waitForResult],
 	);
 
-	return usePlaceBidShared({
+	const result = usePlaceBidShared({
 		createMutationFn,
 		schema: BidCreateSchema,
 		errorMessage:
@@ -147,4 +164,9 @@ export function usePlaceBid(
 		bidAmount: amount,
 		bidType: "bid_now",
 	});
+
+	return {
+		...result,
+		submittedAmount,
+	};
 }
