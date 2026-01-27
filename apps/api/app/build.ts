@@ -1,6 +1,7 @@
 import fastifyCookie from "@fastify/cookie";
 import corsPlugin from "@fastify/cors";
 import type { PaymentsClient } from "@nolie/payments";
+import type { NoLieQueues } from "@nolie/queues";
 import type { RestClient } from "@nolie/realtime/server";
 import Fastify from "fastify";
 import fastifyRawBody from "fastify-raw-body";
@@ -48,6 +49,7 @@ export interface BuildAppOptions {
 	payments?: PaymentsClient;
 	ai?: AIClient;
 	moderation?: ModerationClient;
+	queues?: NoLieQueues;
 }
 
 export async function buildApp(options?: BuildAppOptions) {
@@ -90,7 +92,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(realtimePlugin, { instance: options?.realtime }); // connect to realtime
 
 	fastify.log.debug("Initializing queues");
-	await fastify.register(queuesPlugin); // connect to queues
+	await fastify.register(queuesPlugin, { instance: options?.queues }); // connect to queues
 
 	fastify.log.debug("Initializing cache");
 	await fastify.register(cachePlugin); // connect to cache
