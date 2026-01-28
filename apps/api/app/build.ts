@@ -25,6 +25,7 @@ import { rateLimitPlugin } from "./plugins/rate-limit.js";
 import { realtimePlugin } from "./plugins/realtime.js";
 import { redisPlugin } from "./plugins/redis.js";
 import { schemasPlugin } from "./plugins/schemas.js";
+import { underPressurePlugin } from "./plugins/under-pressure.js";
 import { agreementsRoutes } from "./routes/agreements.js";
 import { auctionRoutes } from "./routes/auctions/index.js";
 import { authRoutes } from "./routes/auth/index.js";
@@ -80,6 +81,9 @@ export async function buildApp(options?: BuildAppOptions) {
 
 	fastify.log.debug("Configuring raw body support");
 	await fastify.register(fastifyRawBody, { global: false });
+
+	fastify.log.debug("Configuring under-pressure (load shedding)");
+	await fastify.register(underPressurePlugin);
 
 	fastify.log.debug("Verifying Redis connection");
 	await fastify.register(redisPlugin);
