@@ -1,0 +1,229 @@
+"use client";
+
+import type { BidResultEventSchema } from "@nolie/schemas/auction/bid";
+import {
+	createContext,
+	useCallback,
+	useContext,
+	useEffect,
+	useRef,
+} from "react";
+import type { z } from "zod";
+import { logger } from "@/lib/logger";
+import { useRealtimeContext } from "./realtime-provider";
+import { useRealtime } from "./use-realtime";
+import { useUser } from "./use-user";
+
+export type BidResultEvent = z.infer<typeof BidResultEventSchema>;
+
+interface PendingBid {
+	resolve: (event: BidResultEvent) => void;
+	reject: (error: Error) => void;
+}
+
+interface BidResultSubscriptionContextValue {
+	/**
+	 * Ensure the bid result subscription is active.
+	 * Call this when opening the bid modal.
+	 * - If already subscribed: no-op (returns immediately)
+	 * - If reauth in progress: awaits it, then subscribes
+	 * - Otherwise: subscribes immediately
+	 */
+	ensureSubscribed: () => Promise<void>;
+	/**
+	 * Wait for a bid result matching the given requestId.
+	 * @param requestId - The requestId returned from the bid API
+	 * @param signal - Optional AbortSignal for timeout/cancellation
+	 * @returns Promise that resolves with the BidResultEvent
+	 * @throws DOMException with name "AbortError" if signal is aborted
+	 */
+	waitForResult: (
+		requestId: string,
+		signal?: AbortSignal,
+	) => Promise<BidResultEvent>;
+}
+
+const BidResultSubscriptionContext =
+	createContext<BidResultSubscriptionContextValue | null>(null);
+
+/**
+ * Provider that manages the bid result websocket subscription.
+ *
+ * Subscription strategy:
+ * - Eager: If user exists on mount, subscribe immediately
+ * - Lazy: If user logs in mid-session, subscribe when modal opens via ensureSubscribed()
+ * - Cleanup: Unsubscribe and detach channel when user logs out (prevents FAILED state)
+ */
+export function BidResultSubscriptionProvider({
+	children,
+}: {
+	children: React.ReactNode;
+}) {
+	const { client, getReauthorizePromise } = useRealtimeContext();
+	const rt = useRealtime();
+	const user = useUser();
+
+	const pendingBidsRef = useRef<Map<string, PendingBid>>(new Map());
+	const unsubscribeRef = useRef<(() => void) | null>(null);
+	const subscribedUserIdRef = useRef<string | null>(null);
+
+	// Helper to subscribe to user channel
+	const subscribe = useCallback(
+		(userId: string) => {
+			if (subscribedUserIdRef.current === userId) {
+				return; // Already subscribed
+			}
+
+			try {
+				unsubscribeRef.current = rt.bid.result.subscribe(userId, (event) => {
+					const pending = pendingBidsRef.current.get(event.requestId);
+					if (pending) {
+						pendingBidsRef.current.delete(event.requestId);
+						pending.resolve(event);
+					}
+				});
+				subscribedUserIdRef.current = userId;
+				logger.debug({ userId }, "Bid result subscription active");
+			} catch (error) {
+				logger.error({ error, userId }, "Failed to subscribe to bid results");
+				throw error;
+			}
+		},
+		[rt],
+	);
+
+	// Helper to cleanup subscription
+	const cleanup = useCallback(
+		(userId: string | null) => {
+			if (unsubscribeRef.current) {
+				unsubscribeRef.current();
+				unsubscribeRef.current = null;
+			}
+
+			// Detach the channel to prevent FAILED state when token capabilities change
+			// Only detaches if channel is attached (avoids race conditions on page refresh)
+			if (userId) {
+				client.detachChannel(`user:${userId}`);
+			}
+
+			subscribedUserIdRef.current = null;
+		},
+		[client],
+	);
+
+	// Eager subscribe: If user exists on mount, subscribe immediately
+	// biome-ignore lint/correctness/useExhaustiveDependencies: Intentionally only run on mount
+	useEffect(() => {
+		if (user?.id) {
+			subscribe(user.id);
+		}
+	}, []);
+
+	// Cleanup when user logs out
+	useEffect(() => {
+		if (!user?.id && subscribedUserIdRef.current) {
+			const userId = subscribedUserIdRef.current;
+			cleanup(userId);
+
+			// Reject any pending bids
+			for (const [requestId, pending] of pendingBidsRef.current) {
+				pending.reject(
+					new DOMException(
+						`User logged out while waiting for bid ${requestId}`,
+						"AbortError",
+					),
+				);
+			}
+			pendingBidsRef.current.clear();
+		}
+	}, [user?.id, cleanup]);
+
+	// Cleanup on unmount
+	useEffect(() => {
+		return () => {
+			const userId = subscribedUserIdRef.current;
+			cleanup(userId);
+			for (const [requestId, pending] of pendingBidsRef.current) {
+				pending.reject(
+					new DOMException(
+						`Provider unmounted while waiting for bid ${requestId}`,
+						"AbortError",
+					),
+				);
+			}
+			pendingBidsRef.current.clear();
+		};
+	}, [cleanup]);
+
+	// Ensure subscription is active - call when modal opens
+	const ensureSubscribed = useCallback(async () => {
+		if (!user?.id) {
+			return; // No user, can't subscribe
+		}
+
+		if (subscribedUserIdRef.current === user.id) {
+			return; // Already subscribed
+		}
+
+		// Wait for any pending reauthorization
+		const pendingReauth = getReauthorizePromise();
+		if (pendingReauth) {
+			await pendingReauth;
+		}
+
+		// Now safe to subscribe
+		subscribe(user.id);
+	}, [user?.id, getReauthorizePromise, subscribe]);
+
+	const waitForResult = useCallback(
+		(requestId: string, signal?: AbortSignal): Promise<BidResultEvent> => {
+			return new Promise((resolve, reject) => {
+				if (signal?.aborted) {
+					reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+					return;
+				}
+
+				const onAbort = () => {
+					pendingBidsRef.current.delete(requestId);
+					reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+				};
+
+				signal?.addEventListener("abort", onAbort, { once: true });
+
+				pendingBidsRef.current.set(requestId, {
+					resolve: (event) => {
+						signal?.removeEventListener("abort", onAbort);
+						resolve(event);
+					},
+					reject: (error) => {
+						signal?.removeEventListener("abort", onAbort);
+						reject(error);
+					},
+				});
+			});
+		},
+		[],
+	);
+
+	return (
+		<BidResultSubscriptionContext.Provider
+			value={{ ensureSubscribed, waitForResult }}
+		>
+			{children}
+		</BidResultSubscriptionContext.Provider>
+	);
+}
+
+/**
+ * Hook to access the bid result subscription context.
+ * Must be used inside BidResultSubscriptionProvider.
+ */
+export function useBidResultSubscription(): BidResultSubscriptionContextValue {
+	const context = useContext(BidResultSubscriptionContext);
+	if (!context) {
+		throw new Error(
+			"useBidResultSubscription must be used inside <BidResultSubscriptionProvider>",
+		);
+	}
+	return context;
+}

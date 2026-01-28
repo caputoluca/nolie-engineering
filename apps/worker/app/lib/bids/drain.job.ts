@@ -22,6 +22,7 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 				user,
 				isExhaustion,
 				isProxy,
+				allowEqualToCurrentBid,
 			} = item;
 
 			// Get auction state (from cache or DB fallback)
@@ -40,6 +41,7 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 					amount,
 					userId,
 					isExhaustion: item.isExhaustion ?? false,
+					allowEqualToCurrentBid: allowEqualToCurrentBid ?? false,
 				},
 				ctx.cache,
 				ctx.redis,

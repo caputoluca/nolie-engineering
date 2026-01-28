@@ -56,9 +56,23 @@ export function shouldExtendAuction(
 	} as const;
 }
 
+/**
+ * Minimum bid increment by price tier.
+ *
+ * $1–$49 → +$1
+ * $50–$199 → +$5
+ * $200–$499 → +$10
+ * $500–$999 → +$25
+ * $1,000–$4,999 → +$50
+ * $5,000+ → +$100
+ *
+ * ⚠️ DUPLICATED in Lua for atomic Redis validation.
+ * If you change this, also update:
+ * apps/worker/app/lib/bids/scripts/validate-and-accept.ts
+ */
 export function getMinimumIncrement(amount: number): number {
-	if (amount < 100) return 1;
-	if (amount < 250) return 5;
+	if (amount < 50) return 1;
+	if (amount < 200) return 5;
 	if (amount < 500) return 10;
 	if (amount < 1000) return 25;
 	if (amount < 5000) return 50;
