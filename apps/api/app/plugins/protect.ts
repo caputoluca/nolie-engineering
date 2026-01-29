@@ -1,4 +1,5 @@
 import { isOnboardingComplete } from "@nolie/core/onboarding";
+import { isPrismaRecordNotFoundError } from "@nolie/db";
 import type { OnboardingStepType } from "@nolie/schemas/onboarding/step";
 import type { UserRoleType } from "@nolie/schemas/user";
 import type { RequestRouteOptions } from "fastify/types/request.js";
@@ -50,9 +51,21 @@ export const protectPlugin = fp(
 			}
 
 			try {
-				const session = await fastify.auth.api.getSession({
-					headers: request.headers,
-				});
+				let session: Awaited<ReturnType<typeof fastify.auth.api.getSession>> =
+					null;
+				try {
+					session = await fastify.auth.api.getSession({
+						headers: request.headers,
+					});
+				} catch (error) {
+					if (isPrismaRecordNotFoundError(error)) {
+						return reply.status(401).send({
+							code: "UNAUTHORIZED",
+							message: "Unauthorized",
+						});
+					}
+					throw error;
+				}
 
 				if (!session) {
 					fastify.log.warn(
