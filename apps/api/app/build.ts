@@ -37,6 +37,7 @@ import { helpRoutes } from "./routes/help.js";
 import { meRoutes } from "./routes/me/index.js";
 import { moderationRoutes } from "./routes/moderations.js";
 import { realtimeRoutes } from "./routes/realtime.js";
+import { sitemapRoutes } from "./routes/sitemap.js";
 import { stripeRoutes } from "./routes/stripe.js";
 import { uploadsRoutes } from "./routes/uploads.js";
 
@@ -143,6 +144,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
 	await fastify.register(helpRoutes, { prefix: "/help" });
 	await fastify.register(moderationRoutes, { prefix: "/moderations" });
+	await fastify.register(sitemapRoutes, { prefix: "/sitemap" });
 	/* ------------------- End Routes ------------------- */
 	fastify.log.info(
 		{
