@@ -10,7 +10,7 @@ import {
 } from "react";
 import type { z } from "zod";
 import { logger } from "@/lib/logger";
-import { reportError } from "@/lib/observability/sentry/report-error-message";
+import { setReportingContext } from "@/lib/observability/sentry/report-error-message";
 import { useRealtimeContext } from "./realtime-provider";
 import { useRealtime } from "./use-realtime";
 import { useUser } from "./use-user";
@@ -87,7 +87,7 @@ export function BidResultSubscriptionProvider({
 				logger.debug({ userId }, "Bid result subscription active");
 			} catch (error) {
 				logger.error({ error, userId }, "Failed to subscribe to bid results");
-				reportError(error, {
+				setReportingContext({
 					operation: "bid_result_subscription",
 					extra: { userId },
 				});
