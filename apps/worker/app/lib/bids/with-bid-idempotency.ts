@@ -5,6 +5,7 @@ import {
 	releaseIdempotency,
 } from "@nolie/redis/idempotency";
 import { logger } from "../../logger.js";
+import { reportError } from "../observability/sentry/report.js";
 
 const TTL_SECONDS = 3600;
 
@@ -34,7 +35,12 @@ export function withBidIdempotency<T>(
 
 			return output;
 		} catch (error) {
-			await releaseIdempotency(idempotencyKey).catch(() => {});
+			await releaseIdempotency(idempotencyKey).catch((releaseErr) => {
+				reportError(releaseErr, {
+					operation: "release_bid_idempotency",
+					extra: { requestId, idempotencyKey },
+				});
+			});
 			throw error; // let BullMQ retry the job
 		}
 	};

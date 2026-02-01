@@ -7,6 +7,7 @@ import {
 } from "@nolie/schemas/auction/bid";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BID_ERROR_MESSAGES, placeBid } from "@/lib/mutations/bids";
+import { reportErrorMessage } from "@/lib/observability/sentry/report-error-message";
 import { useAuctionData } from "./auction-provider";
 import { useBidResultSubscription } from "./bid-result-subscription-provider";
 import { useNextBidAmount } from "./use-next-bid-amount";
@@ -128,6 +129,11 @@ export function usePlaceBid(
 
 						if (isTimeout) {
 							// Timeout - show warning state
+							reportErrorMessage("Bid result confirmation timed out", {
+								level: "warning",
+								operation: "bid_result_timeout",
+								extra: { auctionId: id, requestId },
+							});
 							return fail<typeof BidCreateSchema>({
 								errors: {
 									general: [BID_TIMEOUT_ERROR],
