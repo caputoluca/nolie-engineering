@@ -12,10 +12,15 @@ const config = new pulumi.Config();
 const apiCpu = config.requireNumber("apiCpu");
 const apiMemory = config.requireNumber("apiMemory");
 const apiDesiredCount = config.requireNumber("apiDesiredCount");
+const apiMinCount = config.requireNumber("apiMinCount");
+const apiMaxCount = config.requireNumber("apiMaxCount");
 const workerCpu = config.requireNumber("workerCpu");
 const workerMemory = config.requireNumber("workerMemory");
 const workerDesiredCount = config.requireNumber("workerDesiredCount");
+const workerMinCount = config.requireNumber("workerMinCount");
+const workerMaxCount = config.requireNumber("workerMaxCount");
 const imageTag = config.require("imageTag");
+const apiDomain = config.require("apiDomain");
 
 // =============================================================================
 // Secrets Helper
@@ -133,11 +138,55 @@ const apiTargetGroup = new aws.lb.TargetGroup(`nolie-api-${stack}`, {
 	},
 });
 
-// HTTP listener (we'll add HTTPS with cert later)
-const httpListener = new aws.lb.Listener(`nolie-http-${stack}`, {
+// =============================================================================
+// ACM Certificate
+// =============================================================================
+
+const certificate = new aws.acm.Certificate(`nolie-cert-${stack}`, {
+	domainName: apiDomain,
+	validationMethod: "DNS",
+	tags: { Environment: stack },
+});
+
+// Export validation records for Cloudflare DNS
+export const certificateValidation = certificate.domainValidationOptions;
+
+// Wait for certificate to be validated before using it
+const certificateValidated = new aws.acm.CertificateValidation(
+	`nolie-cert-validation-${stack}`,
+	{
+		certificateArn: certificate.arn,
+	},
+);
+
+// =============================================================================
+// ALB Listeners
+// =============================================================================
+
+// HTTP listener - redirect to HTTPS
+const _httpListener = new aws.lb.Listener(`nolie-http-${stack}`, {
 	loadBalancerArn: alb.arn,
 	port: 80,
 	protocol: "HTTP",
+	defaultActions: [
+		{
+			type: "redirect",
+			redirect: {
+				port: "443",
+				protocol: "HTTPS",
+				statusCode: "HTTP_301",
+			},
+		},
+	],
+});
+
+// HTTPS listener
+const _httpsListener = new aws.lb.Listener(`nolie-https-${stack}`, {
+	loadBalancerArn: alb.arn,
+	port: 443,
+	protocol: "HTTPS",
+	sslPolicy: "ELBSecurityPolicy-TLS13-1-2-2021-06",
+	certificateArn: certificateValidated.certificateArn,
 	defaultActions: [
 		{
 			type: "forward",
@@ -295,6 +344,82 @@ export const workerService = new awsx.ecs.FargateService(
 		},
 	},
 );
+
+// =============================================================================
+// Autoscaling - API
+// =============================================================================
+
+const apiScalingTarget = new aws.appautoscaling.Target(`api-scaling-${stack}`, {
+	maxCapacity: apiMaxCount,
+	minCapacity: apiMinCount,
+	resourceId: pulumi.interpolate`service/${cluster.name}/${apiService.service.name}`,
+	scalableDimension: "ecs:service:DesiredCount",
+	serviceNamespace: "ecs",
+});
+
+// Scale based on requests per target (primary policy)
+new aws.appautoscaling.Policy(`api-scaling-requests-${stack}`, {
+	policyType: "TargetTrackingScaling",
+	resourceId: apiScalingTarget.resourceId,
+	scalableDimension: apiScalingTarget.scalableDimension,
+	serviceNamespace: apiScalingTarget.serviceNamespace,
+	targetTrackingScalingPolicyConfiguration: {
+		predefinedMetricSpecification: {
+			predefinedMetricType: "ALBRequestCountPerTarget",
+			resourceLabel: pulumi.interpolate`${alb.arnSuffix}/${apiTargetGroup.arnSuffix}`,
+		},
+		targetValue: 2000, // requests per target per minute (~33 RPS)
+		scaleInCooldown: 300, // 5 min - scale in slowly
+		scaleOutCooldown: 60, // 1 min - scale out fast
+	},
+});
+
+// Scale based on CPU (secondary safety net)
+new aws.appautoscaling.Policy(`api-scaling-cpu-${stack}`, {
+	policyType: "TargetTrackingScaling",
+	resourceId: apiScalingTarget.resourceId,
+	scalableDimension: apiScalingTarget.scalableDimension,
+	serviceNamespace: apiScalingTarget.serviceNamespace,
+	targetTrackingScalingPolicyConfiguration: {
+		predefinedMetricSpecification: {
+			predefinedMetricType: "ECSServiceAverageCPUUtilization",
+		},
+		targetValue: 70, // scale when CPU hits 70%
+		scaleInCooldown: 300,
+		scaleOutCooldown: 60,
+	},
+});
+
+// =============================================================================
+// Autoscaling - Worker
+// =============================================================================
+
+const workerScalingTarget = new aws.appautoscaling.Target(
+	`worker-scaling-${stack}`,
+	{
+		maxCapacity: workerMaxCount,
+		minCapacity: workerMinCount,
+		resourceId: pulumi.interpolate`service/${cluster.name}/${workerService.service.name}`,
+		scalableDimension: "ecs:service:DesiredCount",
+		serviceNamespace: "ecs",
+	},
+);
+
+// Scale based on CPU utilization (best for background workers)
+new aws.appautoscaling.Policy(`worker-scaling-policy-${stack}`, {
+	policyType: "TargetTrackingScaling",
+	resourceId: workerScalingTarget.resourceId,
+	scalableDimension: workerScalingTarget.scalableDimension,
+	serviceNamespace: workerScalingTarget.serviceNamespace,
+	targetTrackingScalingPolicyConfiguration: {
+		predefinedMetricSpecification: {
+			predefinedMetricType: "ECSServiceAverageCPUUtilization",
+		},
+		targetValue: 70, // scale when CPU hits 70%
+		scaleInCooldown: 300,
+		scaleOutCooldown: 60,
+	},
+});
 
 // =============================================================================
 // Exports
