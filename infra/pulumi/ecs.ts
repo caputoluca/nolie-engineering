@@ -73,6 +73,7 @@ const API_SECRETS = [
 	"OPENAI_API_KEY",
 	"TRUSTED_ORIGINS",
 	"SENTRY_DSN",
+	"NOLIE_RATE_LIMITING_ENABLED",
 	// PORT is set in environment array
 ];
 
