@@ -15,6 +15,7 @@ const apiDesiredCount = config.requireNumber("apiDesiredCount");
 const workerCpu = config.requireNumber("workerCpu");
 const workerMemory = config.requireNumber("workerMemory");
 const workerDesiredCount = config.requireNumber("workerDesiredCount");
+const imageTag = config.require("imageTag");
 
 // =============================================================================
 // Secrets Helper
@@ -44,7 +45,7 @@ const API_SECRETS = [
 	"FRONTEND_URL",
 	"SOCIAL_SIGN_IN_REDIRECT_URL",
 	"EMAIL_VERIFICATION_URL",
-	"HOST",
+	// HOST is set in environment array
 	"COOKIE_DOMAIN",
 	"APP_BASE_URL",
 	"QUEUE_PREFIX",
@@ -67,7 +68,7 @@ const API_SECRETS = [
 	"OPENAI_API_KEY",
 	"TRUSTED_ORIGINS",
 	"SENTRY_DSN",
-	"PORT",
+	// PORT is set in environment array
 ];
 
 const WORKER_SECRETS = [
@@ -90,6 +91,7 @@ const WORKER_SECRETS = [
 	"QUEUE_LATENCY_WARN_MS",
 	"QUEUE_LATENCY_ERROR_MS",
 	"SENTRY_DSN",
+	"STRIPE_API_KEY",
 ];
 
 // =============================================================================
@@ -224,7 +226,7 @@ export const apiService = new awsx.ecs.FargateService(`nolie-api-${stack}`, {
 		taskRole: { roleArn: taskRole.arn },
 		container: {
 			name: "api",
-			image: pulumi.interpolate`${apiRepoURL}:latest`,
+			image: pulumi.interpolate`${apiRepoURL}:${imageTag}`,
 			cpu: apiCpu,
 			memory: apiMemory,
 			essential: true,
@@ -242,6 +244,7 @@ export const apiService = new awsx.ecs.FargateService(`nolie-api-${stack}`, {
 				{ name: "REDIS_URL", value: redisEndpoint },
 				{ name: "PORT", value: "8000" },
 				{ name: "HOST", value: "0.0.0.0" },
+				{ name: "SENTRY_ENVIRONMENT", value: stack },
 			],
 			secrets: secrets(API_SECRETS, "api"),
 		},
@@ -271,7 +274,7 @@ export const workerService = new awsx.ecs.FargateService(
 			taskRole: { roleArn: taskRole.arn },
 			container: {
 				name: "worker",
-				image: pulumi.interpolate`${workerRepoURL}:latest`,
+				image: pulumi.interpolate`${workerRepoURL}:${imageTag}`,
 				cpu: workerCpu,
 				memory: workerMemory,
 				essential: true,
@@ -281,6 +284,7 @@ export const workerService = new awsx.ecs.FargateService(
 						value: NODE_ENV,
 					},
 					{ name: "REDIS_URL", value: redisEndpoint },
+					{ name: "SENTRY_ENVIRONMENT", value: stack },
 				],
 				secrets: secrets(WORKER_SECRETS, "worker"),
 			},
