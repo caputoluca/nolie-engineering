@@ -19,7 +19,16 @@ const workerMemory = config.requireNumber("workerMemory");
 const workerDesiredCount = config.requireNumber("workerDesiredCount");
 const workerMinCount = config.requireNumber("workerMinCount");
 const workerMaxCount = config.requireNumber("workerMaxCount");
-const imageTag = config.require("imageTag");
+// Image tags: always required via environment variable
+// For initial deploy, set API_IMAGE_TAG and WORKER_IMAGE_TAG env vars manually
+const apiImageTag = process.env.API_IMAGE_TAG;
+const workerImageTag = process.env.WORKER_IMAGE_TAG;
+
+if (!apiImageTag || !workerImageTag) {
+	throw new Error(
+		"API_IMAGE_TAG and WORKER_IMAGE_TAG environment variables are required",
+	);
+}
 const apiDomain = config.require("apiDomain");
 
 // =============================================================================
@@ -260,6 +269,7 @@ const NODE_ENV = config.require("nodeEnv");
 export const apiService = new awsx.ecs.FargateService(`nolie-api-${stack}`, {
 	cluster: cluster.arn,
 	desiredCount: apiDesiredCount,
+	healthCheckGracePeriodSeconds: 10, // Wait 10s before ALB health checks count
 	networkConfiguration: {
 		subnets: vpc.privateSubnetIds,
 		securityGroups: [ecsSecurityGroup.id],
@@ -276,7 +286,7 @@ export const apiService = new awsx.ecs.FargateService(`nolie-api-${stack}`, {
 		taskRole: { roleArn: taskRole.arn },
 		container: {
 			name: "api",
-			image: pulumi.interpolate`${apiRepoURL}:${imageTag}`,
+			image: pulumi.interpolate`${apiRepoURL}:${apiImageTag}`,
 			cpu: apiCpu,
 			memory: apiMemory,
 			essential: true,
@@ -324,7 +334,7 @@ export const workerService = new awsx.ecs.FargateService(
 			taskRole: { roleArn: taskRole.arn },
 			container: {
 				name: "worker",
-				image: pulumi.interpolate`${workerRepoURL}:${imageTag}`,
+				image: pulumi.interpolate`${workerRepoURL}:${workerImageTag}`,
 				cpu: workerCpu,
 				memory: workerMemory,
 				essential: true,
@@ -428,3 +438,7 @@ new aws.appautoscaling.Policy(`worker-scaling-policy-${stack}`, {
 
 export const albDnsName = alb.dnsName;
 export const clusterName = cluster.name;
+
+// Export current image tags so CI can query them for unchanged services
+export const currentApiImageTag = apiImageTag;
+export const currentWorkerImageTag = workerImageTag;
