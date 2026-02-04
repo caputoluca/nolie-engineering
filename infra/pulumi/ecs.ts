@@ -46,7 +46,7 @@ const secrets = (names: string[], service: "api" | "worker") =>
 	pulumi.all([awsIdentity, awsRegion]).apply(([identity, region]) =>
 		names.map((name) => ({
 			name,
-			valueFrom: `arn:aws:secretsmanager:${region.region}:${identity.accountId}:secret:nolie/${stack}/${service}/${name}`,
+			valueFrom: `arn:aws:secretsmanager:${region.region}:${identity.accountId}:secret:nolie/${stack}/${service}:${name}::`,
 		})),
 	);
 
