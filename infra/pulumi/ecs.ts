@@ -369,13 +369,13 @@ new aws.appautoscaling.Policy(`api-scaling-requests-${stack}`, {
 			predefinedMetricType: "ALBRequestCountPerTarget",
 			resourceLabel: pulumi.interpolate`${alb.arnSuffix}/${apiTargetGroup.arnSuffix}`,
 		},
-		targetValue: 2000, // requests per target per minute (~33 RPS)
+		targetValue: 1000, // requests per target per minute (~17 RPS) - lower for earlier scaling
 		scaleInCooldown: 300, // 5 min - scale in slowly
-		scaleOutCooldown: 60, // 1 min - scale out fast
+		scaleOutCooldown: 30, // 30s - scale out faster
 	},
 });
 
-// Scale based on CPU (secondary safety net)
+// Scale based on CPU
 new aws.appautoscaling.Policy(`api-scaling-cpu-${stack}`, {
 	policyType: "TargetTrackingScaling",
 	resourceId: apiScalingTarget.resourceId,
@@ -385,9 +385,9 @@ new aws.appautoscaling.Policy(`api-scaling-cpu-${stack}`, {
 		predefinedMetricSpecification: {
 			predefinedMetricType: "ECSServiceAverageCPUUtilization",
 		},
-		targetValue: 70, // scale when CPU hits 70%
+		targetValue: 45, // scale when CPU hits 45% - gives headroom
 		scaleInCooldown: 300,
-		scaleOutCooldown: 60,
+		scaleOutCooldown: 30, // faster scale-out (30s instead of 60s)
 	},
 });
 
