@@ -1,0 +1,224 @@
+name: Deploy API and Worker
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+
+concurrency:
+  group: deploy-api-and-worker-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  detect-changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      api: ${{ steps.filter.outputs.api }}
+      worker: ${{ steps.filter.outputs.worker }}
+      migrations: ${{ steps.filter.outputs.migrations }}
+      infra: ${{ steps.filter.outputs.infra }}
+      sha: ${{ steps.sha.outputs.short }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          base: ${{ github.ref }}
+          filters: |
+            api:
+              - 'packages/**'
+              - 'apps/api/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'turbo.json'
+              - 'infra/docker/Dockerfile.api'
+            worker:
+              - 'packages/**'
+              - 'apps/worker/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'turbo.json'
+              - 'infra/docker/Dockerfile.worker'
+            migrations:
+              - 'packages/db/prisma/**'
+            infra:
+              - 'infra/pulumi/**'
+  migrate:
+    name: Run Prisma migrations
+    needs: [detect-changes]
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'ci-production' || 'ci-staging' }}
+    env:
+      TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+      TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Validate DATABASE_URL
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "DATABASE_URL is not set"
+            exit 1
+          fi
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Run migrations
+        run: pnpm --filter=@nolie/db db:deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+  build-api:
+    name: Build API image
+    needs: [detect-changes, migrate]
+    if: needs.detect-changes.outputs.api == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'ci-production' || 'ci-staging' }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.api
+          push: true
+          tags: ${{ secrets.ECR_API_REPO }}:${{ needs.detect-changes.outputs.sha }}
+          build-args: |
+            SENTRY_AUTH_TOKEN=${{ secrets.SENTRY_AUTH_TOKEN }}
+            TURBO_TOKEN=${{ secrets.TURBO_TOKEN }}
+            TURBO_TEAM=${{ secrets.TURBO_TEAM }}
+          platforms: linux/amd64
+
+  build-worker:
+    name: Build Worker image
+    needs: [detect-changes, migrate]
+    if: needs.detect-changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'ci-production' || 'ci-staging' }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.worker
+          push: true
+          tags: ${{ secrets.ECR_WORKER_REPO }}:${{ needs.detect-changes.outputs.sha }}
+          build-args: |
+            SENTRY_AUTH_TOKEN=${{ secrets.SENTRY_AUTH_TOKEN }}
+            TURBO_TOKEN=${{ secrets.TURBO_TOKEN }}
+            TURBO_TEAM=${{ secrets.TURBO_TEAM }}
+          platforms: linux/amd64
+
+  deploy:
+    name: Deploy to ECS
+    needs: [detect-changes, migrate, build-api, build-worker]
+    if: |
+      always() &&
+      needs.migrate.result == 'success' &&
+      (needs.build-api.result == 'success' || needs.build-api.result == 'skipped') &&
+      (needs.build-worker.result == 'success' || needs.build-worker.result == 'skipped') &&
+      (needs.detect-changes.outputs.api == 'true' || needs.detect-changes.outputs.worker == 'true' || needs.detect-changes.outputs.infra == 'true')
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'ci-production' || 'ci-staging' }}
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Get current image tags from Pulumi
+        id: current-tags
+        working-directory: infra/pulumi
+        run: |
+          pulumi stack select ${{ github.ref_name == 'main' && 'prod' || 'staging' }}
+          echo "api=$(pulumi stack output currentApiImageTag 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+          echo "worker=$(pulumi stack output currentWorkerImageTag 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
+
+      - name: Determine image tags
+        id: tags
+        run: |
+          # Use new SHA if service changed, otherwise keep current deployed tag
+          if [ "${{ needs.detect-changes.outputs.api }}" == "true" ]; then
+            echo "api=${{ needs.detect-changes.outputs.sha }}" >> $GITHUB_OUTPUT
+          else
+            echo "api=${{ steps.current-tags.outputs.api }}" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "${{ needs.detect-changes.outputs.worker }}" == "true" ]; then
+            echo "worker=${{ needs.detect-changes.outputs.sha }}" >> $GITHUB_OUTPUT
+          else
+            echo "worker=${{ steps.current-tags.outputs.worker }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy with Pulumi
+        uses: pulumi/actions@v6
+        with:
+          command: up
+          stack-name: ${{ github.ref_name == 'main' && 'prod' || 'staging' }}
+          work-dir: infra/pulumi
+        env:
+          API_IMAGE_TAG: ${{ steps.tags.outputs.api }}
+          WORKER_IMAGE_TAG: ${{ steps.tags.outputs.worker }}
