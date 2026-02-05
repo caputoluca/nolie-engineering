@@ -12,6 +12,34 @@ import { reportWarning } from "../../observability/sentry/report.js";
 import { getAuctionForBid, getUserForBidWithProfile } from "./utils.js";
 import { validateBidOrThrow } from "./validate.js";
 
+/**
+ * Loads auction state from DB without populating the cache.
+ *
+ * IMPORTANT: We intentionally do NOT use cache.get()'s load callback here.
+ * Using the load callback would call update() which does DEL + HSET on the cache.
+ * Under high concurrency, multiple API requests can see a cache miss simultaneously,
+ * and their slow DB queries can complete AFTER the worker's Lua script has already
+ * updated the cache with new bid data. This causes stale DB data to clobber
+ * the Lua's writes, leading to duplicate bids being accepted.
+ *
+ * The worker's getCachedAuctionState() is the only code that should populate this
+ * cache, since drain jobs are processed sequentially per auction.
+ */
+async function fallbackLoadState(auctionId: string, db: PrismaClient) {
+	const auction = await getAuctionForBid(db, auctionId);
+	return {
+		auctionId: auction.id,
+		currentHighestBidAmount: auction.currentHighestBid,
+		highestBidUserId: auction.currentHighestBidUserId,
+		version: 1,
+		startingBidAmount: auction.startingBid.toNumber(),
+		creatorUserId: auction.creator.userId,
+		itemType: auction.itemType,
+		status: auction.status,
+		endAt: auction.endAt,
+	};
+}
+
 export async function validateBidFromCache(
 	cache: CacheOf<"auctionState">,
 	db: PrismaClient,
@@ -25,22 +53,8 @@ export async function validateBidFromCache(
 		amount: number;
 	},
 ) {
-	const auction = await cache.get(auctionId, {
-		load: async () => {
-			const auction = await getAuctionForBid(db, auctionId);
-			return {
-				auctionId: auction.id,
-				currentHighestBidAmount: auction.currentHighestBid,
-				highestBidUserId: auction.currentHighestBidUserId,
-				version: 1,
-				startingBidAmount: auction.startingBid.toNumber(),
-				creatorUserId: auction.creator.userId,
-				itemType: auction.itemType,
-				status: auction.status,
-				endAt: auction.endAt,
-			};
-		},
-	});
+	const auction =
+		(await cache.get(auctionId)) ?? (await fallbackLoadState(auctionId, db));
 
 	if (!auction) {
 		throw errors.notFound("Auction not found", {
