@@ -21,8 +21,13 @@ const workerMinCount = config.requireNumber("workerMinCount");
 const workerMaxCount = config.requireNumber("workerMaxCount");
 // Image tags: always required via environment variable
 // For initial deploy, set API_IMAGE_TAG and WORKER_IMAGE_TAG env vars manually
-const apiImageTag = process.env.API_IMAGE_TAG;
-const workerImageTag = process.env.WORKER_IMAGE_TAG;
+
+const isDryRun = pulumi.runtime.isDryRun();
+
+const apiImageTag =
+	process.env.API_IMAGE_TAG || (isDryRun ? "dry-run" : undefined);
+const workerImageTag =
+	process.env.WORKER_IMAGE_TAG || (isDryRun ? "dry-run" : undefined);
 
 if (!apiImageTag || !workerImageTag) {
 	throw new Error(
