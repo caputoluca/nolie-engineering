@@ -139,7 +139,7 @@ export const alb = new aws.lb.LoadBalancer(`nolie-${stack}`, {
 });
 
 // Target group - ALB forwards traffic here
-const apiTargetGroup = new aws.lb.TargetGroup(`nolie-api-${stack}`, {
+export const apiTargetGroup = new aws.lb.TargetGroup(`nolie-api-${stack}`, {
 	port: 8000,
 	protocol: "HTTP",
 	vpcId: vpc.vpcId,
