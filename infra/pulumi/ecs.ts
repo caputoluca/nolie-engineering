@@ -338,6 +338,7 @@ export const workerService = new awsx.ecs.FargateService(
 				cpu: workerCpu,
 				memory: workerMemory,
 				essential: true,
+				stopTimeout: 120, // max allowed on Fargate - allows graceful job completion
 				environment: [
 					{
 						name: "NODE_ENV",
@@ -426,9 +427,9 @@ new aws.appautoscaling.Policy(`worker-scaling-policy-${stack}`, {
 		predefinedMetricSpecification: {
 			predefinedMetricType: "ECSServiceAverageCPUUtilization",
 		},
-		targetValue: 70, // scale when CPU hits 70%
+		targetValue: 60, // scale when CPU hits 60%
 		scaleInCooldown: 300,
-		scaleOutCooldown: 60,
+		scaleOutCooldown: 30,
 	},
 });
 
