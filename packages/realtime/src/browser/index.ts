@@ -3,18 +3,68 @@ import { cache } from "./cache.js";
 import { createRealtimeClient, type RealtimeClientOptions } from "./client.js";
 import { auctionSubscribers } from "./subscribers/auction.js";
 import { userBidSubscribers } from "./subscribers/user.js";
+import type {
+	ConnectionState,
+	ConnectionStateChange,
+	ConnectionStateListener,
+} from "./types.js";
+
+export type {
+	ConnectionErrorReason,
+	ConnectionState,
+	ConnectionStateChange,
+	ConnectionStateListener,
+} from "./types.js";
 
 export class RealtimeClient {
 	connected = false;
 
+	private currentState: ConnectionState = "connecting";
+	private connectionStateListener: ConnectionStateListener | null = null;
+
 	async connect(opts: RealtimeClientOptions) {
 		try {
-			await initializeClient(cache, () => createRealtimeClient(opts));
+			const client = await initializeClient(cache, () =>
+				createRealtimeClient(opts),
+			);
+
+			// Set up connection state listener
+			client.connection.on((stateChange) => {
+				this.currentState = stateChange.current as ConnectionState;
+				this.connectionStateListener?.({
+					current: stateChange.current as ConnectionState,
+					previous: stateChange.previous as ConnectionState,
+					reason: stateChange.reason
+						? {
+								code: stateChange.reason.code,
+								message: stateChange.reason.message,
+							}
+						: undefined,
+					retryIn: stateChange.retryIn,
+				});
+			});
+
 			this.connected = true;
 		} catch (error) {
 			this.connected = false;
+			this.currentState = "failed";
 			throw error;
 		}
+	}
+
+	/**
+	 * Get the current connection state.
+	 */
+	get connectionState(): ConnectionState {
+		return this.currentState;
+	}
+
+	/**
+	 * Set a listener for connection state changes.
+	 * Only one listener is supported - setting a new one replaces the previous.
+	 */
+	onConnectionStateChange(listener: ConnectionStateListener | null): void {
+		this.connectionStateListener = listener;
 	}
 
 	disconnect(): void {
