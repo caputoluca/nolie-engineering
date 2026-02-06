@@ -3,11 +3,7 @@ import { cache } from "./cache.js";
 import { createRealtimeClient, type RealtimeClientOptions } from "./client.js";
 import { auctionSubscribers } from "./subscribers/auction.js";
 import { userBidSubscribers } from "./subscribers/user.js";
-import type {
-	ConnectionState,
-	ConnectionStateChange,
-	ConnectionStateListener,
-} from "./types.js";
+import type { ConnectionState, ConnectionStateListener } from "./types.js";
 
 export type {
 	ConnectionErrorReason,
@@ -21,34 +17,43 @@ export class RealtimeClient {
 
 	private currentState: ConnectionState = "connecting";
 	private connectionStateListener: ConnectionStateListener | null = null;
+	private visibilityHandler: (() => void) | null = null;
 
-	async connect(opts: RealtimeClientOptions) {
-		try {
-			const client = await initializeClient(cache, () =>
-				createRealtimeClient(opts),
-			);
+	connect(opts: RealtimeClientOptions) {
+		const client = initializeClient(cache, () => createRealtimeClient(opts));
 
-			// Set up connection state listener
-			client.connection.on((stateChange) => {
-				this.currentState = stateChange.current as ConnectionState;
-				this.connectionStateListener?.({
-					current: stateChange.current as ConnectionState,
-					previous: stateChange.previous as ConnectionState,
-					reason: stateChange.reason
-						? {
-								code: stateChange.reason.code,
-								message: stateChange.reason.message,
-							}
-						: undefined,
-					retryIn: stateChange.retryIn,
-				});
+		// Listen for future state changes
+		client.connection.on((stateChange) => {
+			this.currentState = stateChange.current as ConnectionState;
+			this.connected = stateChange.current === "connected";
+			this.connectionStateListener?.({
+				current: stateChange.current as ConnectionState,
+				previous: stateChange.previous as ConnectionState,
+				reason: stateChange.reason
+					? {
+							code: stateChange.reason.code,
+							message: stateChange.reason.message,
+						}
+					: undefined,
+				retryIn: stateChange.retryIn,
 			});
+		});
 
-			this.connected = true;
-		} catch (error) {
-			this.connected = false;
-			this.currentState = "failed";
-			throw error;
+		// Seed initial state in case Ably connected before listener was attached
+		this.currentState = client.connection.state as ConnectionState;
+		this.connected = client.connection.state === "connected";
+
+		// Force immediate reconnect when tab becomes visible
+		if (typeof document !== "undefined") {
+			this.visibilityHandler = () => {
+				if (
+					document.visibilityState === "visible" &&
+					client.connection.state !== "connected"
+				) {
+					client.connection.connect();
+				}
+			};
+			document.addEventListener("visibilitychange", this.visibilityHandler);
 		}
 	}
 
@@ -68,6 +73,10 @@ export class RealtimeClient {
 	}
 
 	disconnect(): void {
+		if (this.visibilityHandler) {
+			document.removeEventListener("visibilitychange", this.visibilityHandler);
+			this.visibilityHandler = null;
+		}
 		const client = cache.peek();
 		if (client) {
 			client.close();
