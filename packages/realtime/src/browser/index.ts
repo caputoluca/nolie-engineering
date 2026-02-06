@@ -3,21 +3,80 @@ import { cache } from "./cache.js";
 import { createRealtimeClient, type RealtimeClientOptions } from "./client.js";
 import { auctionSubscribers } from "./subscribers/auction.js";
 import { userBidSubscribers } from "./subscribers/user.js";
+import type { ConnectionState, ConnectionStateListener } from "./types.js";
+
+export type {
+	ConnectionErrorReason,
+	ConnectionState,
+	ConnectionStateChange,
+	ConnectionStateListener,
+} from "./types.js";
 
 export class RealtimeClient {
 	connected = false;
 
-	async connect(opts: RealtimeClientOptions) {
-		try {
-			await initializeClient(cache, () => createRealtimeClient(opts));
-			this.connected = true;
-		} catch (error) {
-			this.connected = false;
-			throw error;
+	private currentState: ConnectionState = "connecting";
+	private connectionStateListener: ConnectionStateListener | null = null;
+	private visibilityHandler: (() => void) | null = null;
+
+	connect(opts: RealtimeClientOptions) {
+		const client = initializeClient(cache, () => createRealtimeClient(opts));
+
+		// Listen for future state changes
+		client.connection.on((stateChange) => {
+			this.currentState = stateChange.current as ConnectionState;
+			this.connected = stateChange.current === "connected";
+			this.connectionStateListener?.({
+				current: stateChange.current as ConnectionState,
+				previous: stateChange.previous as ConnectionState,
+				reason: stateChange.reason
+					? {
+							code: stateChange.reason.code,
+							message: stateChange.reason.message,
+						}
+					: undefined,
+				retryIn: stateChange.retryIn,
+			});
+		});
+
+		// Seed initial state in case Ably connected before listener was attached
+		this.currentState = client.connection.state as ConnectionState;
+		this.connected = client.connection.state === "connected";
+
+		// Force immediate reconnect when tab becomes visible
+		if (typeof document !== "undefined") {
+			this.visibilityHandler = () => {
+				if (
+					document.visibilityState === "visible" &&
+					client.connection.state !== "connected"
+				) {
+					client.connection.connect();
+				}
+			};
+			document.addEventListener("visibilitychange", this.visibilityHandler);
 		}
 	}
 
+	/**
+	 * Get the current connection state.
+	 */
+	get connectionState(): ConnectionState {
+		return this.currentState;
+	}
+
+	/**
+	 * Set a listener for connection state changes.
+	 * Only one listener is supported - setting a new one replaces the previous.
+	 */
+	onConnectionStateChange(listener: ConnectionStateListener | null): void {
+		this.connectionStateListener = listener;
+	}
+
 	disconnect(): void {
+		if (this.visibilityHandler) {
+			document.removeEventListener("visibilitychange", this.visibilityHandler);
+			this.visibilityHandler = null;
+		}
 		const client = cache.peek();
 		if (client) {
 			client.close();
