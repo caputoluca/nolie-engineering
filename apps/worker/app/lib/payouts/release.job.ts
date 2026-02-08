@@ -198,6 +198,10 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 	if (!result.success) {
 		if (result.error === PaymentErrorCode.insufficient_funds) {
+			reportWarning("Insufficient platform balance when paying out creator", {
+				operation: "release_payout",
+				extra: { earningId, amountInDollars },
+			});
 			logger.warn(
 				{ earningId, amountInDollars },
 				"payout.release: insufficient funds; starting reschedule flow",
