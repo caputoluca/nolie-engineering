@@ -1,3 +1,4 @@
+import type { ChannelStateChange } from "ably";
 import { initializeClient } from "../client/init.js";
 import { cache } from "./cache.js";
 import { createRealtimeClient, type RealtimeClientOptions } from "./client.js";
@@ -113,6 +114,38 @@ export class RealtimeClient {
 				// Ignore detach errors - channel state will be cleaned up anyway
 			});
 		}
+	}
+
+	/**
+	 * Release a channel, removing it entirely from the client so the next
+	 * `channels.get()` returns a fresh INITIALIZED channel. Use this to
+	 * recover from FAILED channel state.
+	 */
+	releaseChannel(channelName: string): void {
+		const client = cache.peek();
+		if (!client) {
+			return;
+		}
+		client.channels.release(channelName);
+	}
+
+	/**
+	 * Listen for a channel entering the FAILED state.
+	 * Returns a cleanup function to remove the listener.
+	 */
+	onChannelFailed(
+		channelName: string,
+		listener: (e: ChannelStateChange) => void,
+	): () => void {
+		const client = cache.peek();
+		if (!client) {
+			return () => {};
+		}
+		const channel = client.channels.get(channelName);
+		channel.on("failed", listener);
+		return () => {
+			channel.off("failed", listener);
+		};
 	}
 
 	auction = auctionSubscribers;
