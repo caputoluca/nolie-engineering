@@ -2,10 +2,13 @@ import { Realtime, type TokenRequest } from "ably";
 
 export interface RealtimeClientOptions {
 	authUrl: string;
+	disconnectedRetryTimeoutMs?: number;
 }
 
-export async function createRealtimeClient(opts: RealtimeClientOptions) {
-	const client = new Realtime({
+export function createRealtimeClient(opts: RealtimeClientOptions) {
+	return new Realtime({
+		disconnectedRetryTimeout: opts.disconnectedRetryTimeoutMs ?? 5000,
+		suspendedRetryTimeout: 10000,
 		authCallback: async (_tokenParams, callback) => {
 			try {
 				const response = await fetch(opts.authUrl, {
@@ -27,6 +30,4 @@ export async function createRealtimeClient(opts: RealtimeClientOptions) {
 			}
 		},
 	});
-	await client.connection.once("connected");
-	return client;
 }
