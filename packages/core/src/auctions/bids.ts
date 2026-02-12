@@ -11,8 +11,7 @@ import { auctionRequiresShipping } from "./helpers";
  */
 export function canBid(auction: Pick<AuctionOut, "status" | "endAt">) {
 	return (
-		(auction.status === AuctionStatus.scheduled ||
-			auction.status === AuctionStatus.active) &&
+		auction.status === AuctionStatus.active &&
 		new Date(auction.endAt) > new Date()
 	);
 }
