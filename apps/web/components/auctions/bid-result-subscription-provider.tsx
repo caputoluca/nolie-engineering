@@ -72,6 +72,9 @@ export function BidResultSubscriptionProvider({
 	const user = useUser();
 
 	const pendingBidsRef = useRef<Map<string, PendingBid>>(new Map());
+	// Buffer for bid results that arrive via WebSocket before waitForResult() is called.
+	// Handles the race where the worker publishes faster than the HTTP response returns.
+	const earlyResultsRef = useRef<Map<string, BidResultEvent>>(new Map());
 	const unsubscribeRef = useRef<(() => void) | null>(null);
 	const subscribedUserIdRef = useRef<string | null>(null);
 	const channelFailedCleanupRef = useRef<(() => void) | null>(null);
@@ -96,6 +99,9 @@ export function BidResultSubscriptionProvider({
 					if (pending) {
 						pendingBidsRef.current.delete(event.requestId);
 						pending.resolve(event);
+					} else {
+						// Result arrived before waitForResult() — buffer it
+						earlyResultsRef.current.set(event.requestId, event);
 					}
 				});
 
@@ -127,6 +133,7 @@ export function BidResultSubscriptionProvider({
 								);
 							}
 							pendingBidsRef.current.clear();
+							earlyResultsRef.current.clear();
 						};
 						const attempt = recoveryAttemptsRef.current;
 						logger.error(
@@ -221,6 +228,7 @@ export function BidResultSubscriptionProvider({
 				);
 			}
 			pendingBidsRef.current.clear();
+			earlyResultsRef.current.clear();
 		}
 	}, [user?.id, cleanup]);
 
@@ -238,6 +246,7 @@ export function BidResultSubscriptionProvider({
 				);
 			}
 			pendingBidsRef.current.clear();
+			earlyResultsRef.current.clear();
 		};
 	}, [cleanup]);
 
@@ -263,6 +272,13 @@ export function BidResultSubscriptionProvider({
 
 	const waitForResult = useCallback(
 		(requestId: string, signal?: AbortSignal): Promise<BidResultEvent> => {
+			// Check if result already arrived before we started waiting
+			const earlyResult = earlyResultsRef.current.get(requestId);
+			if (earlyResult) {
+				earlyResultsRef.current.delete(requestId);
+				return Promise.resolve(earlyResult);
+			}
+
 			return new Promise((resolve, reject) => {
 				if (signal?.aborted) {
 					reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
