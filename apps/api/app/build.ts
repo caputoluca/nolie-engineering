@@ -31,6 +31,7 @@ import { auctionRoutes } from "./routes/auctions/index.js";
 import { authRoutes } from "./routes/auth/index.js";
 import { contactRoutes } from "./routes/contact.js";
 import { creatorsRoutes } from "./routes/creators.js";
+import { exploreRoutes } from "./routes/explore.js";
 import { handlesRoutes } from "./routes/handles.js";
 import { healthRoutes } from "./routes/health.js";
 import { helpRoutes } from "./routes/help.js";
@@ -145,6 +146,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(helpRoutes, { prefix: "/help" });
 	await fastify.register(moderationRoutes, { prefix: "/moderations" });
 	await fastify.register(sitemapRoutes, { prefix: "/sitemap" });
+	await fastify.register(exploreRoutes, { prefix: "/explore" });
 	/* ------------------- End Routes ------------------- */
 	fastify.log.info(
 		{
