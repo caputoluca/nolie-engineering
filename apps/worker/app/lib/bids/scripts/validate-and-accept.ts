@@ -10,26 +10,26 @@ local stateKey = KEYS[1]
 local pendingBidsKey = KEYS[2]
 
 --[[
-  Minimum bid increment by price tier.
-  
-  $1-$49 → +$1
-  $50-$199 → +$5
-  $200-$499 → +$10
-  $500-$999 → +$25
-  $1,000-$4,999 → +$50
-  $5,000+ → +$100
+  Minimum bid increment by price tier (~10%, Heritage Auctions model).
+
+  $1-$199 → +$10
+  $200-$499 → +$25
+  $500-$999 → +$50
+  $1,000-$1,999 → +$100
+  $2,000-$4,999 → +$200
+  $5,000+ → +$500
   
   ⚠️ DUPLICATED from TypeScript for atomic Redis validation.
   If you change this, also update:
   packages/core/src/auctions/bids.ts
 ]]
 local function getMinIncrement(amount)
-  if amount < 50 then return 1 end
-  if amount < 200 then return 5 end
-  if amount < 500 then return 10 end
-  if amount < 1000 then return 25 end
-  if amount < 5000 then return 50 end
-  return 100
+  if amount < 200 then return 10 end
+  if amount < 500 then return 25 end
+  if amount < 1000 then return 50 end
+  if amount < 2000 then return 100 end
+  if amount < 5000 then return 200 end
+  return 500
 end
 
 local state = redis.call(
