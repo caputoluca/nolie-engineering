@@ -56,26 +56,26 @@ export function shouldExtendAuction(
 }
 
 /**
- * Minimum bid increment by price tier.
+ * Minimum bid increment by price tier (~10%, Heritage Auctions model).
  *
- * $1–$49 → +$1
- * $50–$199 → +$5
- * $200–$499 → +$10
- * $500–$999 → +$25
- * $1,000–$4,999 → +$50
- * $5,000+ → +$100
+ * $1–$199 → +$10
+ * $200–$499 → +$25
+ * $500–$999 → +$50
+ * $1,000–$1,999 → +$100
+ * $2,000–$4,999 → +$200
+ * $5,000+ → +$500
  *
  * ⚠️ DUPLICATED in Lua for atomic Redis validation.
  * If you change this, also update:
  * apps/worker/app/lib/bids/scripts/validate-and-accept.ts
  */
 export function getMinimumIncrement(amount: number): number {
-	if (amount < 50) return 1;
-	if (amount < 200) return 5;
-	if (amount < 500) return 10;
-	if (amount < 1000) return 25;
-	if (amount < 5000) return 50;
-	return 100;
+	if (amount < 200) return 10;
+	if (amount < 500) return 25;
+	if (amount < 1000) return 50;
+	if (amount < 2000) return 100;
+	if (amount < 5000) return 200;
+	return 500;
 }
 
 export function computeNextBidAmount({
