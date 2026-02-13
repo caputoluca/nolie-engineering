@@ -11,8 +11,7 @@ import { auctionRequiresShipping } from "./helpers";
  */
 export function canBid(auction: Pick<AuctionOut, "status" | "endAt">) {
 	return (
-		(auction.status === AuctionStatus.scheduled ||
-			auction.status === AuctionStatus.active) &&
+		auction.status === AuctionStatus.active &&
 		new Date(auction.endAt) > new Date()
 	);
 }
@@ -114,7 +113,19 @@ export function validateBid(
 	auction: ValidateBidAuction,
 	{ userId, ...bid }: ValidateBidInput,
 ): ValidateBidResult {
-	// 1. Cannot bid if auction not active
+	// 1. Cannot bid if auction has not started yet
+	if (
+		auction.status === AuctionStatus.pending ||
+		auction.status === AuctionStatus.scheduled
+	) {
+		return {
+			valid: false,
+			message: "Auction has not started yet",
+			code: BidValidationCode.auction_not_active,
+		};
+	}
+
+	// 2. Cannot bid if auction ended or not active
 	if (!canBid(auction)) {
 		return {
 			valid: false,
