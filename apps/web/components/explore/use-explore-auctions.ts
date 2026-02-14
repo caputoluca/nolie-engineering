@@ -18,7 +18,7 @@ export function useExploreAuctions() {
 		},
 		initialPageParam: undefined as string | undefined,
 		getNextPageParam: (lastPage) => lastPage.nextCursor,
-		staleTime: Number.POSITIVE_INFINITY,
+		staleTime: 60 * 1000 * 2, // 2 minutes
 		retry: 2,
 	});
 
