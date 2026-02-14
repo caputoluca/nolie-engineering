@@ -28,7 +28,12 @@ async function loadExploreAuctions(
 		where.status = { in: [AuctionStatus.closed, AuctionStatus.failed] };
 	} else {
 		where.status = {
-			in: [AuctionStatus.active, AuctionStatus.scheduled, AuctionStatus.closed],
+			in: [
+				AuctionStatus.active,
+				AuctionStatus.scheduled,
+				AuctionStatus.closed,
+				AuctionStatus.pending,
+			],
 		};
 	}
 
@@ -37,7 +42,7 @@ async function loadExploreAuctions(
 		select: exploreAuctionSelect,
 		...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
 		take: limit + 1,
-		orderBy: [{ sortPriority: "desc" }, { sortTimeMs: "desc" }, { id: "asc" }],
+		orderBy: [{ sortPriority: "asc" }, { sortTimeMs: "asc" }, { id: "asc" }],
 	});
 
 	return {
