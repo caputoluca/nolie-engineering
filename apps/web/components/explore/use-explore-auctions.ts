@@ -19,6 +19,7 @@ export function useExploreAuctions() {
 		initialPageParam: undefined as string | undefined,
 		getNextPageParam: (lastPage) => lastPage.nextCursor,
 		staleTime: Number.POSITIVE_INFINITY,
+		retry: 2,
 	});
 
 	return { auctions: res.data?.pages.flatMap((p) => p.auctions) ?? [], ...res };
