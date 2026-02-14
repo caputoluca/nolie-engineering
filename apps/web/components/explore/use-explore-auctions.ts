@@ -22,5 +22,16 @@ export function useExploreAuctions() {
 		retry: 2,
 	});
 
-	return { auctions: res.data?.pages.flatMap((p) => p.auctions) ?? [], ...res };
+	// Clock drift = serverNow - dataUpdatedAt. Both values are frozen at fetch time,
+	// so their difference stays correct even when served from React Query cache.
+	const serverNow = res.data?.pages[0]?.serverNow;
+	const serverOffset = serverNow
+		? new Date(serverNow).getTime() - res.dataUpdatedAt
+		: 0;
+
+	return {
+		auctions: res.data?.pages.flatMap((p) => p.auctions) ?? [],
+		serverOffset,
+		...res,
+	};
 }
