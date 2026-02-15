@@ -20,7 +20,10 @@ async function loadExploreAuctions(
 	query: ExploreQueryType,
 ): Promise<LoadExploreAuctionsResult> {
 	const { filter, cursor, limit = DEFAULT_EXPLORE_LIMIT } = query;
-	const where: Prisma.AuctionWhereInput = {};
+	const where: Prisma.AuctionWhereInput = {
+		// exclude auctions without thumbnails (e.g. load test artifacts)
+		auctionAssets: { some: {} },
+	};
 	if (filter === "live") {
 		where.status = AuctionStatus.active;
 	} else if (filter === "ended") {
