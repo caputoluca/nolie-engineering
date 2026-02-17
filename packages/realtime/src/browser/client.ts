@@ -23,7 +23,8 @@ export function createRealtimeClient(opts: RealtimeClientOptions) {
 			try {
 				const response = await fetch(opts.authUrl, {
 					method: "GET",
-					credentials: "include", // Include cookies for session auth
+					credentials: "include",
+					cache: "no-store",
 				});
 
 				if (!response.ok) {
