@@ -162,10 +162,10 @@ jobs:
             TURBO_TEAM=${{ secrets.TURBO_TEAM }}
           platforms: linux/amd64
 
-  build-web:
-    name: Build web deployment
+  build-prod-web:
+    name: Build production web
     needs: [detect-changes]
-    if: needs.detect-changes.outputs.web == 'true'
+    if: needs.detect-changes.outputs.web == 'true' && github.ref_name == 'main'
     runs-on: ubuntu-latest
     outputs:
       url: ${{ steps.deploy.outputs.url }}
@@ -180,11 +180,7 @@ jobs:
       - name: Deploy to Vercel (staged)
         id: deploy
         run: |
-          if [ "${{ github.ref_name }}" = "main" ]; then
-            URL=$(vercel deploy --prod --skip-domain --yes --token=${{ secrets.VERCEL_TOKEN }})
-          else
-            URL=$(vercel deploy --target=${{ github.ref_name }} --skip-domain --yes --token=${{ secrets.VERCEL_TOKEN }})
-          fi
+          URL=$(vercel deploy --prod --skip-domain --yes --token=${{ secrets.VERCEL_TOKEN }})
           echo "url=$URL" >> $GITHUB_OUTPUT
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
@@ -258,23 +254,34 @@ jobs:
           API_IMAGE_TAG: ${{ steps.tags.outputs.api }}
           WORKER_IMAGE_TAG: ${{ steps.tags.outputs.worker }}
 
-  promote-web:
-    name: Promote web deployment
-    needs: [build-web, migrate, deploy]
+  deploy-web:
+    name: Deploy web
+    needs: [detect-changes, build-prod-web, migrate, deploy]
     if: |
       always() &&
-      needs.build-web.result == 'success' &&
+      needs.detect-changes.outputs.web == 'true' &&
       needs.migrate.result == 'success' &&
-      (needs.deploy.result == 'success' || needs.deploy.result == 'skipped')
+      (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
+      (needs.build-prod-web.result == 'success' || needs.build-prod-web.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: pnpm/action-setup@v4
 
       - name: Install Vercel CLI
         run: pnpm install -g vercel@latest
 
-      - name: Promote deployment
-        run: vercel promote ${{ needs.build-web.outputs.url }} --yes --token=${{ secrets.VERCEL_TOKEN }}
+      - name: Promote to production
+        if: github.ref_name == 'main'
+        run: vercel promote ${{ needs.build-prod-web.outputs.url }} --yes --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Deploy to staging
+        if: github.ref_name != 'main'
+        run: vercel deploy --target=${{ github.ref_name }} --yes --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
