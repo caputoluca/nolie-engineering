@@ -1,4 +1,4 @@
-name: Deploy API and Worker
+name: Deploy
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
       - main
 
 concurrency:
-  group: deploy-api-and-worker-${{ github.ref_name }}
+  group: deploy-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -17,6 +17,7 @@ jobs:
     outputs:
       api: ${{ steps.filter.outputs.api }}
       worker: ${{ steps.filter.outputs.worker }}
+      web: ${{ steps.filter.outputs.web }}
       migrations: ${{ steps.filter.outputs.migrations }}
       infra: ${{ steps.filter.outputs.infra }}
       sha: ${{ steps.sha.outputs.short }}
@@ -46,6 +47,12 @@ jobs:
               - 'pnpm-lock.yaml'
               - 'turbo.json'
               - 'infra/docker/Dockerfile.worker'
+            web:
+              - 'packages/**'
+              - 'apps/web/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'turbo.json'
             migrations:
               - 'packages/db/prisma/**'
             infra:
@@ -155,6 +162,30 @@ jobs:
             TURBO_TEAM=${{ secrets.TURBO_TEAM }}
           platforms: linux/amd64
 
+  build-prod-web:
+    name: Build production web
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.web == 'true' && github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install Vercel CLI
+        run: pnpm install -g vercel@latest
+
+      - name: Deploy to Vercel (staged)
+        id: deploy
+        run: |
+          URL=$(vercel deploy --prod --skip-domain --yes --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$URL" >> $GITHUB_OUTPUT
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
   deploy:
     name: Deploy to ECS
     needs: [detect-changes, migrate, build-api, build-worker]
@@ -222,3 +253,35 @@ jobs:
         env:
           API_IMAGE_TAG: ${{ steps.tags.outputs.api }}
           WORKER_IMAGE_TAG: ${{ steps.tags.outputs.worker }}
+
+  deploy-web:
+    name: Deploy web
+    needs: [detect-changes, build-prod-web, migrate, deploy]
+    if: |
+      always() &&
+      needs.detect-changes.outputs.web == 'true' &&
+      needs.migrate.result == 'success' &&
+      (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
+      (needs.build-prod-web.result == 'success' || needs.build-prod-web.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install Vercel CLI
+        run: pnpm install -g vercel@latest
+
+      - name: Promote to production
+        if: github.ref_name == 'main'
+        run: vercel promote ${{ needs.build-prod-web.outputs.url }} --yes --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Deploy to staging
+        if: github.ref_name != 'main'
+        run: vercel deploy --target=${{ github.ref_name }} --yes --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}

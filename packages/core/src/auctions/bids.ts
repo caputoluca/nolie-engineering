@@ -125,6 +125,14 @@ export function validateBid(
 		};
 	}
 
+	if (auction.status === AuctionStatus.cancelled) {
+		return {
+			valid: false,
+			message: "Auction has been cancelled",
+			code: BidValidationCode.auction_cancelled,
+		};
+	}
+
 	// 2. Cannot bid if auction ended or not active
 	if (!canBid(auction)) {
 		return {
