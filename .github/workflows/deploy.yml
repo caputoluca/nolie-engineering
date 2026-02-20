@@ -274,14 +274,14 @@ jobs:
 
       - name: Promote to production
         if: github.ref_name == 'main'
-        run: vercel promote ${{ needs.build-prod-web.outputs.url }} --yes --token=${{ secrets.VERCEL_TOKEN }}
+        run: vercel promote ${{ needs.build-prod-web.outputs.url }} --yes --scope=${{ secrets.VERCEL_ORG_ID }} --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
 
       - name: Deploy to staging
         if: github.ref_name != 'main'
-        run: vercel deploy --target=${{ github.ref_name }} --yes --token=${{ secrets.VERCEL_TOKEN }}
+        run: vercel deploy --target=${{ github.ref_name }} --yes --scope=${{ secrets.VERCEL_ORG_ID }} --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
