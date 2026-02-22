@@ -6,6 +6,8 @@ import type { BidsContext } from "./context.js";
 import { pendingBidsCache } from "./pending-bids-cache.js";
 import type { BidPersistJob } from "./types.js";
 
+const OUTBID_NOTIFICATION_DELAY = 1000 * 5; // 5 seconds
+
 export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 	const {
 		bidId,
@@ -85,7 +87,10 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 			// Exhaustion bid = proxy couldn't keep up, user lost
 			// Notify the proxy owner (userId) that they've been outbid
 			void ctx.queues.notifications
-				.outbid({ auctionId, userId, bidId }, { jobId: `${bidId}-${userId}` })
+				.outbid(
+					{ auctionId, userId, bidId },
+					{ jobId: `${bidId}-${userId}`, delay: OUTBID_NOTIFICATION_DELAY },
+				)
 				.catch((err) => {
 					reportError(err, {
 						operation: "queue_outbid_notification_exhaustion",
@@ -93,6 +98,10 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 					});
 				});
 		} else if (previousHighestUserId && previousHighestUserId !== userId) {
+			// Fast path: skip notification if user has an active proxy (it will respond).
+			// This catches ~99% of cases. The rare race where triggerProxies exhausts
+			// the proxy from Redis before this check runs is caught by the DB guard
+			// in the outbid notification job (which runs after OUTBID_NOTIFICATION_DELAY).
 			const hasActiveProxy = await ctx.cache.auctionProxies
 				.hasActive(auctionId, previousHighestUserId)
 				.catch(() => false);
@@ -101,7 +110,10 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 				void ctx.queues.notifications
 					.outbid(
 						{ auctionId, userId: previousHighestUserId, bidId },
-						{ jobId: `${bidId}-${previousHighestUserId}` },
+						{
+							jobId: `${bidId}-${previousHighestUserId}`,
+							delay: OUTBID_NOTIFICATION_DELAY,
+						},
 					)
 					.catch((err) => {
 						reportError(err, {
