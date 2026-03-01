@@ -113,6 +113,8 @@ const WORKER_SECRETS = [
 	"QUEUE_LATENCY_ERROR_MS",
 	"SENTRY_DSN",
 	"STRIPE_API_KEY",
+	"SLACK_BOT_TOKEN",
+	"SLACK_CHANNEL_ID",
 ];
 
 // =============================================================================
