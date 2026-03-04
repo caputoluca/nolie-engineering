@@ -3,6 +3,7 @@ import corsPlugin from "@fastify/cors";
 import type { PaymentsClient } from "@nolie/payments";
 import type { NoLieQueues } from "@nolie/queues";
 import type { RestClient } from "@nolie/realtime/server";
+import type { ShippingClient } from "@nolie/shipping";
 import Fastify from "fastify";
 import fastifyRawBody from "fastify-raw-body";
 import hyperid from "hyperid";
@@ -25,6 +26,7 @@ import { rateLimitPlugin } from "./plugins/rate-limit.js";
 import { realtimePlugin } from "./plugins/realtime.js";
 import { redisPlugin } from "./plugins/redis.js";
 import { schemasPlugin } from "./plugins/schemas.js";
+import { shippingPlugin } from "./plugins/shipping.js";
 import { underPressurePlugin } from "./plugins/under-pressure.js";
 import { agreementsRoutes } from "./routes/agreements.js";
 import { auctionRoutes } from "./routes/auctions/index.js";
@@ -49,6 +51,7 @@ const idGenerator = hyperid();
 export interface BuildAppOptions {
 	realtime?: RestClient;
 	payments?: PaymentsClient;
+	shipping?: ShippingClient;
 	ai?: AIClient;
 	moderation?: ModerationClient;
 	queues?: NoLieQueues;
@@ -128,6 +131,9 @@ export async function buildApp(options?: BuildAppOptions) {
 
 	fastify.log.debug("Initializing payments");
 	await fastify.register(paymentsPlugin, { instance: options?.payments });
+
+	fastify.log.debug("Initializing shipping");
+	await fastify.register(shippingPlugin, { instance: options?.shipping });
 	/* ------------------- End Plugins ------------------- */
 
 	/* --------------- Routes --------------- */
