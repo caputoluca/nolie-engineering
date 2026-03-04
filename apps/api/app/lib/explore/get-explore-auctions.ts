@@ -23,6 +23,7 @@ async function loadExploreAuctions(
 	const where: Prisma.AuctionWhereInput = {
 		// exclude auctions without thumbnails (e.g. load test artifacts)
 		auctionAssets: { some: {} },
+		hideFromExplore: false,
 	};
 	if (filter === "live") {
 		where.status = AuctionStatus.active;
