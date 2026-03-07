@@ -3,6 +3,7 @@ import corsPlugin from "@fastify/cors";
 import type { PaymentsClient } from "@nolie/payments";
 import type { NoLieQueues } from "@nolie/queues";
 import type { RestClient } from "@nolie/realtime/server";
+import type { ShippingClient } from "@nolie/shipping";
 import Fastify from "fastify";
 import fastifyRawBody from "fastify-raw-body";
 import hyperid from "hyperid";
@@ -25,6 +26,7 @@ import { rateLimitPlugin } from "./plugins/rate-limit.js";
 import { realtimePlugin } from "./plugins/realtime.js";
 import { redisPlugin } from "./plugins/redis.js";
 import { schemasPlugin } from "./plugins/schemas.js";
+import { shippingPlugin } from "./plugins/shipping.js";
 import { underPressurePlugin } from "./plugins/under-pressure.js";
 import { agreementsRoutes } from "./routes/agreements.js";
 import { auctionRoutes } from "./routes/auctions/index.js";
@@ -38,6 +40,7 @@ import { helpRoutes } from "./routes/help.js";
 import { meRoutes } from "./routes/me/index.js";
 import { moderationRoutes } from "./routes/moderations.js";
 import { realtimeRoutes } from "./routes/realtime.js";
+import { shippingRoutes } from "./routes/shipping.js";
 import { sitemapRoutes } from "./routes/sitemap.js";
 import { stripeRoutes } from "./routes/stripe.js";
 import { uploadsRoutes } from "./routes/uploads.js";
@@ -49,6 +52,7 @@ const idGenerator = hyperid();
 export interface BuildAppOptions {
 	realtime?: RestClient;
 	payments?: PaymentsClient;
+	shipping?: ShippingClient;
 	ai?: AIClient;
 	moderation?: ModerationClient;
 	queues?: NoLieQueues;
@@ -128,6 +132,9 @@ export async function buildApp(options?: BuildAppOptions) {
 
 	fastify.log.debug("Initializing payments");
 	await fastify.register(paymentsPlugin, { instance: options?.payments });
+
+	fastify.log.debug("Initializing shipping");
+	await fastify.register(shippingPlugin, { instance: options?.shipping });
 	/* ------------------- End Plugins ------------------- */
 
 	/* --------------- Routes --------------- */
@@ -143,6 +150,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(handlesRoutes, { prefix: "/handles" });
 	await fastify.register(auctionRoutes, { prefix: "/auctions" });
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
+	await fastify.register(shippingRoutes, { prefix: "/shipping" });
 	await fastify.register(helpRoutes, { prefix: "/help" });
 	await fastify.register(moderationRoutes, { prefix: "/moderations" });
 	await fastify.register(sitemapRoutes, { prefix: "/sitemap" });

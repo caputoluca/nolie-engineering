@@ -88,6 +88,8 @@ const API_SECRETS = [
 	"TRUSTED_ORIGINS",
 	"SENTRY_DSN",
 	"NOLIE_RATE_LIMITING_ENABLED",
+	"SHIPPO_WEBHOOK_SECRET",
+	"SHIPPO_API_TOKEN",
 	// PORT is set in environment array
 ];
 
@@ -115,6 +117,7 @@ const WORKER_SECRETS = [
 	"STRIPE_API_KEY",
 	"SLACK_BOT_TOKEN",
 	"SLACK_CHANNEL_ID",
+	"SHIPPO_API_TOKEN",
 ];
 
 // =============================================================================
