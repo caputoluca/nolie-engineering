@@ -90,6 +90,7 @@ const API_SECRETS = [
 	"NOLIE_RATE_LIMITING_ENABLED",
 	"SHIPPO_WEBHOOK_SECRET",
 	"SHIPPO_API_TOKEN",
+	"INTERNAL_API_SECRET",
 	// PORT is set in environment array
 ];
 
