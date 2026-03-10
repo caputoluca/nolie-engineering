@@ -15,6 +15,7 @@ export interface PayCreatorInput {
 	fanId: string;
 	bidId: string;
 	retryAttempt: number;
+	sourceChargeId: string | null;
 }
 
 export type PayCreatorResult =
@@ -67,6 +68,9 @@ export async function payCreator(
 					fanId: input.fanId,
 					bidId: input.bidId,
 				},
+				...(input.sourceChargeId
+					? { source_transaction: input.sourceChargeId }
+					: {}),
 			},
 			{ idempotencyKey },
 		);

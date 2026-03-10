@@ -35,6 +35,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 					winningBidId: true,
 					paymentIntentId: true, // For retrying fee retrieval
 					fulfillmentDispute: { select: { id: true, status: true } },
+					paymentChargeId: true,
 				},
 			},
 			creator: {
@@ -194,6 +195,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		fanId,
 		bidId,
 		retryAttempt: earning.insufficientFundsRetryAttempts,
+		sourceChargeId: earning.auction.paymentChargeId,
 	});
 
 	if (!result.success) {
