@@ -36,6 +36,7 @@ async function loadExploreAuctions(
 				AuctionStatus.active,
 				AuctionStatus.scheduled,
 				AuctionStatus.closed,
+				AuctionStatus.failed, // failed means all payments failed
 				AuctionStatus.pending,
 			],
 		};
