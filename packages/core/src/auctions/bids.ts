@@ -61,8 +61,8 @@ export function shouldExtendAuction(
  * $1–$9 → +$1
  * $10–$24 → +$2
  * $25–$99 → +$5
- * $100–$249 → +$10
- * $250–$999 → +$25
+ * $100–$499 → +$10
+ * $500–$999 → +$25
  * $1,000–$2,499 → +$50
  * $2,500–$4,999 → +$100
  * $5,000–$9,999 → +$250
@@ -76,7 +76,7 @@ export function getMinimumIncrement(amount: number): number {
 	if (amount < 10) return 1;
 	if (amount < 25) return 2;
 	if (amount < 100) return 5;
-	if (amount < 250) return 10;
+	if (amount < 500) return 10;
 	if (amount < 1000) return 25;
 	if (amount < 2500) return 50;
 	if (amount < 5000) return 100;

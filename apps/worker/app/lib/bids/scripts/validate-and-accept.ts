@@ -15,8 +15,8 @@ local pendingBidsKey = KEYS[2]
   $1-$9 → +$1
   $10-$24 → +$2
   $25-$99 → +$5
-  $100-$249 → +$10
-  $250-$999 → +$25
+  $100-$499 → +$10
+  $500-$999 → +$25
   $1,000-$2,499 → +$50
   $2,500-$4,999 → +$100
   $5,000-$9,999 → +$250
@@ -30,7 +30,7 @@ local function getMinIncrement(amount)
   if amount < 10 then return 1 end
   if amount < 25 then return 2 end
   if amount < 100 then return 5 end
-  if amount < 250 then return 10 end
+  if amount < 500 then return 10 end
   if amount < 1000 then return 25 end
   if amount < 2500 then return 50 end
   if amount < 5000 then return 100 end
