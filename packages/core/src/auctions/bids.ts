@@ -58,7 +58,8 @@ export function shouldExtendAuction(
 /**
  * Minimum bid increment by price tier.
  *
- * $0–$499 → +$10
+ * $0–$49 → +$5
+ * $50–$499 → +$10
  * $500–$999 → +$25
  * $1,000–$2,499 → +$50
  * $2,500–$4,999 → +$100
@@ -78,6 +79,7 @@ export function shouldExtendAuction(
  * apps/worker/app/lib/bids/scripts/validate-and-accept.ts
  */
 export function getMinimumIncrement(amount: number): number {
+	if (amount < 50) return 5;
 	if (amount < 500) return 10;
 	if (amount < 1000) return 25;
 	if (amount < 2500) return 50;

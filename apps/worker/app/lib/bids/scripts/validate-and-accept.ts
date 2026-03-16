@@ -12,7 +12,8 @@ local pendingBidsKey = KEYS[2]
 --[[
   Minimum bid increment by price tier.
 
-  $0-$499 → +$10
+  $0-$49 → +$5
+  $50-$499 → +$10
   $500-$999 → +$25
   $1,000-$2,499 → +$50
   $2,500-$4,999 → +$100
@@ -32,6 +33,7 @@ local pendingBidsKey = KEYS[2]
   packages/core/src/auctions/bids.ts
 ]]
 local function getMinIncrement(amount)
+  if amount < 50 then return 5 end
   if amount < 500 then return 10 end
   if amount < 1000 then return 25 end
   if amount < 2500 then return 50 end
