@@ -1,3 +1,4 @@
+import type { TokenRequestType } from "@nolie/schemas/realtime-auth";
 import type { ChannelStateChange } from "ably";
 import { initializeClient } from "../client/init.js";
 import { cache } from "./cache.js";
@@ -19,6 +20,7 @@ export class RealtimeClient {
 	private currentState: ConnectionState = "connecting";
 	private connectionStateListener: ConnectionStateListener | null = null;
 	private visibilityHandler: (() => void) | null = null;
+	private _needsReauth = false;
 
 	connect(opts: RealtimeClientOptions) {
 		const client = initializeClient(cache, () => createRealtimeClient(opts));
@@ -92,6 +94,31 @@ export class RealtimeClient {
 			throw new Error("Client not initialized");
 		}
 		return client.auth.authorize();
+	}
+
+	/**
+	 * Prime a token for the next reauthorize call. The authCallback will
+	 * use this token instead of fetching from /realtime/auth.
+	 * Also sets `needsReauth` so the provider knows to trigger reauthorize
+	 * even if the user ID hasn't changed.
+	 */
+	primeToken(token: TokenRequestType) {
+		const client = cache.peek();
+		if (client) {
+			client.primeToken(token);
+			this._needsReauth = true;
+		}
+	}
+
+	/**
+	 * Whether a primed token is waiting to be consumed via reauthorize.
+	 */
+	get needsReauth() {
+		return this._needsReauth;
+	}
+
+	clearNeedsReauth() {
+		this._needsReauth = false;
 	}
 
 	/**
