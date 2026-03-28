@@ -203,16 +203,11 @@ export function BidResultSubscriptionProvider({
 		[client],
 	);
 
-	// Eager subscribe: If user exists on mount, pre-warm the channel.
-	// Uses ensureSubscribed() to await any pending reauthorize (e.g. after
-	// sign-up redirect where the Ably token capabilities need to update).
-	// This is fire-and-forget — it doesn't block rendering.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: Intentionally only run on mount
-	useEffect(() => {
-		if (user?.id) {
-			ensureSubscribed();
-		}
-	}, []);
+	// No eager subscribe — the channel attaches lazily on first modal open
+	// via ensureSubscribed(). This avoids a race where the child effect fires
+	// before RealtimeProvider's reauthorize effect (React fires child effects
+	// first), causing a "channel denied" error with a stale anonymous token.
+	// Channel attach is ~50ms (one WebSocket roundtrip), invisible to the user.
 
 	// Cleanup when user logs out
 	useEffect(() => {

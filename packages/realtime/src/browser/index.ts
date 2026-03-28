@@ -21,6 +21,7 @@ export class RealtimeClient {
 	private connectionStateListener: ConnectionStateListener | null = null;
 	private visibilityHandler: (() => void) | null = null;
 	private _needsReauth = false;
+	private _authorizedUserId: string | null = null;
 
 	connect(opts: RealtimeClientOptions) {
 		const client = initializeClient(cache, () => createRealtimeClient(opts));
@@ -119,6 +120,19 @@ export class RealtimeClient {
 
 	clearNeedsReauth() {
 		this._needsReauth = false;
+	}
+
+	/**
+	 * The user ID the client was last authorized for.
+	 * Used by RealtimeProvider to detect user changes across navigations
+	 * (the singleton persists but per-component refs reset on remount).
+	 */
+	get authorizedUserId(): string | null {
+		return this._authorizedUserId;
+	}
+
+	setAuthorizedUserId(userId: string | null): void {
+		this._authorizedUserId = userId;
 	}
 
 	/**
