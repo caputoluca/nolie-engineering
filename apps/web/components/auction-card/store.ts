@@ -77,6 +77,21 @@ export class AuctionCardStore {
 	}
 
 	/**
+	 * Correct the highest bid amount without touching bidCount.
+	 * Used when a bid rejection includes the actual current highest —
+	 * idempotent: no-op if the store already has a higher or equal value.
+	 */
+	correctHighestBid(amount: number): void {
+		this.updateState((prev) => ({
+			...prev,
+			highestBidAmount:
+				prev.highestBidAmount === null || amount > prev.highestBidAmount
+					? amount
+					: prev.highestBidAmount,
+		}));
+	}
+
+	/**
 	 * Re-seed the store with fresh server data (e.g. on resubscribe after
 	 * scrolling back into view). Only applies values that are "newer" so
 	 * we never regress a realtime update with stale REST data.
@@ -164,6 +179,15 @@ export function clearAuctionCardStores(): void {
  */
 export function applyBidToCardStore(auctionId: string, amount: number): void {
 	stores.get(auctionId)?.applyBid(amount);
+}
+
+/**
+ * Correct the highest bid amount on an existing card store without
+ * incrementing bidCount. Idempotent — no-op if the store already has
+ * a higher value or doesn't exist.
+ */
+export function correctCardStoreBid(auctionId: string, amount: number): void {
+	stores.get(auctionId)?.correctHighestBid(amount);
 }
 
 // ---------------------------------------------------------------------------

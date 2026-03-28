@@ -1,11 +1,13 @@
 "use client";
 
 import { fail } from "@nolie/actions";
+import { computeNextBidAmount } from "@nolie/core/auctions";
 import {
 	type BidCreateResponse,
 	BidCreateSchema,
 } from "@nolie/schemas/auction/bid";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { correctCardStoreBid } from "@/components/auction-card/store";
 import { BID_ERROR_MESSAGES, placeBid } from "@/lib/mutations/bids";
 import { reportErrorMessage } from "@/lib/observability/sentry/report-error-message";
 import { useAuctionData } from "./auction-provider";
@@ -31,19 +33,36 @@ export function usePlaceBid(
 	open: boolean,
 	onOpenChange?: (open: boolean) => void,
 ) {
-	const { id } = useAuctionData();
-	const amount = useNextBidAmount();
+	const { id, startingBid } = useAuctionData();
+	const storeAmount = useNextBidAmount();
 	const { waitForResult } = useBidResultSubscription();
 	const [submittedAmount, setSubmittedAmount] = useState<number | null>(null);
+	const [correctedHighestBidAmount, setCorrectedHighestBidAmount] = useState<
+		number | null
+	>(null);
 	const prevOpenRef = useRef(open);
 
-	// Reset submitted amount when modal opens
+	// The corrected amount takes precedence over the store amount after a
+	// bid_too_low rejection, so "Try again" submits the right value.
+	const amount =
+		correctedHighestBidAmount != null
+			? Math.max(
+					computeNextBidAmount({
+						current: correctedHighestBidAmount,
+						startingBid,
+					}),
+					storeAmount,
+				)
+			: storeAmount;
+
+	// Reset transient state when modal opens
 	useEffect(() => {
 		const prevOpen = prevOpenRef.current;
 		const isOpening = !prevOpen && open;
 
 		if (isOpening) {
 			setSubmittedAmount(null);
+			setCorrectedHighestBidAmount(null);
 		}
 
 		prevOpenRef.current = open;
@@ -83,6 +102,14 @@ export function usePlaceBid(
 
 				// If API-level failure (validation, auth, etc.), return immediately
 				if (!apiResponse.success) {
+					const currentHighest =
+						apiResponse.defaultValues && "amount" in apiResponse.defaultValues
+							? apiResponse.defaultValues.amount
+							: null;
+					if (typeof currentHighest === "number") {
+						correctCardStoreBid(id, currentHighest);
+						setCorrectedHighestBidAmount(currentHighest);
+					}
 					return apiResponse;
 				}
 
@@ -108,7 +135,12 @@ export function usePlaceBid(
 							data: result.bid,
 						};
 					}
-					// Bid was rejected by the worker
+					// Bid was rejected by the worker — correct stale state if possible
+					if (result.currentHighestBidAmount) {
+						correctCardStoreBid(id, result.currentHighestBidAmount);
+						setCorrectedHighestBidAmount(result.currentHighestBidAmount);
+					}
+
 					const errorMessage =
 						BID_ERROR_MESSAGES[result.reason] ??
 						"Your bid was rejected. Please try again.";
@@ -174,5 +206,8 @@ export function usePlaceBid(
 	return {
 		...result,
 		submittedAmount,
+		/** The effective bid amount — always matches what will be submitted. */
+		amount,
+		rawCorrectedHighestBidAmount: correctedHighestBidAmount,
 	};
 }

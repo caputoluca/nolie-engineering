@@ -61,6 +61,7 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 						requestId,
 						auctionId,
 						reason: result.reason,
+						currentHighestBidAmount: result.currentHighest || undefined,
 					})
 					.catch((error) => {
 						reportError(error, {
