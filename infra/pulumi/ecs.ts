@@ -9,6 +9,10 @@ const stack = pulumi.getStack();
 const config = new pulumi.Config();
 
 // Config values
+const logRetentionDays = config.requireNumber("logRetentionDays");
+const containerInsightsEnabled = config.requireBoolean(
+	"containerInsightsEnabled",
+);
 const apiCpu = config.requireNumber("apiCpu");
 const apiMemory = config.requireNumber("apiMemory");
 const apiDesiredCount = config.requireNumber("apiDesiredCount");
@@ -129,7 +133,7 @@ export const cluster = new aws.ecs.Cluster(`nolie-${stack}`, {
 	settings: [
 		{
 			name: "containerInsights",
-			value: "enabled",
+			value: containerInsightsEnabled ? "enabled" : "disabled",
 		},
 	],
 });
@@ -294,6 +298,7 @@ export const apiService = new awsx.ecs.FargateService(`nolie-api-${stack}`, {
 		},
 	],
 	taskDefinitionArgs: {
+		logGroup: { args: { retentionInDays: logRetentionDays } },
 		executionRole: { roleArn: executionRole.arn },
 		taskRole: { roleArn: taskRole.arn },
 		container: {
@@ -342,6 +347,7 @@ export const workerService = new awsx.ecs.FargateService(
 		},
 		// No load balancer - worker just processes jobs from Redis
 		taskDefinitionArgs: {
+			logGroup: { args: { retentionInDays: logRetentionDays } },
 			executionRole: { roleArn: executionRole.arn },
 			taskRole: { roleArn: taskRole.arn },
 			container: {
