@@ -44,6 +44,7 @@ import { shippingRoutes } from "./routes/shipping.js";
 import { sitemapRoutes } from "./routes/sitemap.js";
 import { stripeRoutes } from "./routes/stripe.js";
 import { uploadsRoutes } from "./routes/uploads.js";
+import { usersRoutes } from "./routes/users.js";
 
 const REQUEST_TIMEOUT = 20_000; // 20 seconds
 
@@ -155,6 +156,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(moderationRoutes, { prefix: "/moderations" });
 	await fastify.register(sitemapRoutes, { prefix: "/sitemap" });
 	await fastify.register(exploreRoutes, { prefix: "/explore" });
+	await fastify.register(usersRoutes, { prefix: "/users" });
 	/* ------------------- End Routes ------------------- */
 	fastify.log.info(
 		{
