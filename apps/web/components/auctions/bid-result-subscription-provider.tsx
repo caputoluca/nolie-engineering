@@ -203,13 +203,11 @@ export function BidResultSubscriptionProvider({
 		[client],
 	);
 
-	// Eager subscribe: If user exists on mount, subscribe immediately
-	// biome-ignore lint/correctness/useExhaustiveDependencies: Intentionally only run on mount
-	useEffect(() => {
-		if (user?.id) {
-			subscribe(user.id);
-		}
-	}, []);
+	// No eager subscribe — the channel attaches lazily on first modal open
+	// via ensureSubscribed(). This avoids a race where the child effect fires
+	// before RealtimeProvider's reauthorize effect (React fires child effects
+	// first), causing a "channel denied" error with a stale anonymous token.
+	// Channel attach is ~50ms (one WebSocket roundtrip), invisible to the user.
 
 	// Cleanup when user logs out
 	useEffect(() => {
@@ -260,7 +258,16 @@ export function BidResultSubscriptionProvider({
 			return; // Already subscribed
 		}
 
-		// Wait for any pending reauthorization
+		// Trigger reauth if a new token was primed (e.g. sign-up redirect
+		// where the Ably client still has anonymous capabilities).
+		// We do this here rather than relying on RealtimeProvider's effect
+		// because React fires child effects before parent effects.
+		if (client.needsReauth) {
+			client.clearNeedsReauth();
+			reauthorize();
+		}
+
+		// Wait for any pending reauthorization (including one we just started)
 		const pendingReauth = getReauthorizePromise();
 		if (pendingReauth) {
 			await pendingReauth;
@@ -268,7 +275,7 @@ export function BidResultSubscriptionProvider({
 
 		// Now safe to subscribe
 		subscribe(user.id);
-	}, [user?.id, getReauthorizePromise, subscribe]);
+	}, [user?.id, client, reauthorize, getReauthorizePromise, subscribe]);
 
 	const waitForResult = useCallback(
 		(requestId: string, signal?: AbortSignal): Promise<BidResultEvent> => {

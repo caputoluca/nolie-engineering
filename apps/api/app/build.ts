@@ -2,7 +2,7 @@ import fastifyCookie from "@fastify/cookie";
 import corsPlugin from "@fastify/cors";
 import type { PaymentsClient } from "@nolie/payments";
 import type { NoLieQueues } from "@nolie/queues";
-import type { RestClient } from "@nolie/realtime/server";
+import type { createRestClient, RestClient } from "@nolie/realtime/server";
 import type { ShippingClient } from "@nolie/shipping";
 import Fastify from "fastify";
 import fastifyRawBody from "fastify-raw-body";
@@ -44,6 +44,7 @@ import { shippingRoutes } from "./routes/shipping.js";
 import { sitemapRoutes } from "./routes/sitemap.js";
 import { stripeRoutes } from "./routes/stripe.js";
 import { uploadsRoutes } from "./routes/uploads.js";
+import { usersRoutes } from "./routes/users.js";
 
 const REQUEST_TIMEOUT = 20_000; // 20 seconds
 
@@ -51,6 +52,7 @@ const idGenerator = hyperid();
 
 export interface BuildAppOptions {
 	realtime?: RestClient;
+	realtimeTokenAuthorizer?: ReturnType<typeof createRestClient>;
 	payments?: PaymentsClient;
 	shipping?: ShippingClient;
 	ai?: AIClient;
@@ -98,7 +100,10 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(prismaPlugin); // connect to db
 
 	fastify.log.debug("Initializing realtime client");
-	await fastify.register(realtimePlugin, { instance: options?.realtime }); // connect to realtime
+	await fastify.register(realtimePlugin, {
+		instance: options?.realtime,
+		tokenAuthorizer: options?.realtimeTokenAuthorizer,
+	}); // connect to realtime
 
 	fastify.log.debug("Initializing queues");
 	await fastify.register(queuesPlugin, { instance: options?.queues }); // connect to queues
@@ -155,6 +160,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(moderationRoutes, { prefix: "/moderations" });
 	await fastify.register(sitemapRoutes, { prefix: "/sitemap" });
 	await fastify.register(exploreRoutes, { prefix: "/explore" });
+	await fastify.register(usersRoutes, { prefix: "/users" });
 	/* ------------------- End Routes ------------------- */
 	fastify.log.info(
 		{
