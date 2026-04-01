@@ -2,7 +2,7 @@ import fastifyCookie from "@fastify/cookie";
 import corsPlugin from "@fastify/cors";
 import type { PaymentsClient } from "@nolie/payments";
 import type { NoLieQueues } from "@nolie/queues";
-import type { RestClient } from "@nolie/realtime/server";
+import type { createRestClient, RestClient } from "@nolie/realtime/server";
 import type { ShippingClient } from "@nolie/shipping";
 import Fastify from "fastify";
 import fastifyRawBody from "fastify-raw-body";
@@ -52,6 +52,7 @@ const idGenerator = hyperid();
 
 export interface BuildAppOptions {
 	realtime?: RestClient;
+	realtimeTokenAuthorizer?: ReturnType<typeof createRestClient>;
 	payments?: PaymentsClient;
 	shipping?: ShippingClient;
 	ai?: AIClient;
@@ -99,7 +100,10 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(prismaPlugin); // connect to db
 
 	fastify.log.debug("Initializing realtime client");
-	await fastify.register(realtimePlugin, { instance: options?.realtime }); // connect to realtime
+	await fastify.register(realtimePlugin, {
+		instance: options?.realtime,
+		tokenAuthorizer: options?.realtimeTokenAuthorizer,
+	}); // connect to realtime
 
 	fastify.log.debug("Initializing queues");
 	await fastify.register(queuesPlugin, { instance: options?.queues }); // connect to queues
