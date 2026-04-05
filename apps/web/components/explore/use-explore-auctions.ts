@@ -3,7 +3,6 @@
 import type { ExploreAuctionsResponse } from "@nolie/schemas/explore";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { browser } from "@/lib/http/browser";
-import { defaultInfiniteRetry } from "@/lib/http/retry";
 import { EXPLORE_AUCTIONS_QUERY_KEY } from "./queries";
 import { useExploreFilter } from "./use-explore-filter";
 
@@ -21,8 +20,6 @@ export function useExploreAuctions() {
 		initialPageParam: undefined as string | undefined,
 		getNextPageParam: (lastPage) => lastPage.nextCursor,
 		staleTime: 60 * 1000 * 2, // 2 minutes
-
-		retry: defaultInfiniteRetry,
 	});
 
 	// Clock drift = serverNow - dataUpdatedAt. Both values are frozen at fetch time,
