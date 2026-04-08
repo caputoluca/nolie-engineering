@@ -28,6 +28,7 @@ import { redisPlugin } from "./plugins/redis.js";
 import { schemasPlugin } from "./plugins/schemas.js";
 import { shippingPlugin } from "./plugins/shipping.js";
 import { underPressurePlugin } from "./plugins/under-pressure.js";
+import { adminRoutes } from "./routes/admin.js";
 import { agreementsRoutes } from "./routes/agreements.js";
 import { auctionRoutes } from "./routes/auctions/index.js";
 import { authRoutes } from "./routes/auth/index.js";
@@ -148,6 +149,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(authRoutes, { prefix: "/api/auth" });
 	await fastify.register(creatorsRoutes, { prefix: "/creators" });
 	await fastify.register(meRoutes, { prefix: "/me" });
+	await fastify.register(adminRoutes, { prefix: "/admin" });
 	await fastify.register(agreementsRoutes, { prefix: "/agreements" });
 	await fastify.register(contactRoutes, { prefix: "/contact" });
 	await fastify.register(uploadsRoutes, { prefix: "/uploads" });
