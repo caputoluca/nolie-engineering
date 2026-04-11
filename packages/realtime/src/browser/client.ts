@@ -7,10 +7,17 @@ export interface RealtimeClientOptions {
 	initialTokenRequest?: TokenRequestType | null;
 }
 
-export function createRealtimeClient(opts: RealtimeClientOptions) {
+export interface RealtimeAblyClient extends Realtime {
+	/** Set a token to be used by the next reauthorize call instead of fetching. */
+	primeToken: (token: TokenRequestType) => void;
+}
+
+export function createRealtimeClient(
+	opts: RealtimeClientOptions,
+): RealtimeAblyClient {
 	let primedTokenRequest: TokenRequestType | null =
 		opts.initialTokenRequest ?? null;
-	return new Realtime({
+	const client = new Realtime({
 		disconnectedRetryTimeout: opts.disconnectedRetryTimeoutMs ?? 5000,
 		suspendedRetryTimeout: 10000,
 		authCallback: async (_tokenParams, callback) => {
@@ -40,5 +47,11 @@ export function createRealtimeClient(opts: RealtimeClientOptions) {
 				callback(message, null);
 			}
 		},
-	});
+	}) as RealtimeAblyClient;
+
+	client.primeToken = (token: TokenRequestType) => {
+		primedTokenRequest = token;
+	};
+
+	return client;
 }
