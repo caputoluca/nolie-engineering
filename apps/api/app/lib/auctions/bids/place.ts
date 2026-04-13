@@ -33,7 +33,7 @@ async function fallbackLoadState(auctionId: string, db: PrismaClient) {
 		highestBidUserId: auction.currentHighestBidUserId,
 		version: 1,
 		startingBidAmount: auction.startingBid.toNumber(),
-		creatorUserId: auction.creator.userId,
+		creatorUserId: auction.sellerProfile.userId,
 		itemType: auction.itemType,
 		status: auction.status,
 		endAt: auction.endAt,
