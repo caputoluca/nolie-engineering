@@ -33,7 +33,6 @@ import { agreementsRoutes } from "./routes/agreements.js";
 import { auctionRoutes } from "./routes/auctions/index.js";
 import { authRoutes } from "./routes/auth/index.js";
 import { contactRoutes } from "./routes/contact.js";
-import { creatorsRoutes } from "./routes/creators.js";
 import { exploreRoutes } from "./routes/explore.js";
 import { handlesRoutes } from "./routes/handles.js";
 import { healthRoutes } from "./routes/health.js";
@@ -147,7 +146,6 @@ export async function buildApp(options?: BuildAppOptions) {
 	fastify.log.debug("Registering API routes");
 	await fastify.register(healthRoutes, { prefix: "/health" });
 	await fastify.register(authRoutes, { prefix: "/api/auth" });
-	await fastify.register(creatorsRoutes, { prefix: "/creators" });
 	await fastify.register(meRoutes, { prefix: "/me" });
 	await fastify.register(adminRoutes, { prefix: "/admin" });
 	await fastify.register(agreementsRoutes, { prefix: "/agreements" });
