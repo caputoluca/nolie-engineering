@@ -8,17 +8,17 @@ import {
 	toCents,
 } from "../utils.js";
 
-export interface PayCreatorInput {
+export interface PaySellerInput {
 	amount: number; // in dollars
-	creatorConnectAccountId: string;
+	sellerConnectAccountId: string;
 	auctionId: string;
-	fanId: string;
+	buyerId: string;
 	bidId: string;
 	retryAttempt: number;
 	sourceChargeId: string | null;
 }
 
-export type PayCreatorResult =
+export type PaySellerResult =
 	| {
 			success: true;
 			transferId: string;
@@ -32,14 +32,14 @@ export type PayCreatorResult =
 			transferId?: string;
 	  };
 
-export async function payCreator(
-	input: PayCreatorInput,
-): Promise<PayCreatorResult> {
+export async function paySeller(
+	input: PaySellerInput,
+): Promise<PaySellerResult> {
 	const amountInCents = toCents(input.amount);
 
 	// Validate amount is positive
 	// Note: The amount passed here is already the final netAmount (grossAmount - platformFee - processingFee)
-	// Fee calculation happens in settle.ts when creating CreatorEarning, not here
+	// Fee calculation happens in settle.ts when creating Earning, not here
 	if (amountInCents <= 0) {
 		return {
 			success: false,
@@ -50,9 +50,9 @@ export async function payCreator(
 
 	const idempotencyKeyBase = createIdempotencyKey({
 		auctionId: input.auctionId,
-		fanId: input.fanId,
+		buyerId: input.buyerId,
 		bidId: input.bidId,
-		resourceId: input.creatorConnectAccountId,
+		resourceId: input.sellerConnectAccountId,
 	});
 
 	const idempotencyKey = `${idempotencyKeyBase}-${input.retryAttempt}`;
@@ -62,10 +62,10 @@ export async function payCreator(
 			{
 				amount: amountInCents,
 				currency: "usd",
-				destination: input.creatorConnectAccountId,
+				destination: input.sellerConnectAccountId,
 				metadata: {
 					auctionId: input.auctionId,
-					fanId: input.fanId,
+					buyerId: input.buyerId,
 					bidId: input.bidId,
 				},
 				...(input.sourceChargeId
@@ -134,7 +134,7 @@ export async function payCreator(
 			message:
 				err instanceof Error
 					? err.message
-					: "Unknown error while transferring to creator",
+					: "Unknown error while transferring to seller",
 		};
 	}
 }
@@ -151,7 +151,7 @@ export async function payCreator(
  *
  * 2. **Amount Handling**: The `amount` parameter is already the final netAmount calculated in
  *    settle.ts (grossAmount - platformFee - processingFee). This function simply transfers
- *    that amount without recalculating fees. Fee calculation happens when creating CreatorEarning
+ *    that amount without recalculating fees. Fee calculation happens when creating Earning
  *    records, not during transfer.
  *
  * 3. **Validation**: Validates that the amount is positive before attempting transfer.
@@ -167,7 +167,7 @@ export async function payCreator(
  *    Reference: https://docs.stripe.com/api/idempotent_requests
  *
  * 6. **Metadata**: Includes all relevant identifiers for webhook processing and audit trails.
- *    This links the transfer back to the auction, winner, and bid.
+ *    This links the transfer back to the auction, buyer, and bid.
  *
  * 7. **Immediate Payouts Safety**: Transfers are safe for immediate payouts as long as:
  *    - The connected account has sufficient balance

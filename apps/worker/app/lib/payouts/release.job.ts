@@ -142,12 +142,12 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	const fanId = auction.winnerId;
+	const buyerId = auction.winnerId;
 	const bidId = auction.winningBidId;
 
-	if (!fanId || !bidId) {
+	if (!buyerId || !bidId) {
 		logger.error(
-			{ earningId, auctionId: earning.auctionId, fanId, bidId },
+			{ earningId, auctionId: earning.auctionId, buyerId, bidId },
 			"payout.release: auction missing winner or winningBidId; failing",
 		);
 		reportWarning(
@@ -185,19 +185,17 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			auctionId: earning.auctionId,
 			amountInDollars,
 			connectAccountId,
-			fanId,
+			buyerId,
 			bidId,
 		},
-		"payout.release: calling payments.creator.pay",
+		"payout.release: calling payments.seller.pay",
 	);
 
-	// TODO(buyer-seller-migration): rename payments.creator → payments.seller,
-	// creatorConnectAccountId → sellerConnectAccountId, fanId → buyerId in @nolie/payments
-	const result = await ctx.payments.creator.pay({
+	const result = await ctx.payments.seller.pay({
 		amount: amountInDollars,
-		creatorConnectAccountId: connectAccountId,
+		sellerConnectAccountId: connectAccountId,
 		auctionId: earning.auctionId,
-		fanId,
+		buyerId,
 		bidId,
 		retryAttempt: earning.insufficientFundsRetryAttempts,
 		sourceChargeId: earning.auction.paymentChargeId,
