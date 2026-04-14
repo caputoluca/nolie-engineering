@@ -1,8 +1,8 @@
 /**
  * Payout release tests.
  *
- * Tests the release job which handles paying creators after delivery:
- * - Happy path: creator gets paid
+ * Tests the release job which handles paying sellers after delivery:
+ * - Happy path: seller gets paid
  * - Idempotency: already paid → no-op
  * - Dispute blocking: pending/resolved_fan disputes block payout
  * - Failure handling: missing connect account
@@ -21,25 +21,25 @@ import { createMockJob } from "../helpers/index.js";
 
 describe("Payout Release", () => {
 	// =========================================================================
-	// TEST 1: Happy path - creator gets paid
+	// TEST 1: Happy path - seller gets paid
 	// =========================================================================
-	it("pays creator and records transfer on successful payout", async () => {
+	it("pays seller and records transfer on successful payout", async () => {
 		// Arrange: Create settled auction with earning ready for payout
-		const { earning, creator } = await createPendingPayout();
+		const { earning, seller } = await createPendingPayout();
 		const { ctx, mocks } = createTestPayoutsContext();
 
 		// Act: Run release job
 		const job = createMockJob({ earningId: earning.id });
 		await release(job, ctx);
 
-		// Assert: Creator was paid
-		assertCreatorPaid(mocks, {
-			creatorConnectAccountId: creator.connectAccountId as string,
+		// Assert: Seller was paid
+		assertSellerPaid(mocks, {
+			sellerConnectAccountId: seller.connectAccountId as string,
 			amount: earning.netAmount / 100, // Convert cents to dollars
 		});
 
 		// Assert: Earning record updated with transfer ID
-		const updatedEarning = await prisma.creatorEarning.findUnique({
+		const updatedEarning = await prisma.earning.findUnique({
 			where: { id: earning.id },
 		});
 		expect(updatedEarning?.stripeTransferId).toBeTruthy();
@@ -66,11 +66,11 @@ describe("Payout Release", () => {
 		await release(job, ctx);
 
 		// Assert: No payment attempted
-		const payOps = mocks.payments._getOperationsOfType("creator.pay");
+		const payOps = mocks.payments._getOperationsOfType("seller.pay");
 		expect(payOps).toHaveLength(0);
 
 		// Assert: Transfer ID unchanged
-		const unchangedEarning = await prisma.creatorEarning.findUnique({
+		const unchangedEarning = await prisma.earning.findUnique({
 			where: { id: earning.id },
 		});
 		expect(unchangedEarning?.stripeTransferId).toBe("tr_already_paid");
@@ -91,21 +91,21 @@ describe("Payout Release", () => {
 		await release(job, ctx);
 
 		// Assert: No payment attempted (dispute blocks payout)
-		const payOps = mocks.payments._getOperationsOfType("creator.pay");
+		const payOps = mocks.payments._getOperationsOfType("seller.pay");
 		expect(payOps).toHaveLength(0);
 
 		// Assert: Earning unchanged
-		const unchangedEarning = await prisma.creatorEarning.findUnique({
+		const unchangedEarning = await prisma.earning.findUnique({
 			where: { id: earning.id },
 		});
 		expect(unchangedEarning?.stripeTransferId).toBeNull();
 	});
 
 	// =========================================================================
-	// TEST 4: Dispute blocking - resolved in fan's favor
+	// TEST 4: Dispute blocking - resolved in buyer's favor
 	// =========================================================================
-	it("skips payout when dispute resolved in fan's favor", async () => {
-		// Arrange: Create earning with dispute resolved for fan
+	it("skips payout when dispute resolved in buyer's favor", async () => {
+		// Arrange: Create earning with dispute resolved for buyer
 		const { earning } = await createPendingPayout({
 			dispute: "resolved_fan",
 		});
@@ -115,22 +115,22 @@ describe("Payout Release", () => {
 		const job = createMockJob({ earningId: earning.id });
 		await release(job, ctx);
 
-		// Assert: No payment attempted (fan was refunded, creator shouldn't be paid)
-		const payOps = mocks.payments._getOperationsOfType("creator.pay");
+		// Assert: No payment attempted (buyer was refunded, seller shouldn't be paid)
+		const payOps = mocks.payments._getOperationsOfType("seller.pay");
 		expect(payOps).toHaveLength(0);
 
 		// Assert: Earning unchanged
-		const unchangedEarning = await prisma.creatorEarning.findUnique({
+		const unchangedEarning = await prisma.earning.findUnique({
 			where: { id: earning.id },
 		});
 		expect(unchangedEarning?.stripeTransferId).toBeNull();
 	});
 
 	// =========================================================================
-	// TEST 5: Failure - creator missing connect account
+	// TEST 5: Failure - seller missing connect account
 	// =========================================================================
-	it("marks payout as failed when creator has no connect account", async () => {
-		// Arrange: Create earning where creator never set up Stripe Connect
+	it("marks payout as failed when seller has no connect account", async () => {
+		// Arrange: Create earning where seller never set up Stripe Connect
 		const { earning } = await createPendingPayout({
 			hasConnectAccount: false,
 		});
@@ -141,16 +141,16 @@ describe("Payout Release", () => {
 		await release(job, ctx);
 
 		// Assert: No payment attempted (can't pay without connect account)
-		const payOps = mocks.payments._getOperationsOfType("creator.pay");
+		const payOps = mocks.payments._getOperationsOfType("seller.pay");
 		expect(payOps).toHaveLength(0);
 
 		// Assert: Earning marked as failed
-		const failedEarning = await prisma.creatorEarning.findUnique({
+		const failedEarning = await prisma.earning.findUnique({
 			where: { id: earning.id },
 		});
 		expect(failedEarning?.payoutStatus).toBe(PayoutStatus.failed);
 
-		// Assert: Creator notified of failure
+		// Assert: Seller notified of failure
 		assertNotificationQueued(mocks, "payoutFailed", {
 			auctionId: earning.auctionId,
 		});
@@ -165,7 +165,7 @@ describe("Payout Release", () => {
 		const { ctx, mocks } = createTestPayoutsContext();
 
 		// Mock: Payment fails due to insufficient funds in platform balance
-		mocks.payments.creator.pay.mockResolvedValueOnce({
+		mocks.payments.seller.pay.mockResolvedValueOnce({
 			success: false,
 			error: "insufficient_funds",
 			message: "Insufficient funds in Stripe balance",
@@ -176,10 +176,10 @@ describe("Payout Release", () => {
 		await release(job, ctx);
 
 		// Assert: Payment was attempted (using .mock.calls since we overrode the mock)
-		expect(mocks.payments.creator.pay.mock.calls).toHaveLength(1);
+		expect(mocks.payments.seller.pay.mock.calls).toHaveLength(1);
 
 		// Assert: Payout rescheduled (not marked as failed)
-		const rescheduledEarning = await prisma.creatorEarning.findUnique({
+		const rescheduledEarning = await prisma.earning.findUnique({
 			where: { id: earning.id },
 		});
 		expect(rescheduledEarning?.payoutStatus).not.toBe(PayoutStatus.failed);
@@ -202,7 +202,7 @@ describe("Payout Release", () => {
 		const { ctx, mocks } = createTestPayoutsContext();
 
 		// Mock: Payment fails due to transfer error (e.g., invalid bank account)
-		mocks.payments.creator.pay.mockResolvedValueOnce({
+		mocks.payments.seller.pay.mockResolvedValueOnce({
 			success: false,
 			error: "transfer_failed",
 			message: "The bank account could not be verified",
@@ -213,15 +213,15 @@ describe("Payout Release", () => {
 		await release(job, ctx);
 
 		// Assert: Payment was attempted (using .mock.calls since we overrode the mock)
-		expect(mocks.payments.creator.pay.mock.calls).toHaveLength(1);
+		expect(mocks.payments.seller.pay.mock.calls).toHaveLength(1);
 
 		// Assert: Earning marked as failed (not rescheduled)
-		const failedEarning = await prisma.creatorEarning.findUnique({
+		const failedEarning = await prisma.earning.findUnique({
 			where: { id: earning.id },
 		});
 		expect(failedEarning?.payoutStatus).toBe(PayoutStatus.failed);
 
-		// Assert: Creator notified of failure
+		// Assert: Seller notified of failure
 		assertNotificationQueued(mocks, "payoutFailed", {
 			auctionId: earning.auctionId,
 		});
@@ -237,7 +237,7 @@ type CreatePendingPayoutOptions = {
 	payoutStatus?: PayoutStatus;
 	/** Set to simulate already-paid state */
 	stripeTransferId?: string | null;
-	/** Whether creator has connect account (default: true) */
+	/** Whether seller has connect account (default: true) */
 	hasConnectAccount?: boolean;
 	/** Add a dispute with this status */
 	dispute?: "pending" | "resolved_fan" | "resolved_creator" | null;
@@ -248,9 +248,9 @@ type CreatePendingPayoutOptions = {
  * Mimics the output of: settle job → markAsDelivered
  *
  * Returns everything needed to test payout release:
- * - Creator with connect account
+ * - Seller with connect account
  * - Auction with winner
- * - CreatorEarning ready for payout
+ * - Earning ready for payout
  */
 async function createPendingPayout(options: CreatePendingPayoutOptions = {}) {
 	const {
@@ -260,21 +260,21 @@ async function createPendingPayout(options: CreatePendingPayoutOptions = {}) {
 		dispute = null,
 	} = options;
 
-	// Create winner (fan) with billing info
+	// Create winner (buyer) with billing info
 	const winner = await fixtures.users.create();
 	await fixtures.users.createPaymentMethod(winner.id);
 
-	// Create creator with connect account
-	const creatorUser = await fixtures.users.create({ role: "creator" });
-	const creator = await prisma.creator.create({
+	// Create seller with connect account
+	const sellerUser = await fixtures.users.create();
+	const seller = await prisma.sellerProfile.create({
 		data: {
-			userId: creatorUser.id,
+			userId: sellerUser.id,
 			connectAccountId: hasConnectAccount ? `acct_test_${Date.now()}` : null,
 		},
 	});
 
 	// Create auction (closed, with winner)
-	const auction = await fixtures.auctions.createForCreator(creator.id, {
+	const auction = await fixtures.auctions.createForSeller(seller.id, {
 		status: AuctionStatus.closed,
 	});
 
@@ -300,14 +300,15 @@ async function createPendingPayout(options: CreatePendingPayoutOptions = {}) {
 		},
 	});
 
-	// Create CreatorEarning (this is what settle creates)
-	const earning = await prisma.creatorEarning.create({
+	// Create Earning (this is what settle creates)
+	const earning = await prisma.earning.create({
 		data: {
 			auctionId: auction.id,
-			creatorId: creator.id,
+			sellerProfileId: seller.id,
 			grossAmount: 10000, // $100 in cents
 			platformFee: 2000, // 20% fee
-			netAmount: 8000, // $80 creator payout
+			netAmount: 8000, // $80 seller payout
+			buyerPremiumAmount: 0,
 			payoutStatus,
 			stripeTransferId,
 			markedAsFulfilledAt: new Date(), // Marked as delivered
@@ -326,15 +327,15 @@ async function createPendingPayout(options: CreatePendingPayoutOptions = {}) {
 					dispute === "pending"
 						? DisputeStatus.pending
 						: dispute === "resolved_fan"
-							? DisputeStatus.resolved_fan
-							: DisputeStatus.resolved_creator,
+							? DisputeStatus.refunded
+							: DisputeStatus.released,
 			},
 		});
 	}
 
 	return {
 		auction,
-		creator: { ...creator, user: creatorUser },
+		seller: { ...seller, user: sellerUser },
 		earning,
 		winner,
 		bid,
@@ -346,27 +347,27 @@ async function createPendingPayout(options: CreatePendingPayoutOptions = {}) {
 // ============================================================================
 
 /**
- * Assert creator was paid via Stripe transfer.
+ * Assert seller was paid via Stripe transfer.
  */
-function assertCreatorPaid(
+function assertSellerPaid(
 	mocks: TestMocksWithPayments,
-	expected: { creatorConnectAccountId: string; amount: number },
+	expected: { sellerConnectAccountId: string; amount: number },
 ) {
-	const payOps = mocks.payments._getOperationsOfType("creator.pay");
+	const payOps = mocks.payments._getOperationsOfType("seller.pay");
 	expect(
 		payOps.length,
-		"Expected at least one creator.pay call",
+		"Expected at least one seller.pay call",
 	).toBeGreaterThan(0);
 
 	const match = payOps.find(
 		(op) =>
-			(op.params as { creatorConnectAccountId: string })
-				.creatorConnectAccountId === expected.creatorConnectAccountId &&
+			(op.params as { sellerConnectAccountId: string })
+				.sellerConnectAccountId === expected.sellerConnectAccountId &&
 			(op.params as { amount: number }).amount === expected.amount,
 	);
 	expect(
 		match,
-		`Expected creator.pay with connectAccountId=${expected.creatorConnectAccountId}, amount=${expected.amount}`,
+		`Expected seller.pay with connectAccountId=${expected.sellerConnectAccountId}, amount=${expected.amount}`,
 	).toBeDefined();
 }
 
