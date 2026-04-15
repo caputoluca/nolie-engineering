@@ -1,6 +1,9 @@
-import { DisputeStatus, isPrismaRecordNotFoundError } from "@nolie/db";
+import {
+	DisputeStatus,
+	isPrismaRecordNotFoundError,
+	PayoutStatus,
+} from "@nolie/db";
 import { PaymentErrorCode } from "@nolie/payments";
-import { EarningsPayoutStatus } from "@nolie/schemas/me/index";
 import { logger } from "../../logger.js";
 import { RetryableError } from "../../retryable-error.js";
 import { reportError, reportWarning } from "../observability/sentry/report.js";
@@ -16,13 +19,13 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 	logger.info({ earningId }, "payout.release: starting");
 
-	const earning = await ctx.prisma.creatorEarning.findUnique({
+	const earning = await ctx.prisma.earning.findUnique({
 		where: {
 			id: earningId,
 		},
 		select: {
 			id: true,
-			netAmount: true, // amount in cents, creator's share
+			netAmount: true, // amount in cents, seller's share
 			processingFee: true, // Stripe processing fee (nullable)
 			auctionId: true,
 			insufficientFundsRetryAttempts: true,
@@ -38,7 +41,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 					paymentChargeId: true,
 				},
 			},
-			creator: {
+			sellerProfile: {
 				select: {
 					userId: true,
 					connectAccountId: true,
@@ -54,8 +57,8 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 	// Validate payout status - must be in_review or pending
 	if (
-		earning.payoutStatus !== EarningsPayoutStatus.in_review &&
-		earning.payoutStatus !== EarningsPayoutStatus.pending
+		earning.payoutStatus !== PayoutStatus.in_review &&
+		earning.payoutStatus !== PayoutStatus.pending
 	) {
 		logger.warn(
 			{
@@ -82,7 +85,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	const fulfillmentDisputeStatus = earning.auction.fulfillmentDispute?.status;
 	if (
 		fulfillmentDisputeStatus === DisputeStatus.pending ||
-		fulfillmentDisputeStatus === DisputeStatus.resolved_fan
+		fulfillmentDisputeStatus === DisputeStatus.refunded
 	) {
 		logger.warn(
 			{ earningId, dispute: earning.auction.fulfillmentDispute },
@@ -91,15 +94,15 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	const connectAccountId = earning.creator.connectAccountId;
+	const connectAccountId = earning.sellerProfile.connectAccountId;
 	if (!connectAccountId) {
-		reportWarning("Creator has no connect account for payout", {
+		reportWarning("Seller has no connect account for payout", {
 			operation: "release_payout",
 			extra: { earningId, auctionId: earning.auctionId },
 		});
 		logger.error(
 			{ earningId },
-			"payout.release: creator has no connect account; marking as failed",
+			"payout.release: seller has no connect account; marking as failed",
 		);
 		await markPayoutAsFailed(ctx.prisma, { earningId });
 
@@ -107,7 +110,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		void ctx.queues.notifications
 			.payoutFailed({
 				auctionId: earning.auctionId,
-				userId: earning.creator.userId,
+				userId: earning.sellerProfile.userId,
 			})
 			.catch((err) => {
 				reportError(err, {
@@ -139,12 +142,12 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	const fanId = auction.winnerId;
+	const buyerId = auction.winnerId;
 	const bidId = auction.winningBidId;
 
-	if (!fanId || !bidId) {
+	if (!buyerId || !bidId) {
 		logger.error(
-			{ earningId, auctionId: earning.auctionId, fanId, bidId },
+			{ earningId, auctionId: earning.auctionId, buyerId, bidId },
 			"payout.release: auction missing winner or winningBidId; failing",
 		);
 		reportWarning(
@@ -182,17 +185,17 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			auctionId: earning.auctionId,
 			amountInDollars,
 			connectAccountId,
-			fanId,
+			buyerId,
 			bidId,
 		},
-		"payout.release: calling payments.creator.pay",
+		"payout.release: calling payments.seller.pay",
 	);
 
-	const result = await ctx.payments.creator.pay({
+	const result = await ctx.payments.seller.pay({
 		amount: amountInDollars,
-		creatorConnectAccountId: connectAccountId,
+		sellerConnectAccountId: connectAccountId,
 		auctionId: earning.auctionId,
-		fanId,
+		buyerId,
 		bidId,
 		retryAttempt: earning.insufficientFundsRetryAttempts,
 		sourceChargeId: earning.auction.paymentChargeId,
@@ -200,7 +203,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 	if (!result.success) {
 		if (result.error === PaymentErrorCode.insufficient_funds) {
-			reportWarning("Insufficient platform balance when paying out creator", {
+			reportWarning("Insufficient platform balance when paying out seller", {
 				operation: "release_payout",
 				extra: { earningId, amountInDollars },
 			});
@@ -222,7 +225,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			return;
 		}
 
-		reportWarning("Payout to creator failed", {
+		reportWarning("Payout to seller failed", {
 			operation: "release_payout",
 			extra: {
 				earningId,
@@ -247,7 +250,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		void ctx.queues.notifications
 			.payoutFailed({
 				auctionId: earning.auctionId,
-				userId: earning.creator.userId,
+				userId: earning.sellerProfile.userId,
 			})
 			.catch((err) => {
 				reportError(err, {
@@ -274,16 +277,16 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	);
 
 	try {
-		await ctx.prisma.creatorEarning.update({
+		await ctx.prisma.earning.update({
 			where: {
 				id: earningId,
 				payoutStatus: {
-					in: [EarningsPayoutStatus.in_review, EarningsPayoutStatus.pending],
+					in: [PayoutStatus.in_review, PayoutStatus.pending],
 				},
 				stripeTransferId: null,
 			},
 			data: {
-				payoutStatus: EarningsPayoutStatus.pending,
+				payoutStatus: PayoutStatus.pending,
 				stripeTransferId: result.transferId,
 				stripeDestinationPaymentId: result.destinationPaymentId,
 			},
@@ -293,7 +296,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		void ctx.queues.notifications
 			.payoutProcessed({
 				auctionId: earning.auctionId,
-				userId: earning.creator.userId,
+				userId: earning.sellerProfile.userId,
 			})
 			.catch((err) => {
 				reportError(err, {
@@ -323,8 +326,8 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 				transferId: result.transferId,
 				err,
 			},
-			"Failed to update creator earning, retrying...",
+			"Failed to update earning, retrying...",
 		);
-		throw new RetryableError("Failed to update creator earning, retrying...");
+		throw new RetryableError("Failed to update earning, retrying...");
 	}
 }

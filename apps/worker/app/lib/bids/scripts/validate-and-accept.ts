@@ -56,7 +56,7 @@ local state = redis.call(
   "status",
   "currentHighestBidAmount",
   "startingBidAmount",
-  "creatorUserId",
+  "sellerUserId",
   "highestBidUserId",
   "version"
 )
@@ -64,7 +64,7 @@ local state = redis.call(
 local status = state[1]
 local currentHighestRaw = state[2]
 local startingBidRaw = state[3]
-local creatorUserId = state[4]
+local sellerUserId = state[4]
 local currentHighestBidUserId = state[5]
 
 if not status or (status ~= "active" and status ~= "scheduled") then
@@ -77,7 +77,7 @@ if ARGV[3] == "1" then
   return { "accepted", tostring(ARGV[1]), tostring(currentHighestRaw or 0), currentHighestBidUserId or "" }
 end
 
-if ARGV[2] == creatorUserId then
+if ARGV[2] == sellerUserId then
   return { "rejected", "${BidValidationCode.cannot_bid_on_own_auction}", currentHighestRaw or "0" }
 end
 

@@ -1,5 +1,3 @@
-import { isOnboardingComplete } from "@nolie/core/onboarding";
-import type { OnboardingStepType } from "@nolie/schemas/onboarding/step";
 import type { UserRoleType } from "@nolie/schemas/user";
 import type { RequestRouteOptions } from "fastify/types/request.js";
 import fp from "fastify-plugin";
@@ -13,7 +11,6 @@ import {
 export interface AuthConfig {
 	public?: boolean;
 	role?: UserRoleType | UserRoleType[];
-	requireOnboarded?: boolean;
 }
 
 declare module "fastify" {
@@ -87,29 +84,6 @@ export const protectPlugin = fp(
 							message: "Forbidden",
 						});
 					}
-				}
-
-				const { requireOnboarded } = authConfig || {};
-
-				if (
-					requireOnboarded &&
-					session.user.onboardingStep &&
-					!isOnboardingComplete(
-						session.user.onboardingStep as OnboardingStepType,
-					)
-				) {
-					fastify.log.warn(
-						{
-							userId: session.user.id,
-							userRole: session.user.role,
-							url: request.url,
-						},
-						"User tried to access resource without onboarding",
-					);
-					return reply.status(403).send({
-						code: "ONBOARDING_REQUIRED",
-						message: "Onboarding is required before accessing this resource.",
-					});
 				}
 
 				request.session = session;

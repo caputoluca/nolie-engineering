@@ -117,7 +117,7 @@ type ValidateBidAuction = Pick<
 	AuctionOut,
 	"status" | "endAt" | "startingBid"
 > & {
-	creatorUserId: string;
+	sellerUserId: string;
 };
 
 export interface ValidateBidInput {
@@ -161,7 +161,7 @@ export function validateBid(
 	}
 
 	// 2. Cannot bid on own auction
-	if (userId === auction.creatorUserId) {
+	if (userId === auction.sellerUserId) {
 		return {
 			valid: false,
 			message: "Cannot bid on your own auction",
