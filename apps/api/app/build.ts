@@ -1,3 +1,4 @@
+import type { S3Client } from "@aws-sdk/client-s3";
 import fastifyCookie from "@fastify/cookie";
 import corsPlugin from "@fastify/cors";
 import type { PaymentsClient } from "@nolie/payments";
@@ -27,6 +28,7 @@ import { realtimePlugin } from "./plugins/realtime.js";
 import { redisPlugin } from "./plugins/redis.js";
 import { schemasPlugin } from "./plugins/schemas.js";
 import { shippingPlugin } from "./plugins/shipping.js";
+import { storagePlugin } from "./plugins/storage.js";
 import { underPressurePlugin } from "./plugins/under-pressure.js";
 import { adminRoutes } from "./routes/admin.js";
 import { agreementsRoutes } from "./routes/agreements.js";
@@ -57,6 +59,7 @@ export interface BuildAppOptions {
 	ai?: AIClient;
 	moderation?: ModerationClient;
 	queues?: NoLieQueues;
+	storage?: S3Client;
 }
 
 export async function buildApp(options?: BuildAppOptions) {
@@ -139,6 +142,9 @@ export async function buildApp(options?: BuildAppOptions) {
 
 	fastify.log.debug("Initializing shipping");
 	await fastify.register(shippingPlugin, { instance: options?.shipping });
+
+	fastify.log.debug("Initializing storage");
+	await fastify.register(storagePlugin, { instance: options?.storage });
 	/* ------------------- End Plugins ------------------- */
 
 	/* --------------- Routes --------------- */
