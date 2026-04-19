@@ -87,6 +87,10 @@ const noOpRealtimeClient: RestClient = {
 	bid: {
 		result: noOpPublisher("bid.result"),
 	},
+
+	pickup: {
+		confirmed: noOpPublisher("pickup.confirmed"),
+	},
 };
 
 /**
