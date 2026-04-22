@@ -27,12 +27,12 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			id: true,
 			netAmount: true, // amount in cents, seller's share
 			processingFee: true, // Stripe processing fee (nullable)
-			auctionId: true,
+			listingId: true,
 			insufficientFundsRetryAttempts: true,
 			payoutStatus: true,
 			stripeTransferId: true, // For validation
 			createdAt: true, // For calculating age-based backoff
-			auction: {
+			listing: {
 				select: {
 					winnerId: true,
 					winningBidId: true,
@@ -82,13 +82,13 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	const fulfillmentDisputeStatus = earning.auction.fulfillmentDispute?.status;
+	const fulfillmentDisputeStatus = earning.listing.fulfillmentDispute?.status;
 	if (
 		fulfillmentDisputeStatus === DisputeStatus.pending ||
 		fulfillmentDisputeStatus === DisputeStatus.refunded
 	) {
 		logger.warn(
-			{ earningId, dispute: earning.auction.fulfillmentDispute },
+			{ earningId, dispute: earning.listing.fulfillmentDispute },
 			"payout.release: fulfillment dispute exists; skipping",
 		);
 		return;
@@ -98,7 +98,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	if (!connectAccountId) {
 		reportWarning("Seller has no connect account for payout", {
 			operation: "release_payout",
-			extra: { earningId, auctionId: earning.auctionId },
+			extra: { earningId, auctionId: earning.listingId },
 		});
 		logger.error(
 			{ earningId },
@@ -109,16 +109,16 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		// Fire-and-forget: queue payoutFailed notification
 		void ctx.queues.notifications
 			.payoutFailed({
-				auctionId: earning.auctionId,
+				auctionId: earning.listingId,
 				userId: earning.sellerProfile.userId,
 			})
 			.catch((err) => {
 				reportError(err, {
 					operation: "queue_payout_failed_notification",
-					extra: { earningId, auctionId: earning.auctionId },
+					extra: { earningId, auctionId: earning.listingId },
 				});
 				logger.warn(
-					{ err, earningId, auctionId: earning.auctionId },
+					{ err, earningId, auctionId: earning.listingId },
 					"payout.release: Failed to queue payoutFailed notification",
 				);
 			});
@@ -126,7 +126,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	const auction = earning.auction;
+	const auction = earning.listing;
 	if (!auction) {
 		logger.error(
 			{ earningId },
@@ -147,7 +147,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 	if (!buyerId || !bidId) {
 		logger.error(
-			{ earningId, auctionId: earning.auctionId, buyerId, bidId },
+			{ earningId, auctionId: earning.listingId, buyerId, bidId },
 			"payout.release: auction missing winner or winningBidId; failing",
 		);
 		reportWarning(
@@ -166,7 +166,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 	if (amountInDollars <= 0) {
 		logger.error(
-			{ earningId, auctionId: earning.auctionId, amountInDollars },
+			{ earningId, auctionId: earning.listingId, amountInDollars },
 			"payout.release: amount is less than or equal to 0; failing",
 		);
 		reportWarning("Net amount is <= 0 in payout release job", {
@@ -182,7 +182,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	logger.info(
 		{
 			earningId,
-			auctionId: earning.auctionId,
+			auctionId: earning.listingId,
 			amountInDollars,
 			connectAccountId,
 			buyerId,
@@ -194,11 +194,11 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	const result = await ctx.payments.seller.pay({
 		amount: amountInDollars,
 		sellerConnectAccountId: connectAccountId,
-		auctionId: earning.auctionId,
+		auctionId: earning.listingId,
 		buyerId,
 		bidId,
 		retryAttempt: earning.insufficientFundsRetryAttempts,
-		sourceChargeId: earning.auction.paymentChargeId,
+		sourceChargeId: earning.listing.paymentChargeId,
 	});
 
 	if (!result.success) {
@@ -229,7 +229,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			operation: "release_payout",
 			extra: {
 				earningId,
-				auctionId: earning.auctionId,
+				auctionId: earning.listingId,
 				error: result.error,
 				message: result.message,
 			},
@@ -237,7 +237,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		logger.error(
 			{
 				earningId,
-				auctionId: earning.auctionId,
+				auctionId: earning.listingId,
 				error: result.error,
 				message: result.message,
 			},
@@ -249,16 +249,16 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		// Fire-and-forget: queue payoutFailed notification (likely bank account issue)
 		void ctx.queues.notifications
 			.payoutFailed({
-				auctionId: earning.auctionId,
+				auctionId: earning.listingId,
 				userId: earning.sellerProfile.userId,
 			})
 			.catch((err) => {
 				reportError(err, {
 					operation: "queue_payout_failed_notification",
-					extra: { earningId, auctionId: earning.auctionId },
+					extra: { earningId, auctionId: earning.listingId },
 				});
 				logger.warn(
-					{ err, earningId, auctionId: earning.auctionId },
+					{ err, earningId, auctionId: earning.listingId },
 					"payout.release: Failed to queue payoutFailed notification",
 				);
 			});
@@ -270,7 +270,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	logger.info(
 		{
 			earningId,
-			auctionId: earning.auctionId,
+			auctionId: earning.listingId,
 			transferId: result.transferId,
 		},
 		"payout.release: payout succeeded",
@@ -295,16 +295,16 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		// Fire-and-forget: queue payoutProcessed notification to creator
 		void ctx.queues.notifications
 			.payoutProcessed({
-				auctionId: earning.auctionId,
+				auctionId: earning.listingId,
 				userId: earning.sellerProfile.userId,
 			})
 			.catch((err) => {
 				reportError(err, {
 					operation: "queue_payout_processed_notification",
-					extra: { earningId, auctionId: earning.auctionId },
+					extra: { earningId, auctionId: earning.listingId },
 				});
 				logger.warn(
-					{ err, earningId, auctionId: earning.auctionId },
+					{ err, earningId, auctionId: earning.listingId },
 					"payout.release: Failed to queue payoutProcessed notification",
 				);
 			});

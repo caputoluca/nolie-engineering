@@ -47,7 +47,7 @@ describe("Payout Release", () => {
 
 		// Assert: Success notification queued
 		assertNotificationQueued(mocks, "payoutProcessed", {
-			auctionId: earning.auctionId,
+			auctionId: earning.listingId,
 		});
 	});
 
@@ -152,7 +152,7 @@ describe("Payout Release", () => {
 
 		// Assert: Seller notified of failure
 		assertNotificationQueued(mocks, "payoutFailed", {
-			auctionId: earning.auctionId,
+			auctionId: earning.listingId,
 		});
 	});
 
@@ -223,7 +223,7 @@ describe("Payout Release", () => {
 
 		// Assert: Seller notified of failure
 		assertNotificationQueued(mocks, "payoutFailed", {
-			auctionId: earning.auctionId,
+			auctionId: earning.listingId,
 		});
 	});
 });
@@ -289,7 +289,7 @@ async function createPendingPayout(options: CreatePendingPayoutOptions = {}) {
 	});
 
 	// Update auction with winner
-	await prisma.auction.update({
+	await prisma.listing.update({
 		where: { id: auction.id },
 		data: {
 			winnerId: winner.id,
@@ -303,7 +303,7 @@ async function createPendingPayout(options: CreatePendingPayoutOptions = {}) {
 	// Create Earning (this is what settle creates)
 	const earning = await prisma.earning.create({
 		data: {
-			auctionId: auction.id,
+			listingId: auction.id,
 			sellerProfileId: seller.id,
 			grossAmount: 10000, // $100 in cents
 			platformFee: 2000, // 20% fee
@@ -319,7 +319,7 @@ async function createPendingPayout(options: CreatePendingPayoutOptions = {}) {
 	if (dispute) {
 		await prisma.fulfillmentDispute.create({
 			data: {
-				auctionId: auction.id,
+				listingId: auction.id,
 				userId: winner.id,
 				bidId: bid.id,
 				issueType: "not_received",
