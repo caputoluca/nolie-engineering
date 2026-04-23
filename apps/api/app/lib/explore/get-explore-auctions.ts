@@ -6,7 +6,7 @@ import {
 	type ExploreAuctionsResponse,
 	type ExploreQueryType,
 } from "@nolie/schemas/explore";
-import { queryAuctions } from "../auctions/query.js";
+import { queryAuctions } from "../listings/query.js";
 import { exploreAuctionSelect } from "./select.js";
 import { toExploreAuctionOut } from "./transform.js";
 
