@@ -38,6 +38,7 @@ import { contactRoutes } from "./routes/contact.js";
 import { exploreRoutes } from "./routes/explore.js";
 import { handlesRoutes } from "./routes/handles.js";
 import { healthRoutes } from "./routes/health.js";
+import { listingRoutes } from "./routes/listings/index.js";
 import { meRoutes } from "./routes/me/index.js";
 import { moderationRoutes } from "./routes/moderations.js";
 import { realtimeRoutes } from "./routes/realtime.js";
@@ -159,7 +160,9 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(uploadsRoutes, { prefix: "/uploads" });
 	await fastify.register(realtimeRoutes, { prefix: "/realtime" });
 	await fastify.register(handlesRoutes, { prefix: "/handles" });
+	// TODO(flat-pricing PR A3): drop this /auctions registration + routes/auctions/ dir.
 	await fastify.register(auctionRoutes, { prefix: "/auctions" });
+	await fastify.register(listingRoutes, { prefix: "/listings" });
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
 	await fastify.register(shippingRoutes, { prefix: "/shipping" });
 	await fastify.register(moderationRoutes, { prefix: "/moderations" });
