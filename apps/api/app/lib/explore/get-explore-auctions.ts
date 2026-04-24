@@ -6,7 +6,7 @@ import {
 	type ExploreAuctionsResponse,
 	type ExploreQueryType,
 } from "@nolie/schemas/explore";
-import { queryAuctions } from "../auctions/query.js";
+import { queryAuctions } from "../listings/query.js";
 import { exploreAuctionSelect } from "./select.js";
 import { toExploreAuctionOut } from "./transform.js";
 
@@ -20,9 +20,9 @@ async function loadExploreAuctions(
 	query: ExploreQueryType,
 ): Promise<LoadExploreAuctionsResult> {
 	const { filter, cursor, limit = DEFAULT_EXPLORE_LIMIT } = query;
-	const where: Prisma.AuctionWhereInput = {
+	const where: Prisma.ListingWhereInput = {
 		// exclude auctions without thumbnails (e.g. load test artifacts)
-		auctionAssets: { some: {} },
+		listingAssets: { some: {} },
 		hidden: false,
 	};
 	if (filter === "live") {

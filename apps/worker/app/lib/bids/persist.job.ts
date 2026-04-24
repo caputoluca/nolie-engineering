@@ -40,7 +40,7 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 				// Update auction endAt if extension was triggered
 				...(extendToEndAt
 					? [
-							tx.auction.update({
+							tx.listing.update({
 								where: { id: auctionId },
 								data: { endAt: new Date(extendToEndAt) },
 							}),
