@@ -34,11 +34,20 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			createdAt: true, // For calculating age-based backoff
 			listing: {
 				select: {
-					winnerId: true,
+					// Auction-specific result fields stay on Listing
 					winningBidId: true,
+				},
+			},
+			order: {
+				select: {
+					buyerId: true,
 					paymentIntentId: true, // For retrying fee retrieval
-					fulfillmentDispute: { select: { id: true, status: true } },
 					paymentChargeId: true,
+					lineItems: {
+						select: {
+							fulfillmentDispute: { select: { id: true, status: true } },
+						},
+					},
 				},
 			},
 			sellerProfile: {
@@ -82,13 +91,16 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	const fulfillmentDisputeStatus = earning.listing.fulfillmentDispute?.status;
+	const fulfillmentDispute = earning.order?.lineItems.find(
+		(li) => li.fulfillmentDispute != null,
+	)?.fulfillmentDispute;
+	const fulfillmentDisputeStatus = fulfillmentDispute?.status;
 	if (
 		fulfillmentDisputeStatus === DisputeStatus.pending ||
 		fulfillmentDisputeStatus === DisputeStatus.refunded
 	) {
 		logger.warn(
-			{ earningId, dispute: earning.listing.fulfillmentDispute },
+			{ earningId, dispute: fulfillmentDispute },
 			"payout.release: fulfillment dispute exists; skipping",
 		);
 		return;
@@ -126,15 +138,14 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	const auction = earning.listing;
-	if (!auction) {
+	if (!earning.order || !earning.listing) {
 		logger.error(
 			{ earningId },
-			"payout.release: earning has no auction; failing",
+			"payout.release: earning has no order or listing; failing",
 		);
 		await markPayoutAsFailed(ctx.prisma, { earningId });
 
-		reportWarning("Auction not found in payout release job", {
+		reportWarning("Order/listing not found in payout release job", {
 			operation: "release_payout",
 			extra: { earningId },
 		});
@@ -142,8 +153,8 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	const buyerId = auction.winnerId;
-	const bidId = auction.winningBidId;
+	const buyerId = earning.order.buyerId;
+	const bidId = earning.listing.winningBidId;
 
 	if (!buyerId || !bidId) {
 		logger.error(
@@ -198,7 +209,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		buyerId,
 		bidId,
 		retryAttempt: earning.insufficientFundsRetryAttempts,
-		sourceChargeId: earning.listing.paymentChargeId,
+		sourceChargeId: earning.order.paymentChargeId,
 	});
 
 	if (!result.success) {
