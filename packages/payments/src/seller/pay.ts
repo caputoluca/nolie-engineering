@@ -1,7 +1,7 @@
 import { client } from "../client.js";
 import { PaymentErrorCode, type PaymentErrorCodeType } from "../errors.js";
 import {
-	createIdempotencyKey,
+	idempotencyKeyWithVersion,
 	isInsufficientFundsError,
 	isStripeError,
 	shouldThrowError,
@@ -11,9 +11,8 @@ import {
 export interface PaySellerInput {
 	amount: number; // in dollars
 	sellerConnectAccountId: string;
-	auctionId: string;
+	orderId: string;
 	buyerId: string;
-	bidId: string;
 	retryAttempt: number;
 	sourceChargeId: string | null;
 }
@@ -48,14 +47,12 @@ export async function paySeller(
 		};
 	}
 
-	const idempotencyKeyBase = createIdempotencyKey({
-		auctionId: input.auctionId,
-		buyerId: input.buyerId,
-		bidId: input.bidId,
-		resourceId: input.sellerConnectAccountId,
-	});
-
-	const idempotencyKey = `${idempotencyKeyBase}-${input.retryAttempt}`;
+	// v2: keyed on orderId (was auctionId+bidId in v1) so BIN/checkout orders
+	// can transfer funds without an auction-only winningBidId.
+	const idempotencyKey = idempotencyKeyWithVersion(
+		`${input.orderId}-${input.sellerConnectAccountId}-${input.retryAttempt}`,
+		2,
+	);
 
 	try {
 		const transfer = await client.transfers.create(
@@ -64,9 +61,8 @@ export async function paySeller(
 				currency: "usd",
 				destination: input.sellerConnectAccountId,
 				metadata: {
-					auctionId: input.auctionId,
+					orderId: input.orderId,
 					buyerId: input.buyerId,
-					bidId: input.bidId,
 				},
 				...(input.sourceChargeId
 					? { source_transaction: input.sourceChargeId }
@@ -162,12 +158,15 @@ export async function paySeller(
  *    - **Business errors (RETURN)**: Invalid account, insufficient funds, account restrictions
  *      These return structured failures with error codes for business logic handling
  *
- * 5. **Idempotency Keys**: Deterministic keys based on auction/winner/bid/destination ensure
- *    safe retries without duplicate transfers. Same operation = same key = idempotent.
+ * 5. **Idempotency Keys**: Deterministic keys based on orderId/destination/retryAttempt
+ *    ensure safe retries without duplicate transfers. Same operation = same key =
+ *    idempotent. Versioned (v2) so payouts mid-flight when this changed don't collide
+ *    with the v1 (auction/bid-keyed) keys.
  *    Reference: https://docs.stripe.com/api/idempotent_requests
  *
- * 6. **Metadata**: Includes all relevant identifiers for webhook processing and audit trails.
- *    This links the transfer back to the auction, buyer, and bid.
+ * 6. **Metadata**: Includes orderId + buyerId for webhook processing and audit trails.
+ *    The Order is the source of truth for origination context (auction win, BIN
+ *    checkout, etc.) — look it up via orderId rather than denormalizing here.
  *
  * 7. **Immediate Payouts Safety**: Transfers are safe for immediate payouts as long as:
  *    - The connected account has sufficient balance
