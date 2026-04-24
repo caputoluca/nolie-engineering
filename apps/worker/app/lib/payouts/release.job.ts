@@ -27,19 +27,15 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			id: true,
 			netAmount: true, // amount in cents, seller's share
 			processingFee: true, // Stripe processing fee (nullable)
-			listingId: true,
+			listingId: true, // for log/notification continuity (auction-era)
+			orderId: true,
 			insufficientFundsRetryAttempts: true,
 			payoutStatus: true,
 			stripeTransferId: true, // For validation
 			createdAt: true, // For calculating age-based backoff
-			listing: {
-				select: {
-					// Auction-specific result fields stay on Listing
-					winningBidId: true,
-				},
-			},
 			order: {
 				select: {
+					id: true,
 					buyerId: true,
 					paymentIntentId: true, // For retrying fee retrieval
 					paymentChargeId: true,
@@ -138,14 +134,14 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	if (!earning.order || !earning.listing) {
+	if (!earning.order) {
 		logger.error(
 			{ earningId },
-			"payout.release: earning has no order or listing; failing",
+			"payout.release: earning has no order; failing",
 		);
 		await markPayoutAsFailed(ctx.prisma, { earningId });
 
-		reportWarning("Order/listing not found in payout release job", {
+		reportWarning("Order not found in payout release job", {
 			operation: "release_payout",
 			extra: { earningId },
 		});
@@ -154,20 +150,16 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	}
 
 	const buyerId = earning.order.buyerId;
-	const bidId = earning.listing.winningBidId;
 
-	if (!buyerId || !bidId) {
+	if (!buyerId) {
 		logger.error(
-			{ earningId, auctionId: earning.listingId, buyerId, bidId },
-			"payout.release: auction missing winner or winningBidId; failing",
+			{ earningId, orderId: earning.order.id, buyerId },
+			"payout.release: order missing buyerId; failing",
 		);
-		reportWarning(
-			"Auction missing winner or winningBidId in payout release job",
-			{
-				operation: "release_payout",
-				extra: { earningId },
-			},
-		);
+		reportWarning("Order missing buyerId in payout release job", {
+			operation: "release_payout",
+			extra: { earningId },
+		});
 		await markPayoutAsFailed(ctx.prisma, { earningId });
 
 		return;
@@ -193,11 +185,11 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	logger.info(
 		{
 			earningId,
+			orderId: earning.order.id,
 			auctionId: earning.listingId,
 			amountInDollars,
 			connectAccountId,
 			buyerId,
-			bidId,
 		},
 		"payout.release: calling payments.seller.pay",
 	);
@@ -205,9 +197,8 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	const result = await ctx.payments.seller.pay({
 		amount: amountInDollars,
 		sellerConnectAccountId: connectAccountId,
-		auctionId: earning.listingId,
+		orderId: earning.order.id,
 		buyerId,
-		bidId,
 		retryAttempt: earning.insufficientFundsRetryAttempts,
 		sourceChargeId: earning.order.paymentChargeId,
 	});
