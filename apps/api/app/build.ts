@@ -32,7 +32,6 @@ import { storagePlugin } from "./plugins/storage.js";
 import { underPressurePlugin } from "./plugins/under-pressure.js";
 import { adminRoutes } from "./routes/admin.js";
 import { agreementsRoutes } from "./routes/agreements.js";
-import { auctionRoutes } from "./routes/auctions/index.js";
 import { authRoutes } from "./routes/auth/index.js";
 import { contactRoutes } from "./routes/contact.js";
 import { exploreRoutes } from "./routes/explore.js";
@@ -160,8 +159,6 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(uploadsRoutes, { prefix: "/uploads" });
 	await fastify.register(realtimeRoutes, { prefix: "/realtime" });
 	await fastify.register(handlesRoutes, { prefix: "/handles" });
-	// TODO(flat-pricing PR A3): drop this /auctions registration + routes/auctions/ dir.
-	await fastify.register(auctionRoutes, { prefix: "/auctions" });
 	await fastify.register(listingRoutes, { prefix: "/listings" });
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
 	await fastify.register(shippingRoutes, { prefix: "/shipping" });
