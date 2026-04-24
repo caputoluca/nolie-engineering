@@ -278,48 +278,35 @@ async function createPendingPayout(options: CreatePendingPayoutOptions = {}) {
 		status: AuctionStatus.closed,
 	});
 
-	// Create winning bid
-	const bid = await prisma.bid.create({
-		data: {
-			id: `bid_test_${Date.now()}`,
-			auctionId: auction.id,
-			userId: winner.id,
-			amount: new Prisma.Decimal(100),
-		},
+	// Seed settled-auction state via the fixture (creates Order + OLI + Earning
+	// in the shape production's recordWinner produces).
+	const {
+		order,
+		orderLineItem,
+		earning: settledEarning,
+		bid,
+	} = await fixtures.orders.createSettled({
+		listingId: auction.id,
+		buyerUserId: winner.id,
 	});
 
-	// Update auction with winner
-	await prisma.listing.update({
-		where: { id: auction.id },
+	// Mark fulfilled + apply the test's payout-state overrides on top.
+	const earning = await prisma.earning.update({
+		where: { id: settledEarning.id },
 		data: {
-			winnerId: winner.id,
-			winningBidId: bid.id,
-			winningAmount: new Prisma.Decimal(100),
-			paymentIntentId: `pi_test_${Date.now()}`,
-			paymentStatus: PaymentStatus.succeeded,
-		},
-	});
-
-	// Create Earning (this is what settle creates)
-	const earning = await prisma.earning.create({
-		data: {
-			listingId: auction.id,
-			sellerProfileId: seller.id,
-			grossAmount: 10000, // $100 in cents
-			platformFee: 2000, // 20% fee
-			netAmount: 8000, // $80 seller payout
-			buyerPremiumAmount: 0,
 			payoutStatus,
 			stripeTransferId,
-			markedAsFulfilledAt: new Date(), // Marked as delivered
+			markedAsFulfilledAt: new Date(),
 		},
 	});
 
-	// Optionally add a dispute
+	// Optionally add a dispute (populates both legacy listingId and new
+	// orderLineItemId FKs to match recordWinner's dispute-write contract).
 	if (dispute) {
 		await prisma.fulfillmentDispute.create({
 			data: {
 				listingId: auction.id,
+				orderLineItemId: orderLineItem.id,
 				userId: winner.id,
 				bidId: bid.id,
 				issueType: "not_received",
@@ -336,6 +323,8 @@ async function createPendingPayout(options: CreatePendingPayoutOptions = {}) {
 	return {
 		auction,
 		seller: { ...seller, user: sellerUser },
+		order,
+		orderLineItem,
 		earning,
 		winner,
 		bid,
