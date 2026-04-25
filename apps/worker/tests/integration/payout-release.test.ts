@@ -8,8 +8,8 @@
  * - Failure handling: missing connect account
  */
 
-import { DisputeStatus, PayoutStatus, Prisma, prisma } from "@nolie/db";
-import { AuctionStatus, PaymentStatus } from "@nolie/schemas/auction/status";
+import { DisputeStatus, PayoutStatus, prisma } from "@nolie/db";
+import { AuctionStatus } from "@nolie/schemas/auction/status";
 import { fixtures } from "@nolie/testing";
 import { describe, expect, it } from "vitest";
 import { release } from "../../app/lib/payouts/release.job.js";
@@ -25,7 +25,7 @@ describe("Payout Release", () => {
 	// =========================================================================
 	it("pays seller and records transfer on successful payout", async () => {
 		// Arrange: Create settled auction with earning ready for payout
-		const { earning, seller } = await createPendingPayout();
+		const { auction, earning, seller } = await createPendingPayout();
 		const { ctx, mocks } = createTestPayoutsContext();
 
 		// Act: Run release job
@@ -47,7 +47,7 @@ describe("Payout Release", () => {
 
 		// Assert: Success notification queued
 		assertNotificationQueued(mocks, "payoutProcessed", {
-			auctionId: earning.listingId,
+			auctionId: auction.id,
 		});
 	});
 
@@ -131,7 +131,7 @@ describe("Payout Release", () => {
 	// =========================================================================
 	it("marks payout as failed when seller has no connect account", async () => {
 		// Arrange: Create earning where seller never set up Stripe Connect
-		const { earning } = await createPendingPayout({
+		const { auction, earning } = await createPendingPayout({
 			hasConnectAccount: false,
 		});
 		const { ctx, mocks } = createTestPayoutsContext();
@@ -152,7 +152,7 @@ describe("Payout Release", () => {
 
 		// Assert: Seller notified of failure
 		assertNotificationQueued(mocks, "payoutFailed", {
-			auctionId: earning.listingId,
+			auctionId: auction.id,
 		});
 	});
 
@@ -198,7 +198,7 @@ describe("Payout Release", () => {
 	// =========================================================================
 	it("marks payout as failed when Stripe transfer fails", async () => {
 		// Arrange: Create earning ready for payout
-		const { earning } = await createPendingPayout();
+		const { auction, earning } = await createPendingPayout();
 		const { ctx, mocks } = createTestPayoutsContext();
 
 		// Mock: Payment fails due to transfer error (e.g., invalid bank account)
@@ -223,7 +223,7 @@ describe("Payout Release", () => {
 
 		// Assert: Seller notified of failure
 		assertNotificationQueued(mocks, "payoutFailed", {
-			auctionId: earning.listingId,
+			auctionId: auction.id,
 		});
 	});
 });
