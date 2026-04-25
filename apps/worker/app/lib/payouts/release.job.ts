@@ -27,7 +27,6 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			id: true,
 			netAmount: true, // amount in cents, seller's share
 			processingFee: true, // Stripe processing fee (nullable)
-			listingId: true, // for log/notification continuity (auction-era)
 			orderId: true,
 			insufficientFundsRetryAttempts: true,
 			payoutStatus: true,
@@ -41,6 +40,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 					paymentChargeId: true,
 					lineItems: {
 						select: {
+							listingId: true,
 							fulfillmentDispute: { select: { id: true, status: true } },
 						},
 					},
@@ -59,6 +59,14 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		logger.error({ earningId }, "payout.release: earning not found; skipping");
 		return;
 	}
+
+	// TODO(NL-179): notification payload schemas still key on `auctionId`.
+	// V1 invariant: every Order has exactly one line item by construction, so
+	// we resolve the listingId off the first line. Revisit when BIN bundles
+	// ship — per-Order notifications should switch to `orderId` and let
+	// consumers decide how to render multi-item content.
+	const listingIdForNotification =
+		earning.order?.lineItems[0]?.listingId ?? null;
 
 	// Validate payout status - must be in_review or pending
 	if (
@@ -106,7 +114,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	if (!connectAccountId) {
 		reportWarning("Seller has no connect account for payout", {
 			operation: "release_payout",
-			extra: { earningId, auctionId: earning.listingId },
+			extra: { earningId, orderId: earning.orderId },
 		});
 		logger.error(
 			{ earningId },
@@ -114,22 +122,24 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		);
 		await markPayoutAsFailed(ctx.prisma, { earningId });
 
-		// Fire-and-forget: queue payoutFailed notification
-		void ctx.queues.notifications
-			.payoutFailed({
-				auctionId: earning.listingId,
-				userId: earning.sellerProfile.userId,
-			})
-			.catch((err) => {
-				reportError(err, {
-					operation: "queue_payout_failed_notification",
-					extra: { earningId, auctionId: earning.listingId },
+		if (listingIdForNotification) {
+			// Fire-and-forget: queue payoutFailed notification
+			void ctx.queues.notifications
+				.payoutFailed({
+					auctionId: listingIdForNotification,
+					userId: earning.sellerProfile.userId,
+				})
+				.catch((err) => {
+					reportError(err, {
+						operation: "queue_payout_failed_notification",
+						extra: { earningId, orderId: earning.orderId },
+					});
+					logger.warn(
+						{ err, earningId, orderId: earning.orderId },
+						"payout.release: Failed to queue payoutFailed notification",
+					);
 				});
-				logger.warn(
-					{ err, earningId, auctionId: earning.listingId },
-					"payout.release: Failed to queue payoutFailed notification",
-				);
-			});
+		}
 
 		return;
 	}
@@ -169,7 +179,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 	if (amountInDollars <= 0) {
 		logger.error(
-			{ earningId, auctionId: earning.listingId, amountInDollars },
+			{ earningId, orderId: earning.orderId, amountInDollars },
 			"payout.release: amount is less than or equal to 0; failing",
 		);
 		reportWarning("Net amount is <= 0 in payout release job", {
@@ -186,7 +196,6 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		{
 			earningId,
 			orderId: earning.order.id,
-			auctionId: earning.listingId,
 			amountInDollars,
 			connectAccountId,
 			buyerId,
@@ -231,7 +240,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			operation: "release_payout",
 			extra: {
 				earningId,
-				auctionId: earning.listingId,
+				orderId: earning.orderId,
 				error: result.error,
 				message: result.message,
 			},
@@ -239,7 +248,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		logger.error(
 			{
 				earningId,
-				auctionId: earning.listingId,
+				orderId: earning.orderId,
 				error: result.error,
 				message: result.message,
 			},
@@ -248,22 +257,24 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 		await markPayoutAsFailed(ctx.prisma, { earningId });
 
-		// Fire-and-forget: queue payoutFailed notification (likely bank account issue)
-		void ctx.queues.notifications
-			.payoutFailed({
-				auctionId: earning.listingId,
-				userId: earning.sellerProfile.userId,
-			})
-			.catch((err) => {
-				reportError(err, {
-					operation: "queue_payout_failed_notification",
-					extra: { earningId, auctionId: earning.listingId },
+		if (listingIdForNotification) {
+			// Fire-and-forget: queue payoutFailed notification (likely bank account issue)
+			void ctx.queues.notifications
+				.payoutFailed({
+					auctionId: listingIdForNotification,
+					userId: earning.sellerProfile.userId,
+				})
+				.catch((err) => {
+					reportError(err, {
+						operation: "queue_payout_failed_notification",
+						extra: { earningId, orderId: earning.orderId },
+					});
+					logger.warn(
+						{ err, earningId, orderId: earning.orderId },
+						"payout.release: Failed to queue payoutFailed notification",
+					);
 				});
-				logger.warn(
-					{ err, earningId, auctionId: earning.listingId },
-					"payout.release: Failed to queue payoutFailed notification",
-				);
-			});
+		}
 
 		return;
 	}
@@ -272,7 +283,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	logger.info(
 		{
 			earningId,
-			auctionId: earning.listingId,
+			orderId: earning.orderId,
 			transferId: result.transferId,
 		},
 		"payout.release: payout succeeded",
@@ -294,22 +305,24 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			},
 		});
 
-		// Fire-and-forget: queue payoutProcessed notification to creator
-		void ctx.queues.notifications
-			.payoutProcessed({
-				auctionId: earning.listingId,
-				userId: earning.sellerProfile.userId,
-			})
-			.catch((err) => {
-				reportError(err, {
-					operation: "queue_payout_processed_notification",
-					extra: { earningId, auctionId: earning.listingId },
+		if (listingIdForNotification) {
+			// Fire-and-forget: queue payoutProcessed notification to creator
+			void ctx.queues.notifications
+				.payoutProcessed({
+					auctionId: listingIdForNotification,
+					userId: earning.sellerProfile.userId,
+				})
+				.catch((err) => {
+					reportError(err, {
+						operation: "queue_payout_processed_notification",
+						extra: { earningId, orderId: earning.orderId },
+					});
+					logger.warn(
+						{ err, earningId, orderId: earning.orderId },
+						"payout.release: Failed to queue payoutProcessed notification",
+					);
 				});
-				logger.warn(
-					{ err, earningId, auctionId: earning.listingId },
-					"payout.release: Failed to queue payoutProcessed notification",
-				);
-			});
+		}
 	} catch (err) {
 		if (isPrismaRecordNotFoundError(err)) {
 			logger.warn(
