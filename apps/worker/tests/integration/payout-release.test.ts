@@ -300,12 +300,9 @@ async function createPendingPayout(options: CreatePendingPayoutOptions = {}) {
 		},
 	});
 
-	// Optionally add a dispute (populates both legacy listingId and new
-	// orderLineItemId FKs to match recordWinner's dispute-write contract).
 	if (dispute) {
 		await prisma.fulfillmentDispute.create({
 			data: {
-				listingId: auction.id,
 				orderLineItemId: orderLineItem.id,
 				userId: winner.id,
 				bidId: bid.id,
