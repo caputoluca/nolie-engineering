@@ -35,7 +35,7 @@ export function useExploreAuctions() {
 	// gets narrowed here so the auction-only UI keeps compiling.
 	const auctions =
 		res.data?.pages
-			.flatMap((p) => p.auctions)
+			.flatMap((p) => p.listings)
 			.filter((listing) => listing.listingType === "auction") ?? [];
 
 	return {
