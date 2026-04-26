@@ -111,7 +111,7 @@ export function drain(job: BidJob<"drain">, ctx: BidsContext) {
 						ctx.realtime(),
 						ctx.queues.auction,
 						ctx.cache.auctionState,
-						ctx.cache.auctionView,
+						ctx.cache.listingView,
 						{ auctionId, newEndAt: extendToEndAt },
 					).catch((err) => {
 						reportError(err, {
