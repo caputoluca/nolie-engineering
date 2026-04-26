@@ -1,5 +1,5 @@
 import type { CacheOf } from "@nolie/cache";
-import { AuctionStatus, type DbClient, type Prisma } from "@nolie/db";
+import { type DbClient, ListingStatus, type Prisma } from "@nolie/db";
 import {
 	DEFAULT_EXPLORE_LIMIT,
 	type ExploreListingSummary,
@@ -25,18 +25,18 @@ async function loadExploreListings(
 		hidden: false,
 	};
 	if (filter === "live") {
-		where.status = AuctionStatus.active;
+		where.status = ListingStatus.active;
 	} else if (filter === "ended") {
 		// failed means all payments failed
-		where.status = { in: [AuctionStatus.closed, AuctionStatus.failed] };
+		where.status = { in: [ListingStatus.closed, ListingStatus.failed] };
 	} else {
 		where.status = {
 			in: [
-				AuctionStatus.active,
-				AuctionStatus.scheduled,
-				AuctionStatus.closed,
-				AuctionStatus.failed, // failed means all payments failed
-				AuctionStatus.pending,
+				ListingStatus.active,
+				ListingStatus.scheduled,
+				ListingStatus.closed,
+				ListingStatus.failed, // failed means all payments failed
+				ListingStatus.pending,
 			],
 		};
 	}
