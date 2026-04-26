@@ -2,26 +2,25 @@ import type { CacheOf } from "@nolie/cache";
 import { AuctionStatus, type DbClient, type Prisma } from "@nolie/db";
 import {
 	DEFAULT_EXPLORE_LIMIT,
-	type ExploreAuctionOut,
-	type ExploreAuctionsResponse,
+	type ExploreListingSummary,
 	type ExploreQueryType,
 } from "@nolie/schemas/explore";
-import { queryAuctions } from "../listings/query.js";
-import { exploreAuctionSelect } from "./select.js";
-import { toExploreAuctionOut } from "./transform.js";
+import { queryListings } from "../listings/query.js";
+import { exploreListingSelect } from "./select.js";
+import { toExploreListingSummary } from "./transform.js";
 
-interface LoadExploreAuctionsResult {
-	auctions: ExploreAuctionOut[];
+interface LoadExploreListingsResult {
+	listings: ExploreListingSummary[];
 	nextCursor: string | null;
 }
 
-async function loadExploreAuctions(
+async function loadExploreListings(
 	db: DbClient,
 	query: ExploreQueryType,
-): Promise<LoadExploreAuctionsResult> {
+): Promise<LoadExploreListingsResult> {
 	const { filter, cursor, limit = DEFAULT_EXPLORE_LIMIT } = query;
 	const where: Prisma.ListingWhereInput = {
-		// exclude auctions without thumbnails (e.g. load test artifacts)
+		// exclude listings without thumbnails (e.g. load test artifacts)
 		listingAssets: { some: {} },
 		hidden: false,
 	};
@@ -42,40 +41,40 @@ async function loadExploreAuctions(
 		};
 	}
 
-	const auctions = await queryAuctions(db, {
+	const listings = await queryListings(db, {
 		where,
-		select: exploreAuctionSelect,
+		select: exploreListingSelect,
 		...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
 		take: limit + 1,
 		orderBy: [{ sortPriority: "asc" }, { sortTimeMs: "asc" }, { id: "asc" }],
 	});
 
 	return {
-		auctions: auctions.slice(0, limit).map(toExploreAuctionOut),
-		nextCursor: getNextCursor(auctions, limit),
+		listings: listings.slice(0, limit).map(toExploreListingSummary),
+		nextCursor: getNextCursor(listings, limit),
 	};
 }
 
-function getNextCursor(auctions: { id: string }[], limit: number | undefined) {
+function getNextCursor(listings: { id: string }[], limit: number | undefined) {
 	const effectiveLimit = limit ?? DEFAULT_EXPLORE_LIMIT;
-	if (auctions.length > effectiveLimit) {
-		return auctions[effectiveLimit - 1]?.id || null;
+	if (listings.length > effectiveLimit) {
+		return listings[effectiveLimit - 1]?.id || null;
 	}
 	return null;
 }
 
-export async function getExploreAuctions(
+export async function getExploreListings(
 	db: DbClient,
 	query: ExploreQueryType,
-	exploreAuctionsCache: CacheOf<"exploreAuctions">,
-): Promise<Omit<ExploreAuctionsResponse, "serverNow">> {
+	exploreListingsCache: CacheOf<"exploreListings">,
+): Promise<LoadExploreListingsResult> {
 	const { filter = "all", limit, cursor } = query;
 
 	if (limit === DEFAULT_EXPLORE_LIMIT && !cursor) {
-		return exploreAuctionsCache.get(filter, {
-			load: () => loadExploreAuctions(db, { filter }),
+		return exploreListingsCache.get(filter, {
+			load: () => loadExploreListings(db, { filter }),
 		});
 	}
 
-	return loadExploreAuctions(db, { filter, limit, cursor });
+	return loadExploreListings(db, { filter, limit, cursor });
 }
