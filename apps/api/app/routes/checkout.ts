@@ -17,7 +17,6 @@ export const checkoutRoutes = createRoutes((create, fastify) => {
 			response: {
 				200: CheckoutQuoteResponseSchema,
 				400: fastify.getErrorSchema("badRequest"),
-				401: fastify.getErrorSchema("unauthorized"),
 				404: fastify.getErrorSchema("notFound"),
 			},
 		},
@@ -43,7 +42,6 @@ export const checkoutRoutes = createRoutes((create, fastify) => {
 			response: {
 				200: CheckoutClaimSuccessSchema,
 				400: fastify.getErrorSchema("badRequest"),
-				401: fastify.getErrorSchema("unauthorized"),
 				403: fastify.getErrorSchema("forbidden"),
 				404: fastify.getErrorSchema("notFound"),
 				429: fastify.getErrorSchema("tooManyRequests"),
