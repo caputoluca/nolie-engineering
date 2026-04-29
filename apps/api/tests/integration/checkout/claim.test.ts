@@ -56,6 +56,40 @@ describe("POST /checkout/claim", () => {
 			expect(response.statusCode).toBe(401);
 		});
 
+		it("returns 400 INVALID_IDEMPOTENCY_KEY_FORMAT for malformed keys", async () => {
+			const buyer = await setupReadyBuyer();
+
+			// Too short (15 chars) → 400.
+			const tooShort = await postClaim(buyer.api, {
+				quoteId: "irrelevant",
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: "abcdefghijklmno",
+			});
+			const tooShortBody = await assertResponse<{ code: string }>(
+				tooShort,
+				400,
+			);
+			expect(tooShortBody.code).toBe("INVALID_IDEMPOTENCY_KEY_FORMAT");
+
+			// Disallowed character (space) → 400.
+			const badChar = await postClaim(buyer.api, {
+				quoteId: "irrelevant",
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: "has space in middle of key",
+			});
+			const badCharBody = await assertResponse<{ code: string }>(badChar, 400);
+			expect(badCharBody.code).toBe("INVALID_IDEMPOTENCY_KEY_FORMAT");
+
+			// Too long (65 chars) → 400.
+			const tooLong = await postClaim(buyer.api, {
+				quoteId: "irrelevant",
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: "a".repeat(65),
+			});
+			const tooLongBody = await assertResponse<{ code: string }>(tooLong, 400);
+			expect(tooLongBody.code).toBe("INVALID_IDEMPOTENCY_KEY_FORMAT");
+		});
+
 		it("returns 422 INVALID_QUOTE for an unknown quoteId", async () => {
 			const buyer = await setupReadyBuyer();
 			const response = await postClaim(buyer.api, {

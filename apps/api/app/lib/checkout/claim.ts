@@ -21,6 +21,7 @@ import {
 	type ComputedFulfillmentGroup,
 	computeCheckoutTotals,
 } from "./compute-totals.js";
+import { validateIdempotencyKeyFormat } from "./idempotency.js";
 import { type CheckoutListing, loadCheckoutListings } from "./listings.js";
 import {
 	type MaterializationGroup,
@@ -66,6 +67,11 @@ export async function claimCheckout(
 	input: ClaimInput,
 ): Promise<CheckoutClaimSuccess> {
 	const { db, payments, buyerId, body } = input;
+
+	// 0) Validate idempotency key format up-front. Cheap synchronous check —
+	//    rejects low-entropy / malformed keys before they hit any DB or Stripe
+	//    work. Stripe / Square / AWS / IETF-draft pattern.
+	validateIdempotencyKeyFormat(body.idempotencyKey);
 
 	// 1) Idempotency replay — same buyer + same key returns the same Order set
 	//    and the same PI clientSecret. Handles two replay scenarios:
