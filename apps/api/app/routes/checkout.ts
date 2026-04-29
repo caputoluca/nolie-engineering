@@ -74,6 +74,13 @@ export const checkoutRoutes = createRoutes((create, app) => {
 	});
 
 	create.post("/claim", {
+		config: {
+			rateLimit: {
+				max: app.rateLimiting.limits.checkoutClaim.max,
+				timeWindow: app.rateLimiting.limits.checkoutClaim.timeWindow,
+				keyGenerator: app.rateLimiting.keyGenerators.checkoutClaim,
+			},
+		},
 		schema: {
 			body: CheckoutClaimBodySchema,
 			response: {
