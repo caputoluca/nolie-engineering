@@ -26,7 +26,6 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		select: {
 			id: true,
 			netAmount: true, // amount in cents, seller's share
-			processingFee: true, // Stripe processing fee (nullable)
 			orderId: true,
 			insufficientFundsRetryAttempts: true,
 			payoutStatus: true,

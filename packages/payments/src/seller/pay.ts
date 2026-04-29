@@ -37,8 +37,9 @@ export async function paySeller(
 	const amountInCents = toCents(input.amount);
 
 	// Validate amount is positive
-	// Note: The amount passed here is already the final netAmount (grossAmount - platformFee - processingFee)
-	// Fee calculation happens in settle.ts when creating Earning, not here
+	// Note: The amount passed here is already the final netAmount (gross
+	// minus platform commission and the charged Stripe processing pass-
+	// through). Fee calculation happens at Earning creation, not here.
 	if (amountInCents <= 0) {
 		return {
 			success: false,
@@ -145,10 +146,10 @@ export async function paySeller(
  *    to using `transfer_data` in PaymentIntent (which we avoid per Stripe recommendations).
  *    Reference: https://docs.stripe.com/connect/separate-charges-and-transfers
  *
- * 2. **Amount Handling**: The `amount` parameter is already the final netAmount calculated in
- *    settle.ts (grossAmount - platformFee - processingFee). This function simply transfers
- *    that amount without recalculating fees. Fee calculation happens when creating Earning
- *    records, not during transfer.
+ * 2. **Amount Handling**: The `amount` parameter is the final netAmount calculated where the
+ *    Earning is created (settle for auctions, charge.succeeded webhook for BIN). It already
+ *    has the platform commission and the charged Stripe processing pass-through deducted.
+ *    This function simply transfers that amount without recalculating fees.
  *
  * 3. **Validation**: Validates that the amount is positive before attempting transfer.
  *
