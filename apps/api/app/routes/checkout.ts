@@ -68,6 +68,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				lineItems: full.lineItems,
 				groups: full.groups,
 				totals: full.totals,
+				isTaxExempt: full.isTaxExempt,
 				selectedShippingAddressId: full.selectedShippingAddressId,
 			});
 		},
