@@ -58,10 +58,10 @@ export const protectPlugin = fp(
 						},
 						"Unauthorized access attempt",
 					);
-					return reply.status(401).send({
-						code: "UNAUTHORIZED",
-						message: "Unauthorized",
-					});
+					const err = fastify.errors.unauthorized("Unauthorized");
+					return reply
+						.status(err.statusCode)
+						.send(err.toJSON({ traceId: request.id }));
 				}
 
 				const { role } = authConfig || {};
@@ -79,10 +79,12 @@ export const protectPlugin = fp(
 							},
 							"Insufficient permissions",
 						);
-						return reply.status(403).send({
+						const err = fastify.errors.forbidden("Forbidden", {
 							code: "INSUFFICIENT_PERMISSIONS",
-							message: "Forbidden",
 						});
+						return reply
+							.status(err.statusCode)
+							.send(err.toJSON({ traceId: request.id }));
 					}
 				}
 
