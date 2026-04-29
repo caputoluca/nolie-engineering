@@ -929,6 +929,67 @@ describe("POST /checkout/claim", () => {
 			expect(linkedOrder.paymentIntentId).toBe(retryBody.paymentIntentId);
 		});
 
+		it("replay with a different paymentMethodId → 422 IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", async () => {
+			// Stripe-pattern guard: reusing the same idempotency key with a
+			// different payload (here: a fresh paymentMethodId) is an SPA bug —
+			// silently confirming the original cart on the wrong card is worse
+			// than refusing.
+			const seller = await setupSellerWithListing();
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const idempotencyKey = uniqueIdempotencyKey("payload-mismatch-pm");
+
+			await assertResponse(
+				await postClaim(buyer.api, {
+					quoteId,
+					paymentMethodId: buyer.paymentMethodId,
+					idempotencyKey,
+				}),
+				200,
+			);
+
+			// Fresh payment method on the same buyer → different payload hash.
+			const freshPm = await fixtures.users.createPaymentMethod(
+				buyer.session.user.id,
+			);
+
+			const replay = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: freshPm.id,
+				idempotencyKey,
+			});
+
+			const body = await assertResponse<{ code: string }>(replay, 422);
+			expect(body.code).toBe("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+		});
+
+		it("replay with a different quoteId → 422 IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", async () => {
+			const sellerA = await setupSellerWithListing();
+			const sellerB = await setupSellerWithListing();
+			const buyer = await setupReadyBuyer();
+			const quoteA = await createQuoteFor(buyer.api, [sellerA.listing.id]);
+			const quoteB = await createQuoteFor(buyer.api, [sellerB.listing.id]);
+			const idempotencyKey = uniqueIdempotencyKey("payload-mismatch-quote");
+
+			await assertResponse(
+				await postClaim(buyer.api, {
+					quoteId: quoteA,
+					paymentMethodId: buyer.paymentMethodId,
+					idempotencyKey,
+				}),
+				200,
+			);
+
+			const replay = await postClaim(buyer.api, {
+				quoteId: quoteB,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey,
+			});
+
+			const body = await assertResponse<{ code: string }>(replay, 422);
+			expect(body.code).toBe("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD");
+		});
+
 		it("Stripe rate limit on first attempt → 429, retry succeeds", async () => {
 			const mockPayments = getMockPayments();
 			const seller = await setupSellerWithListing();

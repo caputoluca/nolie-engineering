@@ -21,7 +21,10 @@ import {
 	type ComputedFulfillmentGroup,
 	computeCheckoutTotals,
 } from "./compute-totals.js";
-import { validateIdempotencyKeyFormat } from "./idempotency.js";
+import {
+	computeIdempotencyPayloadHash,
+	validateIdempotencyKeyFormat,
+} from "./idempotency.js";
 import { type CheckoutListing, loadCheckoutListings } from "./listings.js";
 import {
 	type MaterializationGroup,
@@ -73,12 +76,26 @@ export async function claimCheckout(
 	//    work. Stripe / Square / AWS / IETF-draft pattern.
 	validateIdempotencyKeyFormat(body.idempotencyKey);
 
+	// 0b) Compute the canonical payload hash once. Used twice:
+	//      - on replay: compare to the stored hash; mismatch → 422
+	//      - on fresh insert: persisted on Order so future replays can compare
+	const payloadHash = computeIdempotencyPayloadHash({
+		quoteId: body.quoteId,
+		paymentMethodId: body.paymentMethodId,
+	});
+
 	// 1) Idempotency replay — same buyer + same key returns the same Order set
 	//    and the same PI clientSecret. Handles two replay scenarios:
 	//      a) Orders + paymentIntentId set → just return clientSecret.
 	//      b) Orders + paymentIntentId null → previous attempt died between Tx A
 	//         and Tx B; resume from the Stripe call.
-	const replay = await replayIfExists({ db, payments, buyerId, body });
+	const replay = await replayIfExists({
+		db,
+		payments,
+		buyerId,
+		body,
+		incomingPayloadHash: payloadHash,
+	});
 	if (replay) return replay;
 
 	// 2) Pre-flight reads (no tx — fast lookups, run in parallel).
@@ -342,6 +359,7 @@ export async function claimCheckout(
 			buyerId,
 			buyerEmailSnapshot: buyer.email,
 			idempotencyKey: body.idempotencyKey,
+			idempotencyPayloadHash: payloadHash,
 			groups: materializationGroups,
 			totalsByListingId,
 			shipTo,
@@ -476,11 +494,13 @@ async function replayIfExists({
 	payments,
 	buyerId,
 	body,
+	incomingPayloadHash,
 }: {
 	db: PrismaClient;
 	payments: PaymentsClient;
 	buyerId: string;
 	body: ClaimInput["body"];
+	incomingPayloadHash: string;
 }): Promise<CheckoutClaimSuccess | null> {
 	const siblings = await db.order.findMany({
 		where: { buyerId, idempotencyKey: body.idempotencyKey },
@@ -493,9 +513,24 @@ async function replayIfExists({
 			applicationFeeCents: true,
 			totalCents: true,
 			sellerProfileId: true,
+			idempotencyPayloadHash: true,
 		},
 	});
 	if (siblings.length === 0) return null;
+
+	// Stripe-style replay-with-different-payload guard. Same buyer + same key
+	// landing here with a different (quoteId, paymentMethodId) means the SPA
+	// reused a stale key — refuse, don't silently confirm the wrong payment.
+	const storedHash = siblings.find(
+		(s) => s.idempotencyPayloadHash !== null,
+	)?.idempotencyPayloadHash;
+	if (storedHash && storedHash !== incomingPayloadHash) {
+		throw new HttpError(
+			"Idempotency key reused with a different payload",
+			"IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD",
+			{ statusCode: 422 },
+		);
+	}
 
 	const orderIds = siblings.map((s) => s.id);
 	const linkedPI = siblings.find((s) => s.paymentIntentId);

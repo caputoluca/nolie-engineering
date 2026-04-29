@@ -56,6 +56,8 @@ interface MaterializeInput {
 	buyerId: string;
 	buyerEmailSnapshot: string;
 	idempotencyKey: string;
+	/** SHA-256 of the canonical claim payload — Stripe-style replay-with-different-payload guard. */
+	idempotencyPayloadHash: string;
 	groups: MaterializationGroup[];
 	totalsByListingId: Map<string, CheckoutListingTotals>;
 	/** Required for any group with `fulfillmentMode = shipping`; null if all groups are pickup. */
@@ -212,6 +214,7 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			paymentIntentId: null,
 			paymentStatus: PaymentStatus.pending,
 			idempotencyKey: input.idempotencyKey,
+			idempotencyPayloadHash: input.idempotencyPayloadHash,
 			fulfillmentMode: group.fulfillmentMode,
 			subtotalCents,
 			shippingCents,
