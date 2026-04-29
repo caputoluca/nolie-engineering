@@ -3,34 +3,33 @@ import {
 	CheckoutClaimSuccessSchema,
 } from "@nolie/schemas/checkout/claim";
 import {
-	CheckoutQueryParamsSchema,
+	CheckoutQuoteBodySchema,
 	CheckoutQuoteResponseSchema,
 } from "@nolie/schemas/checkout/quote";
 import { claimCheckout } from "../lib/checkout/claim.js";
 import { buildCheckoutQuote } from "../lib/checkout/quote.js";
 import { createRoutes } from "../lib/factory.js";
 
-export const checkoutRoutes = createRoutes((create, fastify) => {
-	create.get("/", {
+export const checkoutRoutes = createRoutes((create, app) => {
+	// POST not GET — building a quote inserts a CheckoutQuote row + calls
+	// Stripe Tax. Side-effectful, so it shouldn't be cacheable / idempotent.
+	create.post("/", {
 		schema: {
-			query: CheckoutQueryParamsSchema,
+			body: CheckoutQuoteBodySchema,
 			response: {
 				200: CheckoutQuoteResponseSchema,
-				400: fastify.getErrorSchema("badRequest"),
-				404: fastify.getErrorSchema("notFound"),
+				400: app.getErrorSchema("badRequest"),
+				404: app.getErrorSchema("notFound"),
 			},
 		},
 		handler: async (request, reply) => {
-			const listingIds = Array.isArray(request.query.listingIds)
-				? request.query.listingIds
-				: [request.query.listingIds];
-
 			const quote = await buildCheckoutQuote({
-				db: fastify.prisma,
-				payments: fastify.payments,
+				db: app.prisma,
+				payments: app.payments,
 				buyerId: request.session.user.id,
-				listingIds,
-				requestedShippingAddressId: request.query.shippingAddressId,
+				listingIds: request.body.listingIds,
+				requestedShippingAddressId: request.body.shippingAddressId,
+				fulfillmentChoiceByListing: request.body.fulfillment,
 			});
 			return reply.status(200).send(quote);
 		},
@@ -41,16 +40,16 @@ export const checkoutRoutes = createRoutes((create, fastify) => {
 			body: CheckoutClaimBodySchema,
 			response: {
 				200: CheckoutClaimSuccessSchema,
-				400: fastify.getErrorSchema("badRequest"),
-				403: fastify.getErrorSchema("forbidden"),
-				404: fastify.getErrorSchema("notFound"),
-				429: fastify.getErrorSchema("tooManyRequests"),
+				400: app.getErrorSchema("badRequest"),
+				403: app.getErrorSchema("forbidden"),
+				404: app.getErrorSchema("notFound"),
+				429: app.getErrorSchema("tooManyRequests"),
 			},
 		},
 		handler: async (request, reply) => {
 			const result = await claimCheckout({
-				db: fastify.prisma,
-				payments: fastify.payments,
+				db: app.prisma,
+				payments: app.payments,
 				buyerId: request.session.user.id,
 				body: request.body,
 			});

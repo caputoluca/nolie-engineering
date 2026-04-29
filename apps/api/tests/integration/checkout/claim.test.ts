@@ -34,6 +34,7 @@ import {
 	signInUser,
 } from "../../helpers/index.js";
 import {
+	addPickupListingToSeller,
 	createQuoteFor,
 	postClaim,
 	setupReadyBuyer,
@@ -108,6 +109,18 @@ describe("POST /checkout/claim", () => {
 			expect(order.lineItems).toHaveLength(1);
 			expect(order.lineItems[0]?.listingId).toBe(seller.listing.id);
 
+			// Fee math, single-line. Default platformFeeRate is 0.20 (see
+			// `createFixedPriceListingForSeller` fixture). Mock tax is 8% of price.
+			expect(order.subtotalCents).toBe(5000);
+			expect(order.shippingCents).toBe(500);
+			expect(order.taxCents).toBe(400);
+			expect(order.applicationFeeCents).toBe(1000); // 20% of 5000
+			expect(order.totalCents).toBe(5900);
+			expect(order.lineItems[0]?.priceCents).toBe(5000);
+			expect(order.lineItems[0]?.applicationFeeCents).toBe(1000);
+			expect(order.lineItems[0]?.sellerEarningCents).toBe(4000); // 5000 - 1000
+			expect(order.lineItems[0]?.taxCents).toBe(400);
+
 			const listing = await prisma.listing.findUniqueOrThrow({
 				where: { id: seller.listing.id },
 			});
@@ -166,6 +179,35 @@ describe("POST /checkout/claim", () => {
 			expect(order.lineItems.map((l) => l.listingId).sort()).toEqual(
 				[seller.listing.id, secondListing.id].sort(),
 			);
+
+			// Fee math: $30 + $70 at 20% rate. Per-line fees ($600 + $1400) sum
+			// to the Order aggregate. Bundle shipping = max(200, 200) = 200.
+			expect(order.subtotalCents).toBe(10000);
+			expect(order.applicationFeeCents).toBe(2000);
+			expect(order.shippingCents).toBe(200);
+			expect(order.taxCents).toBe(800); // 8% of subtotal
+			expect(order.totalCents).toBe(11000);
+
+			// Per-line fees are computed independently — catches a regression
+			// where we'd accidentally compute the fee on the bundle total.
+			const line30 = order.lineItems.find((l) => l.priceCents === 3000);
+			const line70 = order.lineItems.find((l) => l.priceCents === 7000);
+			expect(line30?.applicationFeeCents).toBe(600);
+			expect(line30?.sellerEarningCents).toBe(2400);
+			expect(line70?.applicationFeeCents).toBe(1400);
+			expect(line70?.sellerEarningCents).toBe(5600);
+
+			// Order aggregates are the sum of per-line values.
+			const lineFeesSum = order.lineItems.reduce(
+				(s, l) => s + l.applicationFeeCents,
+				0,
+			);
+			const linePricesSum = order.lineItems.reduce(
+				(s, l) => s + l.priceCents,
+				0,
+			);
+			expect(order.applicationFeeCents).toBe(lineFeesSum);
+			expect(order.subtotalCents).toBe(linePricesSum);
 
 			const listings = await prisma.listing.findMany({
 				where: { id: { in: [seller.listing.id, secondListing.id] } },
@@ -234,6 +276,288 @@ describe("POST /checkout/claim", () => {
 				mockPayments._getPaymentIntentByIdempotencyKey(idempotencyKey);
 			expect(stored).toBeDefined();
 			expect(stored?.customerId).toBe(buyer.customerId);
+		});
+	});
+
+	describe("happy path — pickup", () => {
+		it("all-pickup claim creates an Order with pickup snapshot and null ship-to/ship-from", async () => {
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				fulfillmentMode: "pickup",
+			});
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("pickup-happy"),
+			});
+
+			const body = await assertResponse<{
+				orderIds: string[];
+				paymentIntentId: string;
+			}>(response, 200);
+			expect(body.orderIds).toHaveLength(1);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+			expect(order.fulfillmentMode).toBe("pickup");
+			expect(order.shippingCents).toBe(0);
+
+			// Ship-to and ship-from are null for pickup orders.
+			expect(order.shipToName).toBeNull();
+			expect(order.shipToLine1).toBeNull();
+			expect(order.shipToCity).toBeNull();
+			expect(order.shipFromName).toBeNull();
+			expect(order.shipFromLine1).toBeNull();
+			expect(order.shipFromCity).toBeNull();
+
+			// Pickup snapshot is populated from the seller's PickupLocation.
+			expect(order.pickupLocationId).toBe(seller.pickupLocation?.id);
+			expect(order.pickupLocationName).toBe(seller.pickupLocation?.name);
+			expect(order.pickupLine1).toBe(seller.pickupLocation?.line1);
+			expect(order.pickupCity).toBe(seller.pickupLocation?.city);
+			expect(order.pickupState).toBe(seller.pickupLocation?.state);
+			expect(order.pickupPostalCode).toBe(seller.pickupLocation?.postalCode);
+			expect(order.pickupCountry).toBe(seller.pickupLocation?.country);
+
+			// Listing reserved as in the shipping happy path.
+			const listing = await prisma.listing.findUniqueOrThrow({
+				where: { id: seller.listing.id },
+			});
+			expect(listing.status).toBe(ListingStatus.reserved);
+			expect(listing.reservedByOrderId).toBe(order.id);
+		});
+
+		it("all-pickup claim succeeds even when buyer has no shipping address", async () => {
+			// SHIPPING_ADDRESS_NOT_FOUND must not fire when the quote is all-pickup
+			// (CheckoutQuote.shippingAddressId is null in that case).
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "digital",
+				fulfillmentMode: "pickup",
+			});
+			const buyer = await setupReadyBuyer({ withShippingAddress: false });
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("pickup-no-addr"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			expect(body.orderIds).toHaveLength(1);
+		});
+
+		it("all-pickup claim succeeds even when seller has no shippingFromAddress", async () => {
+			// SELLER_MISSING_SHIP_FROM is only loaded for sellers with at least one
+			// shipping group. A pure-pickup seller with no ship-from is fine.
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "digital",
+				fulfillmentMode: "pickup",
+			});
+			await prisma.sellerProfile.update({
+				where: { id: seller.sellerProfileId },
+				data: { shippingFromAddressId: null },
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("pickup-no-shipfrom"),
+			});
+
+			await assertResponse(response, 200);
+		});
+	});
+
+	describe("mixed-mode claim", () => {
+		it("single seller with [ship + pickup] → 2 Orders sharing one PaymentIntent", async () => {
+			// This is the canary for the schema unique-index change. The old
+			// `@@unique([buyerId, idempotencyKey, sellerProfileId])` would block
+			// the second insert; the migration replaced it with a partial index
+			// on `(buyerId, idempotencyKey, sellerProfileId, fulfillmentMode,
+			// pickupLocationId) NULLS NOT DISTINCT`, which permits the fan-out.
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 500,
+			});
+			const { listing: pickupListing, pickupLocation } =
+				await addPickupListingToSeller(seller.sellerProfileId, {
+					price: 40,
+					itemType: "physical",
+				});
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				pickupListing.id,
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("mixed-1seller"),
+			});
+
+			const body = await assertResponse<{
+				orderIds: string[];
+				paymentIntentId: string;
+			}>(response, 200);
+			expect(body.orderIds).toHaveLength(2);
+
+			const orders = await prisma.order.findMany({
+				where: { id: { in: body.orderIds } },
+				include: { lineItems: true },
+			});
+			// Shared PI across both Orders.
+			const piIds = new Set(orders.map((o) => o.paymentIntentId));
+			expect(piIds.size).toBe(1);
+			expect([...piIds][0]).toBe(body.paymentIntentId);
+
+			// Both Orders belong to the same seller, but split by mode.
+			const shipping = orders.find((o) => o.fulfillmentMode === "shipping");
+			const pickup = orders.find((o) => o.fulfillmentMode === "pickup");
+			expect(shipping).toBeDefined();
+			expect(pickup).toBeDefined();
+			expect(shipping?.sellerProfileId).toBe(seller.sellerProfileId);
+			expect(pickup?.sellerProfileId).toBe(seller.sellerProfileId);
+
+			// Shipping Order has ship-to/ship-from + zero pickup snapshot.
+			expect(shipping?.shipToName).not.toBeNull();
+			expect(shipping?.shipFromName).not.toBeNull();
+			expect(shipping?.pickupLocationId).toBeNull();
+			expect(shipping?.shippingCents).toBe(500);
+			expect(shipping?.lineItems).toHaveLength(1);
+			expect(shipping?.lineItems[0]?.listingId).toBe(seller.listing.id);
+
+			// Pickup Order has pickup snapshot + null ship-to/ship-from.
+			expect(pickup?.shipToName).toBeNull();
+			expect(pickup?.shipFromName).toBeNull();
+			expect(pickup?.pickupLocationId).toBe(pickupLocation.id);
+			expect(pickup?.shippingCents).toBe(0);
+			expect(pickup?.lineItems).toHaveLength(1);
+			expect(pickup?.lineItems[0]?.listingId).toBe(pickupListing.id);
+		});
+
+		it("multi-seller mixed (one pickup seller, one shipping seller) → 2 Orders, 1 PI", async () => {
+			const sellerShip = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 500,
+			});
+			const sellerPickup = await setupSellerWithListing({
+				price: 80,
+				itemType: "physical",
+				fulfillmentMode: "pickup",
+			});
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				sellerShip.listing.id,
+				sellerPickup.listing.id,
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("mixed-2seller"),
+			});
+
+			const body = await assertResponse<{
+				orderIds: string[];
+				paymentIntentId: string;
+			}>(response, 200);
+			expect(body.orderIds).toHaveLength(2);
+
+			const orders = await prisma.order.findMany({
+				where: { id: { in: body.orderIds } },
+			});
+			const shipOrder = orders.find(
+				(o) => o.sellerProfileId === sellerShip.sellerProfileId,
+			);
+			const pickupOrder = orders.find(
+				(o) => o.sellerProfileId === sellerPickup.sellerProfileId,
+			);
+
+			expect(shipOrder?.fulfillmentMode).toBe("shipping");
+			expect(shipOrder?.shippingCents).toBe(500);
+			expect(shipOrder?.shipToName).not.toBeNull();
+			expect(shipOrder?.pickupLocationId).toBeNull();
+
+			expect(pickupOrder?.fulfillmentMode).toBe("pickup");
+			expect(pickupOrder?.shippingCents).toBe(0);
+			expect(pickupOrder?.shipToName).toBeNull();
+			expect(pickupOrder?.pickupLocationId).toBe(
+				sellerPickup.pickupLocation?.id,
+			);
+
+			// Single PaymentIntent across the whole bundle.
+			expect(shipOrder?.paymentIntentId).toBe(pickupOrder?.paymentIntentId);
+			expect(shipOrder?.paymentIntentId).toBe(body.paymentIntentId);
+		});
+	});
+
+	describe("fee math", () => {
+		it("computes applicationFeeCents per-line from each listing's own platformFeeRate", async () => {
+			// Same seller, two listings with different fee rates. The per-line
+			// fee uses the listing's own rate; the Order aggregate is the sum.
+			// Catches a regression where we'd accidentally apply one rate to
+			// the whole bundle.
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 0,
+				platformFeeRate: 0.2,
+			});
+			const second = await createFixedPriceListingForSeller(
+				seller.sellerProfileId,
+				{ price: 100, itemType: "physical" },
+			);
+			await prisma.listing.update({
+				where: { id: second.id },
+				data: {
+					shippingCostCents: 0,
+					platformFeeRate: new Prisma.Decimal(0.1),
+				},
+			});
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				second.id,
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("fee-mixed"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+
+			// Per-line fees come from each listing's own rate.
+			const line50 = order.lineItems.find((l) => l.priceCents === 5000);
+			const line100 = order.lineItems.find((l) => l.priceCents === 10000);
+			expect(line50?.applicationFeeCents).toBe(1000); // 20% of 5000
+			expect(line50?.sellerEarningCents).toBe(4000);
+			expect(line100?.applicationFeeCents).toBe(1000); // 10% of 10000
+			expect(line100?.sellerEarningCents).toBe(9000);
+
+			// Order aggregate is the sum.
+			expect(order.applicationFeeCents).toBe(2000);
+			expect(order.subtotalCents).toBe(15000);
 		});
 	});
 

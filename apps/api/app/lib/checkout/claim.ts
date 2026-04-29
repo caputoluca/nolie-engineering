@@ -9,16 +9,26 @@ import type {
 	CheckoutLineTotals,
 } from "@nolie/schemas/checkout/claim";
 import { CheckoutClaimErrorCode } from "@nolie/schemas/checkout/claim";
+import type { FulfillmentMethodType } from "@nolie/schemas/fulfillment";
 import { logger } from "../../logger.js";
 import { apiTx } from "../db/tx.js";
 import { setReportingContext } from "../observability/sentry/report.js";
+import { BUNDLE_SHIPPING_FORMULA } from "./bundle-shipping.js";
 import {
+	buildAndValidateGroups,
 	type CheckoutListingTotals,
 	type ComputedCheckoutTotals,
+	type ComputedFulfillmentGroup,
 	computeCheckoutTotals,
 } from "./compute-totals.js";
 import { type CheckoutListing, loadCheckoutListings } from "./listings.js";
-import { materializeOrders } from "./materialize-orders.js";
+import {
+	type MaterializationGroup,
+	materializeOrders,
+	type PickupSnapshot,
+	type ShipFromSnapshot,
+	type ShipToSnapshot,
+} from "./materialize-orders.js";
 import { reserveListings } from "./reserve.js";
 
 /** Claim-before-charge hold — see flat-pricing-bin-checkout.md "Reservation TTL". */
@@ -76,7 +86,14 @@ export async function claimCheckout(
 
 	const listingIds = quote.lines.map((l) => l.listingId);
 
-	const [listings, buyer, shipFromBySellerProfile] = await Promise.all([
+	// Buyer fulfillment choices come from the persisted quote lines — at claim
+	// time we trust the snapshot. Fulfillment changes require a fresh quote;
+	// the claim body never overrides.
+	const buyerChoiceByListing = new Map<string, FulfillmentMethodType>(
+		quote.lines.map((l) => [l.listingId, asResolvedMethod(l.fulfillmentMode)]),
+	);
+
+	const [listings, buyer] = await Promise.all([
 		loadCheckoutListings(db, listingIds),
 		db.user.findUnique({
 			where: { id: buyerId },
@@ -94,25 +111,24 @@ export async function claimCheckout(
 						},
 					},
 				},
-				shippingAddresses: {
-					where: { id: quote.shippingAddressId },
-					select: {
-						id: true,
-						fullName: true,
-						line1: true,
-						line2: true,
-						city: true,
-						state: true,
-						postalCode: true,
-						country: true,
-					},
-					take: 1,
-				},
+				shippingAddresses: quote.shippingAddressId
+					? {
+							where: { id: quote.shippingAddressId },
+							select: {
+								id: true,
+								fullName: true,
+								line1: true,
+								line2: true,
+								city: true,
+								state: true,
+								postalCode: true,
+								country: true,
+							},
+							take: 1,
+						}
+					: false,
 			},
 		}),
-		// SellerProfile shipFrom lives on a different table — separate query, but
-		// runs in parallel with the others so latency stays additive at 1 round-trip.
-		loadShipFromBySellerProfile(db, listingIds),
 	]);
 
 	const customerId = buyer?.billing?.customerId;
@@ -128,8 +144,12 @@ export async function claimCheckout(
 			code: "PAYMENT_METHOD_NOT_FOUND",
 		});
 	}
-	const address = buyer.shippingAddresses[0];
-	if (!address) {
+
+	const shipAddress =
+		quote.shippingAddressId && buyer.shippingAddresses
+			? (buyer.shippingAddresses[0] ?? null)
+			: null;
+	if (quote.shippingAddressId && !shipAddress) {
 		throw errors.badRequest("Shipping address not found for this buyer", {
 			code: "SHIPPING_ADDRESS_NOT_FOUND",
 		});
@@ -144,14 +164,35 @@ export async function claimCheckout(
 		}
 	}
 
-	const sellerProfileIds = Array.from(
-		new Set(listings.map((l) => l.sellerProfileId)),
-	);
+	// 4) Pickup snapshots — full address fields needed for both Order pickup
+	//    snapshot AND tax-address fallback when there's no ship-to.
+	const pickupSnapshotByLocationId = await loadPickupSnapshots(db, listings);
 
-	// 4) Recompute fresh totals + drift check.
+	// 5) Resolve the tax address. Mirror quote-time logic: if any ship line, use
+	//    buyer ship-to; else first pickup location.
+	const taxAddress = resolveClaimTaxAddress({
+		listings,
+		buyerChoiceByListing,
+		shipAddress,
+		pickupSnapshotByLocationId,
+	});
+	if (!taxAddress) {
+		throw errors.badRequest(
+			"Cannot resolve a tax address for this checkout (no ship-to and no pickup location available)",
+			{ code: "TAX_ADDRESS_UNRESOLVED" },
+		);
+	}
+
+	// 6) Recompute fresh totals + drift check. Group + validate upfront so
+	//    a stale fulfillment choice (listing's mode/pickup-location changed
+	//    after the quote) fails fast with 422.
+	const { items: groupableItems, groups: validatedGroups } =
+		buildAndValidateGroups(listings, buyerChoiceByListing);
 	const fresh = await computeCheckoutTotals({
 		listings,
-		address,
+		items: groupableItems,
+		groups: validatedGroups,
+		taxAddress,
 		taxExempt: buyer.taxExemptStatus === "approved",
 		payments,
 	});
@@ -161,7 +202,7 @@ export async function claimCheckout(
 		const newQuote = await db.checkoutQuote.create({
 			data: {
 				buyerId,
-				shippingAddressId: address.id,
+				shippingAddressId: shipAddress?.id ?? null,
 				totalCents: fresh.totalCents,
 				taxCalculationId: fresh.taxCalculationId,
 				expiresAt: quote.expiresAt,
@@ -169,6 +210,7 @@ export async function claimCheckout(
 					createMany: {
 						data: fresh.perListing.map((p) => ({
 							listingId: p.listingId,
+							fulfillmentMode: p.fulfillmentMode,
 							priceCents: p.priceCents,
 							taxCents: p.taxCents,
 							shippingCents: p.shippingCents,
@@ -194,37 +236,54 @@ export async function claimCheckout(
 		);
 	}
 
-	// 5) Pre-generate Order IDs — one per seller group. Order.id doubles as
-	//    `reservedByOrderId` so the webhook can defend against mid-3DS races.
-	const orderIdBySellerProfile = new Map<string, string>(
-		sellerProfileIds.map((id) => [id, randomUUID()]),
+	// 7) Build materialization groups — one Order per fulfillment group.
+	const listingsById = new Map(listings.map((l) => [l.id, l]));
+	const materializationGroups: MaterializationGroup[] = fresh.groups.map(
+		(g) => ({
+			orderId: randomUUID(),
+			sellerProfileId: g.sellerProfileId,
+			fulfillmentMode: g.fulfillmentMode,
+			listings: g.listingIds
+				.map((id) => listingsById.get(id))
+				.filter((l): l is CheckoutListing => l !== undefined),
+		}),
 	);
-	// `consumedByOrderId` is a "claimed" flag, not a real FK. All N Orders share
-	// the same PI; pick any of the generated IDs as the marker.
-	const [consumedMarkerOrderId] = orderIdBySellerProfile.values();
-	if (!consumedMarkerOrderId) {
-		throw errors.internal("No seller groups in listings", {
-			code: "NO_SELLER_GROUPS",
-		});
-	}
 
-	const reservedUntil = new Date(Date.now() + RESERVATION_TTL_MS);
+	const sellerProfileIdsWithShipGroup = new Set(
+		fresh.groups
+			.filter((g) => g.fulfillmentMode === "shipping")
+			.map((g) => g.sellerProfileId),
+	);
+	const shipFromBySellerProfile = await loadShipFromBySellerProfile(
+		db,
+		Array.from(sellerProfileIdsWithShipGroup),
+	);
 
-	// 6) Tx A — atomic DB writes only. Fast (no external calls).
+	const shipTo: ShipToSnapshot | null = shipAddress
+		? {
+				name: shipAddress.fullName,
+				line1: shipAddress.line1,
+				line2: shipAddress.line2,
+				city: shipAddress.city,
+				state: shipAddress.state,
+				postalCode: shipAddress.postalCode,
+				country: shipAddress.country,
+				phone: buyer.phone,
+			}
+		: null;
+
 	const totalsByListingId = new Map(
 		fresh.perListing.map((t) => [t.listingId, t]),
 	);
-	const shipTo = {
-		name: address.fullName,
-		line1: address.line1,
-		line2: address.line2,
-		city: address.city,
-		state: address.state,
-		postalCode: address.postalCode,
-		country: address.country,
-		phone: buyer.phone,
-	};
+	const consumedMarkerOrderId = materializationGroups[0]?.orderId;
+	if (!consumedMarkerOrderId) {
+		throw errors.internal("No fulfillment groups in claim", {
+			code: "NO_FULFILLMENT_GROUPS",
+		});
+	}
+	const reservedUntil = new Date(Date.now() + RESERVATION_TTL_MS);
 
+	// 8) Tx A — atomic DB writes only. Fast (no external calls).
 	const { orderIds } = await apiTx(db, async (tx) => {
 		const consumed = await tx.checkoutQuote.updateMany({
 			where: {
@@ -255,11 +314,10 @@ export async function claimCheckout(
 		}
 
 		const { unavailableListingIds } = await reserveListings(tx, {
-			listings: listings.map((l) => ({
-				id: l.id,
-				sellerProfileId: l.sellerProfileId,
+			groups: materializationGroups.map((g) => ({
+				orderId: g.orderId,
+				listingIds: g.listings.map((l) => l.id),
 			})),
-			orderIdBySellerProfile,
 			reservedUntil,
 		});
 		if (unavailableListingIds.length > 0) {
@@ -278,18 +336,19 @@ export async function claimCheckout(
 			buyerId,
 			buyerEmailSnapshot: buyer.email,
 			idempotencyKey: body.idempotencyKey,
-			listings,
+			groups: materializationGroups,
 			totalsByListingId,
 			shipTo,
 			shipFromBySellerProfile,
-			orderIdBySellerProfile,
+			pickupSnapshotByLocationId,
 		});
 	});
 
-	// 7) Stripe call (no tx). Idempotency-keyed on body.idempotencyKey — buyer
+	// 9) Stripe call (no tx). Idempotency-keyed on body.idempotencyKey — buyer
 	//    retries land on the same PI. Abandonment is handled by the periodic
 	//    checkout reservation reconciler (apps/worker/app/checkout/reconciler.ts),
 	//    not a per-claim BullMQ job — see Saleor / stripe-magento2 prior art.
+	const sellerProfileIds = uniqueSellerProfileIds(fresh.groups);
 	const piResult = await payments.customer.createCheckoutPaymentIntent({
 		idempotencyKey: body.idempotencyKey,
 		buyerId,
@@ -297,10 +356,14 @@ export async function claimCheckout(
 		paymentMethodId: paymentMethod.stripePaymentMethodId,
 		amountCents: fresh.totalCents,
 		taxCalculationId: fresh.taxCalculationId ?? undefined,
-		metadata: {
+		metadata: buildPaymentIntentMetadata({
+			fresh,
+			buyerId,
+			sellerProfileIds,
+			orderIds,
 			quoteId: quote.id,
-			sellerProfileCount: sellerProfileIds.length,
-		},
+			idempotencyKey: body.idempotencyKey,
+		}),
 	});
 	if (!piResult.success) {
 		if (piResult.error === PaymentErrorCode.rate_limit_exceeded) {
@@ -326,8 +389,8 @@ export async function claimCheckout(
 		});
 	}
 
-	// 9) Tx B — link the PI to the Orders. Bounded WHERE clause guards against
-	//    a concurrent retry already linking them.
+	// 10) Tx B — link the PI to the Orders. Bounded WHERE clause guards against
+	//     a concurrent retry already linking them.
 	await db.order.updateMany({
 		where: {
 			id: { in: orderIds },
@@ -357,6 +420,8 @@ export async function claimCheckout(
 
 interface PersistedQuoteLine {
 	listingId: string;
+	/** DB enum carries `shipping | pickup | pickup_optional`; only the first two are valid here. */
+	fulfillmentMode: string;
 	priceCents: number;
 	taxCents: number;
 	shippingCents: number;
@@ -368,7 +433,7 @@ interface PersistedQuote {
 	buyerId: string;
 	consumedByOrderId: string | null;
 	expiresAt: Date;
-	shippingAddressId: string;
+	shippingAddressId: string | null;
 	totalCents: number;
 	lines: PersistedQuoteLine[];
 }
@@ -413,7 +478,16 @@ async function replayIfExists({
 }): Promise<CheckoutClaimSuccess | null> {
 	const siblings = await db.order.findMany({
 		where: { buyerId, idempotencyKey: body.idempotencyKey },
-		select: { id: true, paymentIntentId: true, totalCents: true },
+		select: {
+			id: true,
+			paymentIntentId: true,
+			subtotalCents: true,
+			shippingCents: true,
+			taxCents: true,
+			applicationFeeCents: true,
+			totalCents: true,
+			sellerProfileId: true,
+		},
 	});
 	if (siblings.length === 0) return null;
 
@@ -477,10 +551,16 @@ async function resumeWithoutLinkedPI({
 	payments: PaymentsClient;
 	buyerId: string;
 	body: ClaimInput["body"];
-	siblings: { id: string; totalCents: number }[];
+	siblings: {
+		id: string;
+		subtotalCents: number;
+		shippingCents: number;
+		taxCents: number;
+		applicationFeeCents: number;
+		totalCents: number;
+		sellerProfileId: string;
+	}[];
 }): Promise<CheckoutClaimSuccess> {
-	// We need the buyer's customer + the chosen payment method (re-validated
-	// against the current paymentMethodId from this attempt's body).
 	const buyer = await db.user.findUnique({
 		where: { id: buyerId },
 		select: {
@@ -506,26 +586,51 @@ async function resumeWithoutLinkedPI({
 		);
 	}
 
-	// taxCalculationId comes from the original quote — find it via the
-	// reverse `consumedByOrderId IN orderIds` lookup.
 	const orderIds = siblings.map((s) => s.id);
+	const sellerProfileIds = Array.from(
+		new Set(siblings.map((s) => s.sellerProfileId)),
+	);
 	const quote = await db.checkoutQuote.findFirst({
 		where: { consumedByOrderId: { in: orderIds }, buyerId },
 		select: { id: true, taxCalculationId: true },
 	});
 
-	const totalCents = siblings.reduce((sum, s) => sum + s.totalCents, 0);
+	const aggregate = siblings.reduce(
+		(acc, s) => ({
+			subtotalCents: acc.subtotalCents + s.subtotalCents,
+			shippingCents: acc.shippingCents + s.shippingCents,
+			taxCents: acc.taxCents + s.taxCents,
+			applicationFeeCents: acc.applicationFeeCents + s.applicationFeeCents,
+			totalCents: acc.totalCents + s.totalCents,
+		}),
+		{
+			subtotalCents: 0,
+			shippingCents: 0,
+			taxCents: 0,
+			applicationFeeCents: 0,
+			totalCents: 0,
+		},
+	);
 
 	const piResult = await payments.customer.createCheckoutPaymentIntent({
 		idempotencyKey: body.idempotencyKey,
 		buyerId,
 		customerId,
 		paymentMethodId: stripePaymentMethodId,
-		amountCents: totalCents,
+		amountCents: aggregate.totalCents,
 		taxCalculationId: quote?.taxCalculationId ?? undefined,
 		metadata: {
+			subtotalCents: aggregate.subtotalCents,
+			shippingCents: aggregate.shippingCents,
+			taxCents: aggregate.taxCents,
+			applicationFeeCents: aggregate.applicationFeeCents,
+			totalCents: aggregate.totalCents,
+			buyerId,
+			sellerProfileIds: sellerProfileIds.join(","),
+			orderIds: orderIds.join(","),
 			quoteId: quote?.id ?? "",
-			sellerProfileCount: orderIds.length,
+			idempotencyKey: body.idempotencyKey,
+			bundleShippingFormula: BUNDLE_SHIPPING_FORMULA,
 		},
 	});
 	if (!piResult.success) {
@@ -570,23 +675,13 @@ async function resumeWithoutLinkedPI({
 	};
 }
 
-interface ShipFromSnapshot {
-	name: string;
-	line1: string;
-	line2: string | null;
-	city: string;
-	state: string;
-	postalCode: string;
-	country: string;
-	phone: string | null;
-}
-
 async function loadShipFromBySellerProfile(
 	db: PrismaClient,
-	listingIds: string[],
+	sellerProfileIds: string[],
 ): Promise<Map<string, ShipFromSnapshot>> {
+	if (sellerProfileIds.length === 0) return new Map();
 	const sellers = await db.sellerProfile.findMany({
-		where: { listings: { some: { id: { in: listingIds } } } },
+		where: { id: { in: sellerProfileIds } },
 		select: {
 			id: true,
 			user: {
@@ -638,6 +733,135 @@ async function loadShipFromBySellerProfile(
 		});
 	}
 	return map;
+}
+
+async function loadPickupSnapshots(
+	db: PrismaClient,
+	listings: CheckoutListing[],
+): Promise<Map<string, PickupSnapshot>> {
+	const ids = Array.from(
+		new Set(
+			listings
+				.map((l) => l.pickupLocationId)
+				.filter((id): id is string => id !== null),
+		),
+	);
+	if (ids.length === 0) return new Map();
+	const rows = await db.pickupLocation.findMany({
+		where: { id: { in: ids } },
+		select: {
+			id: true,
+			name: true,
+			line1: true,
+			line2: true,
+			city: true,
+			state: true,
+			postalCode: true,
+			country: true,
+			instructions: true,
+			latitude: true,
+			longitude: true,
+		},
+	});
+	return new Map(
+		rows.map((r) => [
+			r.id,
+			{
+				pickupLocationId: r.id,
+				name: r.name,
+				line1: r.line1,
+				line2: r.line2,
+				city: r.city,
+				state: r.state,
+				postalCode: r.postalCode,
+				country: r.country,
+				instructions: r.instructions,
+				latitude: r.latitude,
+				longitude: r.longitude,
+			},
+		]),
+	);
+}
+
+interface TaxAddress {
+	line1: string;
+	line2: string | null;
+	city: string;
+	state: string;
+	postalCode: string;
+	country: string;
+}
+
+function resolveClaimTaxAddress(input: {
+	listings: CheckoutListing[];
+	buyerChoiceByListing: Map<string, FulfillmentMethodType>;
+	shipAddress: {
+		line1: string;
+		line2: string | null;
+		city: string;
+		state: string;
+		postalCode: string;
+		country: string;
+	} | null;
+	pickupSnapshotByLocationId: Map<string, PickupSnapshot>;
+}): TaxAddress | null {
+	const hasShipLine = input.listings.some(
+		(l) => input.buyerChoiceByListing.get(l.id) === "shipping",
+	);
+	if (hasShipLine) {
+		return input.shipAddress;
+	}
+	for (const l of input.listings) {
+		if (input.buyerChoiceByListing.get(l.id) !== "pickup") continue;
+		if (!l.pickupLocationId) continue;
+		const snap = input.pickupSnapshotByLocationId.get(l.pickupLocationId);
+		if (!snap) continue;
+		return {
+			line1: snap.line1,
+			line2: snap.line2,
+			city: snap.city,
+			state: snap.state,
+			postalCode: snap.postalCode,
+			country: snap.country,
+		};
+	}
+	return null;
+}
+
+function asResolvedMethod(mode: string): FulfillmentMethodType {
+	if (mode === "shipping" || mode === "pickup") return mode;
+	// Quote-time validation forbids `pickup_optional` on a CheckoutQuoteLine.
+	// If it lands here, it's a writer-side bug.
+	throw errors.internal(`Unresolved fulfillment mode on quote line: ${mode}`, {
+		code: "QUOTE_LINE_UNRESOLVED_MODE",
+	});
+}
+
+function uniqueSellerProfileIds(groups: ComputedFulfillmentGroup[]): string[] {
+	return Array.from(new Set(groups.map((g) => g.sellerProfileId)));
+}
+
+function buildPaymentIntentMetadata(input: {
+	fresh: ComputedCheckoutTotals;
+	buyerId: string;
+	sellerProfileIds: string[];
+	orderIds: string[];
+	quoteId: string;
+	idempotencyKey: string;
+}): Record<string, string | number | boolean> {
+	return {
+		subtotalCents: input.fresh.subtotalCents,
+		shippingCents: input.fresh.shippingTotalCents,
+		taxCents: input.fresh.taxTotalCents,
+		applicationFeeCents: input.fresh.applicationFeeTotalCents,
+		totalCents: input.fresh.totalCents,
+		buyerId: input.buyerId,
+		sellerProfileIds: input.sellerProfileIds.join(","),
+		orderIds: input.orderIds.join(","),
+		quoteId: input.quoteId,
+		idempotencyKey: input.idempotencyKey,
+		bundleShippingFormula: BUNDLE_SHIPPING_FORMULA,
+	};
 }
 
 interface DriftRow {

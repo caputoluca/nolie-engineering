@@ -1,15 +1,13 @@
 import { generateDisplayId } from "@nolie/core/orders";
 import { OrderOriginationType, PaymentStatus, type Prisma } from "@nolie/db";
 import { errors } from "@nolie/errors/http";
-import {
-	calculateNetAmount,
-	calculatePlatformFee,
-} from "@nolie/payments/utils";
+import { calculateNetAmount } from "@nolie/payments/utils";
+import type { FulfillmentMethodType } from "@nolie/schemas/fulfillment";
 import { setReportingContext } from "../observability/sentry/report.js";
 import type { CheckoutListingTotals } from "./compute-totals.js";
 import type { CheckoutListing } from "./listings.js";
 
-interface ShipToSnapshot {
+export interface ShipToSnapshot {
 	name: string;
 	line1: string;
 	line2: string | null;
@@ -20,7 +18,7 @@ interface ShipToSnapshot {
 	phone: string | null;
 }
 
-interface ShipFromSnapshot {
+export interface ShipFromSnapshot {
 	name: string;
 	line1: string;
 	line2: string | null;
@@ -29,6 +27,28 @@ interface ShipFromSnapshot {
 	postalCode: string;
 	country: string;
 	phone: string | null;
+}
+
+export interface PickupSnapshot {
+	pickupLocationId: string;
+	name: string;
+	line1: string;
+	line2: string | null;
+	city: string;
+	state: string;
+	postalCode: string;
+	country: string;
+	instructions: string | null;
+	latitude: number | null;
+	longitude: number | null;
+}
+
+export interface MaterializationGroup {
+	/** Pre-generated Order.id (also `reservedByOrderId` on the listings). */
+	orderId: string;
+	sellerProfileId: string;
+	fulfillmentMode: FulfillmentMethodType;
+	listings: CheckoutListing[];
 }
 
 interface MaterializeInput {
@@ -36,20 +56,26 @@ interface MaterializeInput {
 	buyerId: string;
 	buyerEmailSnapshot: string;
 	idempotencyKey: string;
-	listings: CheckoutListing[];
+	groups: MaterializationGroup[];
 	totalsByListingId: Map<string, CheckoutListingTotals>;
-	shipTo: ShipToSnapshot;
+	/** Required for any group with `fulfillmentMode = shipping`; null if all groups are pickup. */
+	shipTo: ShipToSnapshot | null;
 	shipFromBySellerProfile: Map<string, ShipFromSnapshot>;
-	/** sellerProfileId → pre-generated Order.id (also used as `reservedByOrderId`). */
-	orderIdBySellerProfile: Map<string, string>;
+	/** PickupLocation snapshot keyed by pickupLocationId; required for any pickup group. */
+	pickupSnapshotByLocationId: Map<string, PickupSnapshot>;
 }
 
 /**
- * Bulk-creates one Order per seller group plus all nested OrderLineItems.
+ * Bulk-creates one Order per fulfillment group plus all nested OrderLineItems.
+ *
  * `paymentIntentId` is left null at this stage — claim.ts fills it in via a
  * follow-up `updateMany` after the Stripe PaymentIntent is created (Brandur's
  * "atomic phase before foreign state mutation" pattern). Each Order starts in
  * `paymentStatus: pending`; the webhook handler flips it to succeeded/failed.
+ *
+ * Snapshot invariants enforced here:
+ *   - shipping orders: shipTo* + shipFrom* populated, pickup snapshot null
+ *   - pickup orders: shipTo* + shipFrom* null, pickup snapshot populated
  *
  * Two round trips total: Order.createMany + OrderLineItem.createMany. Caller
  * MUST run inside a `$transaction`.
@@ -57,42 +83,76 @@ interface MaterializeInput {
 export async function materializeOrders(input: MaterializeInput): Promise<{
 	orderIds: string[];
 }> {
-	const groupsBySeller = new Map<string, CheckoutListing[]>();
-	for (const l of input.listings) {
-		const existing = groupsBySeller.get(l.sellerProfileId);
-		if (existing) {
-			existing.push(l);
-		} else {
-			groupsBySeller.set(l.sellerProfileId, [l]);
-		}
-	}
-
 	type OrderRow = Prisma.OrderCreateManyInput;
 	type OrderLineItemRow = Prisma.OrderLineItemCreateManyInput;
 	const orderRows: OrderRow[] = [];
 	const lineItemRows: OrderLineItemRow[] = [];
 
-	for (const [sellerProfileId, groupListings] of groupsBySeller) {
-		const orderId = input.orderIdBySellerProfile.get(sellerProfileId);
-		if (!orderId) {
+	for (const group of input.groups) {
+		const isShipping = group.fulfillmentMode === "shipping";
+
+		if (isShipping && !input.shipTo) {
 			setReportingContext({
-				operation: "checkout_materialize_missing_order_id",
-				extra: { sellerProfileId },
+				operation: "checkout_materialize_missing_ship_to",
+				extra: {
+					orderId: group.orderId,
+					sellerProfileId: group.sellerProfileId,
+				},
 			});
 			throw errors.internal("Materialization invariant violation", {
-				code: "MATERIALIZE_MISSING_ORDER_ID",
+				code: "MATERIALIZE_MISSING_SHIP_TO",
 			});
 		}
 
-		const shipFrom = input.shipFromBySellerProfile.get(sellerProfileId);
-		if (!shipFrom) {
+		const shipFrom = isShipping
+			? input.shipFromBySellerProfile.get(group.sellerProfileId)
+			: null;
+		if (isShipping && !shipFrom) {
 			setReportingContext({
 				operation: "checkout_materialize_missing_ship_from",
-				extra: { sellerProfileId },
+				extra: {
+					orderId: group.orderId,
+					sellerProfileId: group.sellerProfileId,
+				},
 			});
 			throw errors.internal("Materialization invariant violation", {
 				code: "MATERIALIZE_MISSING_SHIP_FROM",
 			});
+		}
+
+		// Pickup snapshot — pickup groups must reference a known location, AND
+		// every listing in the group must point to that same location (the
+		// grouping function guarantees this).
+		let pickup: PickupSnapshot | null = null;
+		if (!isShipping) {
+			const referenced = group.listings[0]?.pickupLocationId;
+			if (!referenced) {
+				setReportingContext({
+					operation: "checkout_materialize_pickup_missing_location_id",
+					extra: {
+						orderId: group.orderId,
+						sellerProfileId: group.sellerProfileId,
+					},
+				});
+				throw errors.internal("Materialization invariant violation", {
+					code: "MATERIALIZE_PICKUP_MISSING_LOCATION_ID",
+				});
+			}
+			const snapshot = input.pickupSnapshotByLocationId.get(referenced);
+			if (!snapshot) {
+				setReportingContext({
+					operation: "checkout_materialize_pickup_snapshot_missing",
+					extra: {
+						orderId: group.orderId,
+						sellerProfileId: group.sellerProfileId,
+						pickupLocationId: referenced,
+					},
+				});
+				throw errors.internal("Materialization invariant violation", {
+					code: "MATERIALIZE_PICKUP_SNAPSHOT_MISSING",
+				});
+			}
+			pickup = snapshot;
 		}
 
 		let subtotalCents = 0;
@@ -101,79 +161,98 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 		let totalCents = 0;
 		let applicationFeeCents = 0;
 
-		for (const listing of groupListings) {
+		for (const listing of group.listings) {
 			const totals = input.totalsByListingId.get(listing.id);
 			if (!totals) {
 				setReportingContext({
 					operation: "checkout_materialize_missing_totals",
-					extra: { listingId: listing.id, sellerProfileId },
+					extra: {
+						listingId: listing.id,
+						sellerProfileId: group.sellerProfileId,
+					},
 				});
 				throw errors.internal("Materialization invariant violation", {
 					code: "MATERIALIZE_MISSING_TOTALS",
 				});
 			}
 
-			const linePlatformFee = calculatePlatformFee({
-				amountInCents: totals.priceCents,
-				feeRate: listing.platformFeeRate,
-			});
 			const { netAmount: lineSellerEarning } = calculateNetAmount({
 				grossAmount: totals.priceCents,
-				platformFee: linePlatformFee,
+				platformFee: totals.applicationFeeCents,
 			});
 
 			subtotalCents += totals.priceCents;
 			taxCents += totals.taxCents;
 			shippingCents += totals.shippingCents;
 			totalCents += totals.totalCents;
-			applicationFeeCents += linePlatformFee;
+			applicationFeeCents += totals.applicationFeeCents;
 
 			lineItemRows.push({
-				orderId,
+				orderId: group.orderId,
 				listingId: listing.id,
 				listingTitleSnapshot: listing.title,
 				listingPhotoUrlSnapshot: listing.heroAssetKey,
-				sellerProfileId,
+				sellerProfileId: group.sellerProfileId,
 				sellerHandleSnapshot: listing.sellerHandle ?? "",
 				priceCents: totals.priceCents,
 				taxCents: totals.taxCents,
-				applicationFeeCents: linePlatformFee,
+				applicationFeeCents: totals.applicationFeeCents,
 				sellerEarningCents: lineSellerEarning,
 			});
 		}
 
 		orderRows.push({
-			id: orderId,
+			id: group.orderId,
 			displayId: generateDisplayId(),
 			buyerId: input.buyerId,
 			buyerEmailSnapshot: input.buyerEmailSnapshot,
-			sellerProfileId,
+			sellerProfileId: group.sellerProfileId,
 			originationType: OrderOriginationType.checkout,
 			originationRef: null,
 			paymentIntentId: null,
 			paymentStatus: PaymentStatus.pending,
 			idempotencyKey: input.idempotencyKey,
+			fulfillmentMode: group.fulfillmentMode,
 			subtotalCents,
 			shippingCents,
 			taxCents,
 			applicationFeeCents,
 			totalCents,
-			shipToName: input.shipTo.name,
-			shipToLine1: input.shipTo.line1,
-			shipToLine2: input.shipTo.line2,
-			shipToCity: input.shipTo.city,
-			shipToState: input.shipTo.state,
-			shipToPostalCode: input.shipTo.postalCode,
-			shipToCountry: input.shipTo.country,
-			shipToPhone: input.shipTo.phone,
-			shipFromName: shipFrom.name,
-			shipFromLine1: shipFrom.line1,
-			shipFromLine2: shipFrom.line2,
-			shipFromCity: shipFrom.city,
-			shipFromState: shipFrom.state,
-			shipFromPostalCode: shipFrom.postalCode,
-			shipFromCountry: shipFrom.country,
-			shipFromPhone: shipFrom.phone,
+			...(isShipping && input.shipTo && shipFrom
+				? {
+						shipToName: input.shipTo.name,
+						shipToLine1: input.shipTo.line1,
+						shipToLine2: input.shipTo.line2,
+						shipToCity: input.shipTo.city,
+						shipToState: input.shipTo.state,
+						shipToPostalCode: input.shipTo.postalCode,
+						shipToCountry: input.shipTo.country,
+						shipToPhone: input.shipTo.phone,
+						shipFromName: shipFrom.name,
+						shipFromLine1: shipFrom.line1,
+						shipFromLine2: shipFrom.line2,
+						shipFromCity: shipFrom.city,
+						shipFromState: shipFrom.state,
+						shipFromPostalCode: shipFrom.postalCode,
+						shipFromCountry: shipFrom.country,
+						shipFromPhone: shipFrom.phone,
+					}
+				: {}),
+			...(pickup
+				? {
+						pickupLocationId: pickup.pickupLocationId,
+						pickupLocationName: pickup.name,
+						pickupLine1: pickup.line1,
+						pickupLine2: pickup.line2,
+						pickupCity: pickup.city,
+						pickupState: pickup.state,
+						pickupPostalCode: pickup.postalCode,
+						pickupCountry: pickup.country,
+						pickupInstructions: pickup.instructions,
+						pickupLatitude: pickup.latitude,
+						pickupLongitude: pickup.longitude,
+					}
+				: {}),
 		});
 	}
 
