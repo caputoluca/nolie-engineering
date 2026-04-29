@@ -6,6 +6,10 @@ import {
 	CheckoutQuoteBodySchema,
 	CheckoutQuoteResponseSchema,
 } from "@nolie/schemas/checkout/quote";
+import {
+	CheckoutQuoteLightBodySchema,
+	CheckoutQuoteLightResponseSchema,
+} from "@nolie/schemas/checkout/quote-light";
 import { claimCheckout } from "../lib/checkout/claim.js";
 import { buildCheckoutQuote } from "../lib/checkout/quote.js";
 import { createRoutes } from "../lib/factory.js";
@@ -32,6 +36,40 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				fulfillmentChoiceByListing: request.body.fulfillment,
 			});
 			return reply.status(200).send(quote);
+		},
+	});
+
+	// Light recompute — same lib as POST /checkout, response trimmed to just
+	// the quote-derived fields. Wallet/addresses/payment-methods stay stable
+	// across recomputes within a single page session, so the FE keeps the
+	// values from the bundled init call. Cart-hash dedupe (in the lib) skips
+	// the Stripe Tax call when the buyer toggles back to a recently-seen state.
+	create.post("/quote", {
+		schema: {
+			body: CheckoutQuoteLightBodySchema,
+			response: {
+				200: CheckoutQuoteLightResponseSchema,
+				400: app.getErrorSchema("badRequest"),
+				404: app.getErrorSchema("notFound"),
+			},
+		},
+		handler: async (request, reply) => {
+			const full = await buildCheckoutQuote({
+				db: app.prisma,
+				payments: app.payments,
+				buyerId: request.session.user.id,
+				listingIds: request.body.listingIds,
+				requestedShippingAddressId: request.body.shippingAddressId,
+				fulfillmentChoiceByListing: request.body.fulfillment,
+			});
+			return reply.status(200).send({
+				quoteId: full.quoteId,
+				expiresAt: full.expiresAt,
+				lineItems: full.lineItems,
+				groups: full.groups,
+				totals: full.totals,
+				selectedShippingAddressId: full.selectedShippingAddressId,
+			});
 		},
 	});
 
