@@ -129,7 +129,12 @@ export async function claimCheckout(
 						customerId: true,
 						paymentMethods: {
 							where: { id: body.paymentMethodId },
-							select: { id: true, stripePaymentMethodId: true },
+							select: {
+								id: true,
+								stripePaymentMethodId: true,
+								brand: true,
+								last4: true,
+							},
 							take: 1,
 						},
 					},
@@ -365,6 +370,8 @@ export async function claimCheckout(
 			shipTo,
 			shipFromBySellerProfile,
 			pickupSnapshotByLocationId,
+			paymentMethodBrand: paymentMethod.brand,
+			paymentMethodLast4: paymentMethod.last4,
 		});
 	});
 

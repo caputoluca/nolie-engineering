@@ -65,6 +65,9 @@ interface MaterializeInput {
 	shipFromBySellerProfile: Map<string, ShipFromSnapshot>;
 	/** PickupLocation snapshot keyed by pickupLocationId; required for any pickup group. */
 	pickupSnapshotByLocationId: Map<string, PickupSnapshot>;
+	/** Card brand/last4 snapshot from the buyer's PaymentMethod row at claim time. */
+	paymentMethodBrand: string | null;
+	paymentMethodLast4: string | null;
 }
 
 /**
@@ -213,6 +216,8 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			originationRef: null,
 			paymentIntentId: null,
 			paymentStatus: PaymentStatus.pending,
+			paymentMethodBrand: input.paymentMethodBrand,
+			paymentMethodLast4: input.paymentMethodLast4,
 			idempotencyKey: input.idempotencyKey,
 			idempotencyPayloadHash: input.idempotencyPayloadHash,
 			fulfillmentMode: group.fulfillmentMode,

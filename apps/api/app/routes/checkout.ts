@@ -3,6 +3,10 @@ import {
 	CheckoutClaimSuccessSchema,
 } from "@nolie/schemas/checkout/claim";
 import {
+	CheckoutConfirmationQuerySchema,
+	CheckoutConfirmationResponseSchema,
+} from "@nolie/schemas/checkout/confirmation";
+import {
 	CheckoutQuoteBodySchema,
 	CheckoutQuoteResponseSchema,
 } from "@nolie/schemas/checkout/quote";
@@ -11,6 +15,7 @@ import {
 	CheckoutQuoteLightResponseSchema,
 } from "@nolie/schemas/checkout/quote-light";
 import { claimCheckout } from "../lib/checkout/claim.js";
+import { getCheckoutConfirmation } from "../lib/checkout/confirmation.js";
 import { buildCheckoutQuote } from "../lib/checkout/quote.js";
 import { createRoutes } from "../lib/factory.js";
 
@@ -71,6 +76,29 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				isTaxExempt: full.isTaxExempt,
 				selectedShippingAddressId: full.selectedShippingAddressId,
 			});
+		},
+	});
+
+	// Powers the post-checkout success page. Buyer-scoped lookup by
+	// PaymentIntent ID — converges the 3DS-redirect path (Stripe appends
+	// `?payment_intent=…` to the return_url) and the synchronous path on a
+	// single shape. URL `client_secret` is intentionally ignored; we auth
+	// via session.
+	create.get("/confirmation", {
+		schema: {
+			query: CheckoutConfirmationQuerySchema,
+			response: {
+				200: CheckoutConfirmationResponseSchema,
+				404: app.getErrorSchema("notFound"),
+			},
+		},
+		handler: async (request, reply) => {
+			const result = await getCheckoutConfirmation({
+				db: app.prisma,
+				buyerId: request.session.user.id,
+				paymentIntentId: request.query.paymentIntentId,
+			});
+			return reply.status(200).send(result);
 		},
 	});
 
