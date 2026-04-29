@@ -165,6 +165,7 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 		let shippingCents = 0;
 		let totalCents = 0;
 		let applicationFeeCents = 0;
+		let processingFeeCents = 0;
 
 		for (const listing of group.listings) {
 			const totals = input.totalsByListingId.get(listing.id);
@@ -184,6 +185,7 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			const { netAmount: lineSellerEarning } = calculateNetAmount({
 				grossAmount: totals.priceCents,
 				platformFee: totals.applicationFeeCents,
+				processingFee: totals.processingFeeCents,
 			});
 
 			subtotalCents += totals.priceCents;
@@ -191,6 +193,7 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			shippingCents += totals.shippingCents;
 			totalCents += totals.totalCents;
 			applicationFeeCents += totals.applicationFeeCents;
+			processingFeeCents += totals.processingFeeCents;
 
 			lineItemRows.push({
 				orderId: group.orderId,
@@ -202,6 +205,7 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 				priceCents: totals.priceCents,
 				taxCents: totals.taxCents,
 				applicationFeeCents: totals.applicationFeeCents,
+				processingFeeCents: totals.processingFeeCents,
 				sellerEarningCents: lineSellerEarning,
 			});
 		}
@@ -225,6 +229,7 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			shippingCents,
 			taxCents,
 			applicationFeeCents,
+			processingFeeCents,
 			totalCents,
 			...(isShipping && input.shipTo && shipFrom
 				? {
