@@ -3,16 +3,14 @@
 import type { ExploreListingsResponse } from "@nolie/schemas/explore";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { browser } from "@/lib/http/browser";
-import { EXPLORE_AUCTIONS_QUERY_KEY } from "./queries";
-import { useExploreFilter } from "./use-explore-filter";
+import { EXPLORE_LISTINGS_QUERY_KEY } from "./queries";
 
-export function useExploreAuctions() {
-	const { filter } = useExploreFilter();
+export function useExploreListings() {
 	const res = useInfiniteQuery({
-		queryKey: [EXPLORE_AUCTIONS_QUERY_KEY, filter],
+		queryKey: [EXPLORE_LISTINGS_QUERY_KEY],
 		queryFn: async ({ pageParam }) => {
 			const res = await browser.get<ExploreListingsResponse>("/explore", {
-				params: { filter, cursor: pageParam },
+				params: { cursor: pageParam },
 				timeout: 7_000,
 			});
 			return res.data;
@@ -29,17 +27,10 @@ export function useExploreAuctions() {
 		? new Date(serverNow).getTime() - res.dataUpdatedAt
 		: 0;
 
-	// TODO(bin-ui): drop the auction-only filter once the explore feed renders
-	// fixed-price listings (Phase 7 / PR 2 — when AuctionCard learns about BIN
-	// or a sibling FixedPriceCard ships). Until then, the polymorphic feed
-	// gets narrowed here so the auction-only UI keeps compiling.
-	const auctions =
-		res.data?.pages
-			.flatMap((p) => p.listings)
-			.filter((listing) => listing.listingType === "auction") ?? [];
+	const listings = res.data?.pages.flatMap((p) => p.listings) ?? [];
 
 	return {
-		auctions,
+		listings,
 		serverOffset,
 		...res,
 	};

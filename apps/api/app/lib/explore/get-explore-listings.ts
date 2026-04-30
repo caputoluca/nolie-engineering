@@ -37,6 +37,8 @@ async function loadExploreListings(
 				ListingStatus.closed,
 				ListingStatus.failed, // failed means all payments failed
 				ListingStatus.pending,
+				ListingStatus.sold,
+				ListingStatus.reserved,
 			],
 		};
 	}

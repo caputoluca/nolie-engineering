@@ -214,6 +214,10 @@ export function toAuctionCardState(auction: {
 		highestBidAmount: auction.highestBidAmount,
 		bidCount: auction.bidCount,
 		endAt: auction.endAt,
-		isEnded: auction.status === "closed" || auction.status === "failed",
+		isEnded:
+			auction.status === "closed" ||
+			auction.status === "failed" ||
+			auction.status === "cancelled" ||
+			auction.status === "sold",
 	};
 }
