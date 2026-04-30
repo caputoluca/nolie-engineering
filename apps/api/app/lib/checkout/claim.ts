@@ -233,6 +233,7 @@ export async function claimCheckout(
 				shippingAddressId: shipAddress?.id ?? null,
 				totalCents: fresh.totalCents,
 				taxCalculationId: fresh.taxCalculationId,
+				cartHash: quote.cartHash,
 				expiresAt: quote.expiresAt,
 				lines: {
 					createMany: {
@@ -465,6 +466,7 @@ interface PersistedQuote {
 	consumedByOrderId: string | null;
 	expiresAt: Date;
 	shippingAddressId: string | null;
+	cartHash: string | null;
 	totalCents: number;
 	lines: PersistedQuoteLine[];
 }
