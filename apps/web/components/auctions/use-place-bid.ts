@@ -143,7 +143,7 @@ export function usePlaceBid(
 
 					const errorMessage =
 						BID_ERROR_MESSAGES[result.reason] ??
-						"Your bid was rejected. Please try again.";
+						"Your bid was rejected. Try again.";
 					return fail<typeof BidCreateSchema>({
 						errors: {
 							general: [errorMessage],
@@ -194,8 +194,7 @@ export function usePlaceBid(
 	const result = usePlaceBidShared({
 		createMutationFn,
 		schema: BidCreateSchema,
-		errorMessage:
-			"Something went wrong when placing your bid. Please try again",
+		errorMessage: "Couldn't place your bid. Try again.",
 		open,
 		onOpenChange: handleOpenChange,
 		auctionId: id,
