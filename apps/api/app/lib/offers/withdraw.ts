@@ -56,10 +56,12 @@ export async function withdrawOffer(
 		return { offer, alreadyWithdrawn: true };
 	}
 
-	// Pending-but-expired rows are "treated as expired in API responses"
-	// per the doc — the reconciler hasn't run yet but the buyer has missed
-	// their window to withdraw. Reject as if already terminal.
-	if (offer.state === OfferState.pending && offer.expiresAt <= new Date()) {
+	// Read-time terminal short-circuit. Any non-pending state (or
+	// pending-but-expired — wall clock past TTL even if the reconciler
+	// hasn't transitioned the row yet) means the buyer has missed their
+	// window to withdraw. We already have the row, so no refetch needed.
+	const now = new Date();
+	if (offer.state !== OfferState.pending || offer.expiresAt <= now) {
 		throw errors.conflict("Offer is no longer pending", {
 			code: OfferWithdrawErrorCode.no_longer_pending,
 		});
@@ -68,13 +70,8 @@ export async function withdrawOffer(
 	// CAS — only transitions a still-pending row. Narrows on
 	// `expiresAt > now` so the natural expiry race is treated the same
 	// as any other concurrent terminal transition.
-	const now = new Date();
 	const result = await db.offer.updateMany({
-		where: {
-			id: offerId,
-			state: OfferState.pending,
-			expiresAt: { gt: now },
-		},
+		where: { id: offerId, state: OfferState.pending, expiresAt: { gt: now } },
 		data: {
 			state: OfferState.withdrawn,
 			resolvedAt: now,
