@@ -58,7 +58,7 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 		});
 
 		// Invalidate auctionView AFTER bid is in DB (no race condition)
-		await ctx.cache.auctionView.invalidate(auctionId).catch((err) => {
+		await ctx.cache.listingView.invalidate(auctionId).catch((err) => {
 			reportError(err, {
 				operation: "invalidate_auction_view_cache",
 				extra: { auctionId, bidId },
@@ -137,7 +137,7 @@ export async function persist(job: BidPersistJob<"persist">, ctx: BidsContext) {
 			);
 
 			// Still invalidate - previous attempt may have failed to invalidate
-			await ctx.cache.auctionView.invalidate(auctionId).catch((err) => {
+			await ctx.cache.listingView.invalidate(auctionId).catch((err) => {
 				reportError(err, {
 					operation: "invalidate_auction_view_cache_duplicate",
 					extra: { auctionId, bidId },

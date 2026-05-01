@@ -33,6 +33,7 @@ import { underPressurePlugin } from "./plugins/under-pressure.js";
 import { adminRoutes } from "./routes/admin.js";
 import { agreementsRoutes } from "./routes/agreements.js";
 import { authRoutes } from "./routes/auth/index.js";
+import { checkoutRoutes } from "./routes/checkout.js";
 import { contactRoutes } from "./routes/contact.js";
 import { exploreRoutes } from "./routes/explore.js";
 import { handlesRoutes } from "./routes/handles.js";
@@ -160,6 +161,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(realtimeRoutes, { prefix: "/realtime" });
 	await fastify.register(handlesRoutes, { prefix: "/handles" });
 	await fastify.register(listingRoutes, { prefix: "/listings" });
+	await fastify.register(checkoutRoutes, { prefix: "/checkout" });
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
 	await fastify.register(shippingRoutes, { prefix: "/shipping" });
 	await fastify.register(moderationRoutes, { prefix: "/moderations" });
