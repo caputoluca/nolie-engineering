@@ -91,6 +91,24 @@ const noOpRealtimeClient: RestClient = {
 	pickup: {
 		confirmed: noOpPublisher("pickup.confirmed"),
 	},
+
+	offer: {
+		activity: {
+			created: noOpPublisher("offer.activity.created"),
+			countered: noOpPublisher("offer.activity.countered"),
+			accepted: noOpPublisher("offer.activity.accepted"),
+		},
+		update: {
+			received: noOpPublisher("offer.update.received"),
+			accepted: noOpPublisher("offer.update.accepted"),
+			declined: noOpPublisher("offer.update.declined"),
+			countered: noOpPublisher("offer.update.countered"),
+			expired: noOpPublisher("offer.update.expired"),
+			withdrawn: noOpPublisher("offer.update.withdrawn"),
+			canceled: noOpPublisher("offer.update.canceled"),
+			paymentFailed: noOpPublisher("offer.update.payment_failed"),
+		},
+	},
 };
 
 /**
