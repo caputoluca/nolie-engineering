@@ -5,10 +5,14 @@ import {
 	type PrismaClient,
 } from "@nolie/db";
 import { errors } from "@nolie/errors/http";
+import type { RestClient } from "@nolie/realtime/server";
 import { OfferWithdrawErrorCode } from "@nolie/schemas/offer";
+import { reportError } from "../observability/sentry/report.js";
+import { toOfferOut } from "./transform.js";
 
 export interface WithdrawOfferInput {
 	db: PrismaClient;
+	realtime: RestClient;
 	offerId: string;
 	userId: string;
 }
@@ -34,7 +38,7 @@ export interface WithdrawOfferResult {
 export async function withdrawOffer(
 	input: WithdrawOfferInput,
 ): Promise<WithdrawOfferResult> {
-	const { db, offerId, userId } = input;
+	const { db, realtime, offerId, userId } = input;
 
 	const offer = await db.offer.findUnique({ where: { id: offerId } });
 	if (!offer) {
@@ -97,5 +101,18 @@ export async function withdrawOffer(
 	const refreshed = await db.offer.findUniqueOrThrow({
 		where: { id: offerId },
 	});
+
+	// Notify the counterparty (the seller, since V1 only has buyer-proposed
+	// offers). No email — the V1 matrix doesn't include withdraw emails;
+	// realtime is enough for the seller's open inbox UI.
+	void realtime.offer.update.withdrawn
+		.publish({ userId: refreshed.sellerId, offer: toOfferOut(refreshed) })
+		.catch((err) => {
+			reportError(err, {
+				operation: "publish_offer_update_withdrawn",
+				extra: { offerId, sellerId: refreshed.sellerId },
+			});
+		});
+
 	return { offer: refreshed, alreadyWithdrawn: false };
 }

@@ -57,6 +57,13 @@ function noOpPublisher(channel: string) {
 			);
 			return Promise.resolve();
 		},
+		publishMany: (items: unknown[]) => {
+			logger.debug(
+				{ channel, count: items.length, connected: false },
+				`Realtime publishMany skipped - not connected: ${channel}`,
+			);
+			return Promise.resolve();
+		},
 	};
 }
 

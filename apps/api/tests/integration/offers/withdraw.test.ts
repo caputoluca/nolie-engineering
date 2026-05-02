@@ -10,7 +10,11 @@
  */
 import { OfferState, prisma } from "@nolie/db";
 import { describe, expect, it } from "vitest";
-import { assertResponse, type createApiClient } from "../../helpers/index.js";
+import {
+	assertResponse,
+	type createApiClient,
+	getMockRealtime,
+} from "../../helpers/index.js";
 import {
 	postSubmitOffer,
 	postWithdrawOffer,
@@ -58,6 +62,16 @@ describe("POST /offers/:offerId/withdraw", () => {
 		});
 		expect(row.state).toBe(OfferState.withdrawn);
 		expect(row.resolvedBy).toBe(buyer.session.user.id);
+
+		// Counterparty (seller) gets the realtime notification. No email
+		// for withdraw in V1 — realtime is enough for an open inbox.
+		const realtime = getMockRealtime();
+		const msg = realtime
+			._getMessagesForChannel<{ userId: string; offer: { id: string } }>(
+				"user:offer.withdrawn",
+			)
+			.find((m) => m.data.offer.id === offerId);
+		expect(msg?.data.userId).toBe(row.sellerId);
 	});
 
 	it("rejects a withdraw from someone other than the proposer", async () => {
