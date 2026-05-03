@@ -104,6 +104,7 @@ const noOpRealtimeClient: RestClient = {
 			created: noOpPublisher("offer.activity.created"),
 			countered: noOpPublisher("offer.activity.countered"),
 			accepted: noOpPublisher("offer.activity.accepted"),
+			withdrawn: noOpPublisher("offer.activity.withdrawn"),
 		},
 		update: {
 			received: noOpPublisher("offer.update.received"),
