@@ -41,6 +41,7 @@ import { healthRoutes } from "./routes/health.js";
 import { listingRoutes } from "./routes/listings/index.js";
 import { meRoutes } from "./routes/me/index.js";
 import { moderationRoutes } from "./routes/moderations.js";
+import { offerRoutes } from "./routes/offers.js";
 import { realtimeRoutes } from "./routes/realtime.js";
 import { shippingRoutes } from "./routes/shipping.js";
 import { sitemapRoutes } from "./routes/sitemap.js";
@@ -161,6 +162,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(realtimeRoutes, { prefix: "/realtime" });
 	await fastify.register(handlesRoutes, { prefix: "/handles" });
 	await fastify.register(listingRoutes, { prefix: "/listings" });
+	await fastify.register(offerRoutes, { prefix: "/offers" });
 	await fastify.register(checkoutRoutes, { prefix: "/checkout" });
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
 	await fastify.register(shippingRoutes, { prefix: "/shipping" });

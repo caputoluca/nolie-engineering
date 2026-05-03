@@ -7,6 +7,7 @@ export async function getRealtimeTokenDetails(
 ) {
 	const capabilities: Record<string, "subscribe"[]> = {
 		"auction:*": ["subscribe"],
+		"listing:*": ["subscribe"],
 	};
 	if (session?.user) {
 		capabilities[`user:${session.user.id}`] = ["subscribe"];
