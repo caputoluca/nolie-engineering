@@ -114,5 +114,20 @@ export async function withdrawOffer(
 			});
 		});
 
+	// Public removal signal on the listing channel so the activity rail
+	// drops the now-withdrawn row for every viewer (including the buyer's
+	// other tabs). Minimum payload — the original `created` event already
+	// carried buyer/amount publicly; we don't rebroadcast that here.
+	if (refreshed.listingId) {
+		void realtime.offer.activity.withdrawn
+			.publish({ listingId: refreshed.listingId, eventId: refreshed.id })
+			.catch((err) => {
+				reportError(err, {
+					operation: "publish_offer_activity_withdrawn",
+					extra: { offerId, listingId: refreshed.listingId },
+				});
+			});
+	}
+
 	return { offer: refreshed, alreadyWithdrawn: false };
 }

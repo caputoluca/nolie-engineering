@@ -2,6 +2,7 @@ import {
 	offerAcceptedEvent,
 	offerCounteredEvent,
 	offerCreatedEvent,
+	offerWithdrawnEvent,
 } from "../../events/offer.js";
 import { createPublishEvent } from "./create.js";
 
@@ -18,6 +19,10 @@ export const offerActivityPublishers = {
 	}),
 	accepted: createPublishEvent({
 		...offerAcceptedEvent,
+		getChannelId: (data) => data.listingId,
+	}),
+	withdrawn: createPublishEvent({
+		...offerWithdrawnEvent,
 		getChannelId: (data) => data.listingId,
 	}),
 };

@@ -72,6 +72,16 @@ describe("POST /offers/:offerId/withdraw", () => {
 			)
 			.find((m) => m.data.offer.id === offerId);
 		expect(msg?.data.userId).toBe(row.sellerId);
+
+		// Public listing-channel removal so every viewer's activity rail drops
+		// the row in realtime. Minimal payload (id-only) — see
+		// `OfferRemovedEventSchema`.
+		const publicMsg = realtime
+			._getMessagesForChannel<{ listingId: string; eventId: string }>(
+				"listing:offer.withdrawn",
+			)
+			.find((m) => m.data.eventId === offerId);
+		expect(publicMsg?.data.listingId).toBe(listing.id);
 	});
 
 	it("rejects a withdraw from someone other than the proposer", async () => {
