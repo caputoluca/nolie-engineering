@@ -45,6 +45,26 @@ function trimLeadingZeros(num: string): string {
 	return num.replace(/^0+/, "") || "0";
 }
 
+// TAG cert format is published on their cert-search page: one letter then
+// seven digits (e.g. "A1234567"). The model loves to hallucinate plausible
+// 8-digit numerics here because the cert is rotated -90° on the slab edge —
+// drop anything that doesn't match so a wrong cert never reaches buyers.
+// Other graders' formats aren't published, so we don't gate them.
+const TAG_CERT_PATTERN = /^[A-Z]\d{7}$/;
+
+function sanitizeCertForGrader(
+	grader: string | null,
+	cert: string | null,
+): string | null {
+	if (!cert || grader !== "TAG") return cert;
+	if (TAG_CERT_PATTERN.test(cert)) return cert;
+	logger.warn(
+		{ grader, cert },
+		"[ai-listing] cert: TAG cert failed format check, dropping",
+	);
+	return null;
+}
+
 /** Empty string is the AI's "not visible" sentinel; treat as null. */
 function nz(s: string | null | undefined): string | null {
 	if (s == null) return null;
@@ -120,6 +140,7 @@ async function lookupCanonicalInner(
 ): Promise<CanonicalLookupResult> {
 	if (facts.kind === "slab") {
 		const f = facts.fields;
+		const grader = nzEnum(f.grader);
 		return {
 			record: {
 				kind: "slab",
@@ -127,9 +148,9 @@ async function lookupCanonicalInner(
 				setName: nz(f.setName),
 				subject: nz(f.subject),
 				cardNumber: nz(f.cardNumber),
-				grader: nzEnum(f.grader),
+				grader,
 				grade: nz(f.grade),
-				certNumber: nz(f.certNumber),
+				certNumber: sanitizeCertForGrader(grader, nz(f.certNumber)),
 				rarity: null,
 				parallel: null,
 				language: nzEnum(f.language),

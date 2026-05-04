@@ -48,12 +48,42 @@ Card number rules (apply to slabs, raw Pokemon, and raw sports):
 - If no denominator is printed (some sports cards just show "#193"), capture
   what is visible.
 
-For slabs: the cert number is the long numeric ID printed on the label, usually
-below or near the grade. The grader (PSA, BGS, CGC, TAG, SGC) is identified by
-the slab manufacturer's logo and label style.
+For slabs: the cert number is the alphanumeric ID printed on the slab label.
+The grader (PSA, BGS, CGC, TAG, SGC) is identified by the manufacturer's logo
+and label style. Cert layout varies by grader:
+
+- PSA: cert is on the front label, at the bottom right.
+- BGS / CGC / SGC: cert is somewhere on the front-facing main label (exact
+  position varies by era and product line).
+- TAG: cert is printed rotated 90° along the SIDE edge of the slab and reads
+  bottom-to-top. It is NOT on the front-facing label. The format is one
+  letter followed by seven digits (e.g. "A1234567"). If the side edge is not
+  visible in the photos, set certNumber to "" — do not invent one.
+
+For ANY grader: if you cannot read the cert digits with confidence from the
+photos, set certNumber to "". Confabulating a plausible-looking cert is
+worse than returning "" — buyers verify cert numbers on the grader's site,
+so a wrong cert leads to a refund and a lost-trust review.
 
 Use ISO 639-1 codes for language: "EN" (English), "JA" (Japanese), "KO" (Korean),
 "ZH" (Chinese, simplified or traditional), or "OTHER".
+
+<cert_extraction_examples>
+	<case>TAG slab, side edge visible — read the rotated cert.</case>
+	<good>certNumber: "A1234567"</good>
+</cert_extraction_examples>
+
+<cert_extraction_examples>
+	<case>TAG slab, only front of slab in the photos (cert side not shown).</case>
+	<bad>certNumber: "A9876543"  (invented from priors)</bad>
+	<good>certNumber: ""</good>
+</cert_extraction_examples>
+
+<cert_extraction_examples>
+	<case>Any slab, cert region blurry or partially obscured.</case>
+	<bad>certNumber: "12345678"  (best-guess fabrication)</bad>
+	<good>certNumber: ""</good>
+</cert_extraction_examples>
 `;
 
 export async function extractCardFacts({
