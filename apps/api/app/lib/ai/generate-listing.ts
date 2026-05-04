@@ -66,14 +66,14 @@ function buildPrompt(record: CanonicalRecord): string {
 	- Lead with subject + card number + set + year in natural prose.
 	- State grader + grade once ("PSA 10", "BGS 9.5"). Do NOT say "graded", "slabbed", "encapsulated", "this is a graded example" — the grade speaks for itself.
 	- If certNumber is present, include it once at the end of the grade clause as "Cert #<number>." Buyers verify on the grader's site, so this matters.
-	- If language is non-English, mention it once using the full word ("Japanese", not "JP" or "Japanese language card").
+	- If language is non-English AND the language is not already conveyed by the set name, mention it once as a bare adjective qualifying the relevant noun (e.g. "Japanese promo", "Japanese print"). Skip the mention entirely if the set name already carries it.
 	- Optionally one short clause of set or card significance — only if factually defensible from the record.
 	- Do NOT discuss centering, surface, edges, or corners. The grade encodes them.
 
 	If kind = "raw_pokemon":
 	- Lead with name + card number + set + year.
 	- Identify the variant clearly using the rarity field if present (Holo, Reverse Holo, Full Art, Alt Art, Illustration Rare, Special Illustration Rare, Secret Rare). For pre-2000 WOTC cards, include print run if it can be inferred from the year/set (1st Edition, Shadowless, or Unlimited).
-	- Note language if non-English.
+	- If language is non-English AND not already in the set name, mention it once as a bare adjective; otherwise skip.
 	- Do NOT invent specific defects, centering, or surface notes — you have not seen the card. A general phrase like "Pack-fresh and sleeved" is OK only if you have no reason to doubt it; otherwise omit condition entirely and let the photo speak.
 	- End with "See photos for exact condition."
 
@@ -95,7 +95,7 @@ function buildPrompt(record: CanonicalRecord): string {
 	- Hedging: "look at the pictures and judge for yourself", "I'm not a grader".
 	- Logistics: shipping, payment, returns, "smoke-free home".
 	- Authenticity claims like "100% authentic" or "guaranteed real".
-	- Padding redundancies: "card", "Japanese language card", "this is a slabbed example", "graded card example", "this listing is for".
+	- Padding redundancies: "card", "this is a slabbed example", "graded card example", "this listing is for".
 
 	FORMATTING (STRICT):
 	- No em dashes (—), no en dashes (–), no double hyphens (--). Use periods or commas.
@@ -125,6 +125,20 @@ function buildPrompt(record: CanonicalRecord): string {
 
 	raw sports, modern RC base:
 	"2023 Topps Chrome Elly De La Cruz #220 base rookie. See photos for exact condition."
+
+	---
+
+	<language_handling_examples>
+		<case>Set name already conveys the language.</case>
+		<bad>Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10. Japanese language card commemorating the anniversary.</bad>
+		<good>Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10, Cert #84512309. A holo from the set commemorating Pokemon's 25th anniversary.</good>
+	</language_handling_examples>
+
+	<language_handling_examples>
+		<case>Set name does not convey the language.</case>
+		<bad>Bulbasaur 030 from the 2009 P.M. Promo 10th Anniversary set. PSA 9. Japanese language card commemorating the 10th anniversary of the Pokemon TCG.</bad>
+		<good>Bulbasaur 030 from the 2009 P.M. Japanese Promo 10th Anniversary set. PSA 9, Cert #42942348. Released for the 10th anniversary of the Pokemon TCG.</good>
+	</language_handling_examples>
 
 	---
 
