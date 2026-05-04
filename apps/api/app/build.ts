@@ -41,6 +41,7 @@ import { healthRoutes } from "./routes/health.js";
 import { listingRoutes } from "./routes/listings/index.js";
 import { meRoutes } from "./routes/me/index.js";
 import { moderationRoutes } from "./routes/moderations.js";
+import { offerRoutes } from "./routes/offers.js";
 import { realtimeRoutes } from "./routes/realtime.js";
 import { shippingRoutes } from "./routes/shipping.js";
 import { sitemapRoutes } from "./routes/sitemap.js";
@@ -87,6 +88,10 @@ export async function buildApp(options?: BuildAppOptions) {
 		origin: fastify.config.trusted_origins,
 		methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 		allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+		// Browsers hide non-"simple" response headers from JS by default.
+		// Expose Retry-After so the client can read it on 429 and show
+		// "try again in ~X min".
+		exposedHeaders: ["retry-after"],
 		credentials: true,
 		maxAge: 86400,
 	});
@@ -161,6 +166,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(realtimeRoutes, { prefix: "/realtime" });
 	await fastify.register(handlesRoutes, { prefix: "/handles" });
 	await fastify.register(listingRoutes, { prefix: "/listings" });
+	await fastify.register(offerRoutes, { prefix: "/offers" });
 	await fastify.register(checkoutRoutes, { prefix: "/checkout" });
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
 	await fastify.register(shippingRoutes, { prefix: "/shipping" });

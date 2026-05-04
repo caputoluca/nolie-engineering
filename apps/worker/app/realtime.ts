@@ -57,6 +57,13 @@ function noOpPublisher(channel: string) {
 			);
 			return Promise.resolve();
 		},
+		publishMany: (items: unknown[]) => {
+			logger.debug(
+				{ channel, count: items.length, connected: false },
+				`Realtime publishMany skipped - not connected: ${channel}`,
+			);
+			return Promise.resolve();
+		},
 	};
 }
 
@@ -90,6 +97,25 @@ const noOpRealtimeClient: RestClient = {
 
 	pickup: {
 		confirmed: noOpPublisher("pickup.confirmed"),
+	},
+
+	offer: {
+		activity: {
+			created: noOpPublisher("offer.activity.created"),
+			countered: noOpPublisher("offer.activity.countered"),
+			accepted: noOpPublisher("offer.activity.accepted"),
+			withdrawn: noOpPublisher("offer.activity.withdrawn"),
+		},
+		update: {
+			received: noOpPublisher("offer.update.received"),
+			accepted: noOpPublisher("offer.update.accepted"),
+			declined: noOpPublisher("offer.update.declined"),
+			countered: noOpPublisher("offer.update.countered"),
+			expired: noOpPublisher("offer.update.expired"),
+			withdrawn: noOpPublisher("offer.update.withdrawn"),
+			canceled: noOpPublisher("offer.update.canceled"),
+			paymentFailed: noOpPublisher("offer.update.payment_failed"),
+		},
 	},
 };
 
