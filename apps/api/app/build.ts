@@ -88,6 +88,10 @@ export async function buildApp(options?: BuildAppOptions) {
 		origin: fastify.config.trusted_origins,
 		methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 		allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+		// Browsers hide non-"simple" response headers from JS by default.
+		// Expose Retry-After so the client can read it on 429 and show
+		// "try again in ~X min".
+		exposedHeaders: ["retry-after"],
 		credentials: true,
 		maxAge: 86400,
 	});

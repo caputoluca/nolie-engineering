@@ -1,5 +1,6 @@
 "use client";
 
+import { isHttpError } from "@nolie/http";
 import type { GenerateListingFromPhotoResponse } from "@nolie/schemas/ai/listing-extraction";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDebounce } from "use-debounce";
@@ -20,9 +21,18 @@ interface PendingMap {
 }
 
 export type AiState = "idle" | "loading" | "ready" | "failed";
+export type AiFailureKind = "rate_limited" | "generic";
 
 export interface ListingAiApi {
 	state: AiState;
+	/**
+	 * Set when `state === "failed"`. Lets the UI distinguish "you've hit the
+	 * AI generation rate limit" (recoverable, wait it out) from a generic
+	 * error or empty result (try again, or fill manually).
+	 */
+	failureKind: AiFailureKind | null;
+	/** Seconds until the rate-limit window opens, when failureKind === "rate_limited". */
+	retryAfterSeconds: number | null;
 	/** Last successfully-applied/displayed result, if any. */
 	result: GenerateListingFromPhotoResponse | null;
 	/** Number of images used for the displayed result (for the provenance pill). */
@@ -222,8 +232,25 @@ export function useListingAi({ imageKeys }: UseListingAiArgs): ListingAiApi {
 		query.refetch();
 	}, [query]);
 
+	const failure = useMemo<{
+		kind: AiFailureKind;
+		retryAfterSeconds: number | null;
+	} | null>(() => {
+		if (!query.isError || result) return null;
+		const err = query.error;
+		if (isHttpError(err) && err.statusCode === 429) {
+			return {
+				kind: "rate_limited",
+				retryAfterSeconds: err.retryAfter ?? null,
+			};
+		}
+		return { kind: "generic", retryAfterSeconds: null };
+	}, [query.isError, query.error, result]);
+
 	return {
 		state,
+		failureKind: failure?.kind ?? null,
+		retryAfterSeconds: failure?.retryAfterSeconds ?? null,
 		result,
 		resultImageCount,
 		pending,
