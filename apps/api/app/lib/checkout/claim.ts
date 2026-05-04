@@ -10,6 +10,7 @@ import type {
 } from "@nolie/schemas/checkout/claim";
 import { CheckoutClaimErrorCode } from "@nolie/schemas/checkout/claim";
 import type { FulfillmentMethodType } from "@nolie/schemas/fulfillment";
+import { COUNTRY_CODE_US } from "../../constants/country.js";
 import { logger } from "../../logger.js";
 import { apiTx } from "../db/tx.js";
 import { setReportingContext } from "../observability/sentry/report.js";
@@ -190,6 +191,25 @@ export async function claimCheckout(
 				code: CheckoutClaimErrorCode.self_purchase,
 			});
 		}
+	}
+
+	// 3b) Country gate (defense-in-depth) — quote.ts surfaces a non-blocking
+	// flag so the FE disables Place Order; claim refuses to materialize an
+	// Order with a non-US ship-to. Only checked when there's a ship line: a
+	// 100%-pickup quote requires no buyer ship address.
+	const hasShipLine = Array.from(buyerChoiceByListing.values()).some(
+		(m) => m === "shipping",
+	);
+	if (
+		hasShipLine &&
+		shipAddress &&
+		shipAddress.country.toUpperCase() !== COUNTRY_CODE_US
+	) {
+		throw new HttpError(
+			"Shipping is only available within the United States",
+			CheckoutClaimErrorCode.shipping_country_not_supported,
+			{ statusCode: 422 },
+		);
 	}
 
 	// 4) Pickup snapshots — full address fields needed for both Order pickup

@@ -1165,5 +1165,39 @@ describe("POST /checkout/claim", () => {
 			const body = await assertResponse<{ code: string }>(response, 400);
 			expect(body.code).toBe("SELLER_MISSING_SHIP_FROM");
 		});
+
+		it("non-US ship-to at claim time → 422 SHIPPING_COUNTRY_NOT_SUPPORTED, no PI created", async () => {
+			const seller = await setupSellerWithListing();
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const mockPayments = getMockPayments();
+
+			// Defense-in-depth: quote.ts already gates non-US, but the claim
+			// handler must refuse if the address row referenced by the quote is
+			// mutated to non-US between quote and claim. Simulate by flipping
+			// the US address to a non-US country directly.
+			await prisma.shippingAddress.update({
+				where: { id: buyer.shippingAddressId },
+				data: { country: "CA", state: "ON", postalCode: "M5H 1A1" },
+			});
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("claim-intl"),
+			});
+
+			const body = await assertResponse<{ code: string }>(response, 422);
+			expect(body.code).toBe("SHIPPING_COUNTRY_NOT_SUPPORTED");
+
+			// No Stripe call, no Order rows.
+			expect(
+				mockPayments.customer.createCheckoutPaymentIntent,
+			).not.toHaveBeenCalled();
+			const orders = await prisma.order.findMany({
+				where: { buyerId: buyer.session.user.id },
+			});
+			expect(orders).toHaveLength(0);
+		});
 	});
 });
