@@ -9,7 +9,9 @@ export interface CanonicalRecord {
 	cardNumber: string | null;
 	grader: string | null;
 	grade: string | null;
+	certNumber: string | null;
 	rarity: string | null;
+	parallel: string | null;
 	language: string | null;
 }
 
@@ -17,56 +19,103 @@ export interface CanonicalLookupResult {
 	record: CanonicalRecord;
 	canonical: {
 		imageUrl: string | null;
-		source: "pokemontcg" | "label_ocr" | "ai_guess";
+		source: "tcgdex" | "label_ocr" | "ai_guess";
 	};
 }
 
-interface PokemonTcgCard {
+interface TcgdexBriefCard {
+	id: string;
+	localId: string;
 	name: string;
-	number: string;
-	rarity?: string;
-	images?: { small?: string; large?: string };
-	set?: { name?: string; releaseDate?: string };
 }
 
-const POKEMONTCG_API = "https://api.pokemontcg.io/v2/cards";
+interface TcgdexCardDetail {
+	id: string;
+	name: string;
+	localId: string;
+	image?: string;
+	rarity?: string;
+	set: { id: string; name: string };
+}
+
+const TCGDEX_API = "https://api.tcgdex.net/v2";
 const LOOKUP_TIMEOUT_MS = 4000;
 
 function trimLeadingZeros(num: string): string {
 	return num.replace(/^0+/, "") || "0";
 }
 
-function yearFromReleaseDate(date: string | undefined): string | null {
-	if (!date) return null;
-	const match = date.match(/^(\d{4})/);
-	return match?.[1] ?? null;
+/** Empty string is the AI's "not visible" sentinel; treat as null. */
+function nz(s: string | null | undefined): string | null {
+	if (s == null) return null;
+	const trimmed = s.trim();
+	return trimmed.length === 0 ? null : trimmed;
 }
 
-async function searchPokemonTcg(
+/** UNKNOWN is the AI's "couldn't tell" sentinel for grader/language. */
+function nzEnum(s: string | null | undefined): string | null {
+	const v = nz(s);
+	return v === "UNKNOWN" ? null : v;
+}
+
+async function searchTcgdex(
 	name: string,
 	cardNumber: string,
-): Promise<PokemonTcgCard | null> {
+	language: string | null | undefined,
+): Promise<TcgdexCardDetail | null> {
 	const numerator = cardNumber.split("/")[0]?.trim();
 	if (!numerator) return null;
 
 	const trimmed = trimLeadingZeros(numerator);
-	const q = `name:"${name.replace(/"/g, "")}" number:${trimmed}`;
-	const url = `${POKEMONTCG_API}?q=${encodeURIComponent(q)}&pageSize=1`;
+	const lang = language === "JP" ? "ja" : "en";
+	const searchUrl = `${TCGDEX_API}/${lang}/cards?name=${encodeURIComponent(name)}`;
 
-	const res = await fetch(url, {
+	const searchRes = await fetch(searchUrl, {
 		signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
 		headers: { accept: "application/json" },
 	});
-
-	if (!res.ok) {
-		throw new Error(`pokemontcg.io ${res.status}`);
+	if (!searchRes.ok) {
+		throw new Error(`tcgdex search ${searchRes.status}`);
 	}
 
-	const body = (await res.json()) as { data?: PokemonTcgCard[] };
-	return body.data?.[0] ?? null;
+	const matches = (await searchRes.json()) as TcgdexBriefCard[];
+	const hit = matches.find((c) => trimLeadingZeros(c.localId) === trimmed);
+	if (!hit) return null;
+
+	const detailUrl = `${TCGDEX_API}/${lang}/cards/${encodeURIComponent(hit.id)}`;
+	const detailRes = await fetch(detailUrl, {
+		signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
+		headers: { accept: "application/json" },
+	});
+	if (!detailRes.ok) {
+		throw new Error(`tcgdex detail ${detailRes.status}`);
+	}
+
+	const detail = (await detailRes.json()) as TcgdexCardDetail;
+	if (!detail.set?.id) return null;
+	return detail;
 }
 
 export async function lookupCanonical(
+	facts: ExtractedCardFacts,
+): Promise<CanonicalLookupResult> {
+	logger.debug(
+		{ kind: facts.kind, confidence: facts.confidence },
+		"[ai-listing] canonical: start",
+	);
+	const result = await lookupCanonicalInner(facts);
+	logger.debug(
+		{
+			source: result.canonical.source,
+			hasImage: !!result.canonical.imageUrl,
+			record: result.record,
+		},
+		"[ai-listing] canonical: done",
+	);
+	return result;
+}
+
+async function lookupCanonicalInner(
 	facts: ExtractedCardFacts,
 ): Promise<CanonicalLookupResult> {
 	if (facts.kind === "slab") {
@@ -74,14 +123,16 @@ export async function lookupCanonical(
 		return {
 			record: {
 				kind: "slab",
-				year: f.year,
-				setName: f.setName,
-				subject: f.subject,
-				cardNumber: f.cardNumber,
-				grader: f.grader,
-				grade: f.grade,
+				year: nz(f.year),
+				setName: nz(f.setName),
+				subject: nz(f.subject),
+				cardNumber: nz(f.cardNumber),
+				grader: nzEnum(f.grader),
+				grade: nz(f.grade),
+				certNumber: nz(f.certNumber),
 				rarity: null,
-				language: f.language,
+				parallel: null,
+				language: nzEnum(f.language),
 			},
 			canonical: { imageUrl: null, source: "label_ocr" },
 		};
@@ -92,13 +143,15 @@ export async function lookupCanonical(
 		return {
 			record: {
 				kind: "raw_sports",
-				year: f.year,
-				setName: f.setName,
-				subject: f.player,
-				cardNumber: f.cardNumber,
+				year: nz(f.year),
+				setName: nz(f.setName),
+				subject: nz(f.player),
+				cardNumber: nz(f.cardNumber),
 				grader: null,
 				grade: null,
+				certNumber: null,
 				rarity: null,
+				parallel: nz(f.parallel),
 				language: null,
 			},
 			canonical: { imageUrl: null, source: "ai_guess" },
@@ -115,7 +168,9 @@ export async function lookupCanonical(
 				cardNumber: null,
 				grader: null,
 				grade: null,
+				certNumber: null,
 				rarity: null,
+				parallel: null,
 				language: null,
 			},
 			canonical: { imageUrl: null, source: "ai_guess" },
@@ -132,7 +187,9 @@ export async function lookupCanonical(
 			cardNumber: f.cardNumber,
 			grader: null,
 			grade: null,
+			certNumber: null,
 			rarity: f.apparentRarity,
+			parallel: null,
 			language: f.language,
 		},
 		canonical: { imageUrl: null, source: "ai_guess" },
@@ -143,30 +200,32 @@ export async function lookupCanonical(
 	}
 
 	try {
-		const match = await searchPokemonTcg(f.name, f.cardNumber);
+		const match = await searchTcgdex(f.name, f.cardNumber, f.language);
 		if (!match) return fallback;
 
 		return {
 			record: {
 				kind: "raw_pokemon",
-				year: yearFromReleaseDate(match.set?.releaseDate) ?? f.year,
-				setName: match.set?.name ?? f.setHint,
+				year: f.year,
+				setName: match.set.name ?? f.setHint,
 				subject: match.name,
-				cardNumber: match.number,
+				cardNumber: match.localId,
 				grader: null,
 				grade: null,
+				certNumber: null,
 				rarity: match.rarity ?? f.apparentRarity,
+				parallel: null,
 				language: f.language,
 			},
 			canonical: {
-				imageUrl: match.images?.large ?? match.images?.small ?? null,
-				source: "pokemontcg",
+				imageUrl: match.image ? `${match.image}/high.webp` : null,
+				source: "tcgdex",
 			},
 		};
 	} catch (err) {
 		logger.warn(
 			{ err, name: f.name, cardNumber: f.cardNumber },
-			"pokemontcg.io lookup failed, falling back to AI guess",
+			"tcgdex lookup failed, falling back to AI guess",
 		);
 		return fallback;
 	}
