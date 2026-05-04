@@ -75,6 +75,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				totals: full.totals,
 				isTaxExempt: full.isTaxExempt,
 				selectedShippingAddressId: full.selectedShippingAddressId,
+				shippingCountryNotSupported: full.shippingCountryNotSupported,
 			});
 		},
 	});
