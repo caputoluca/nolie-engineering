@@ -18,6 +18,7 @@ export type {
 	ConnectionStateChange,
 	ConnectionStateListener,
 } from "./types.js";
+export { watchChannelFailure } from "./watch-channel-failure.js";
 
 export class RealtimeClient {
 	connected = false;
@@ -160,6 +161,24 @@ export class RealtimeClient {
 				// Ignore detach errors - channel state will be cleaned up anyway
 			});
 		}
+	}
+
+	/**
+	 * Reattach a channel by name. Use as the second step of Ably's documented
+	 * recovery for a FAILED channel: `reauthorize()` first, then `attachChannel()`.
+	 * Subscribers persist across the state transition, so messages flow again
+	 * once the channel is ATTACHED.
+	 *
+	 * Resolves when the channel transitions to ATTACHED. Rejects if attach
+	 * cannot succeed (e.g. the new token still lacks the capability).
+	 */
+	attachChannel(channelName: string): Promise<unknown> {
+		const client = cache.peek();
+		if (!client) {
+			return Promise.resolve();
+		}
+		const channel = client.channels.get(channelName);
+		return channel.attach();
 	}
 
 	/**
