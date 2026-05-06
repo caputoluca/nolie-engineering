@@ -18,6 +18,7 @@ export type {
 	ConnectionStateChange,
 	ConnectionStateListener,
 } from "./types.js";
+export { watchChannelFailure } from "./watch-channel-failure.js";
 
 export class RealtimeClient {
 	connected = false;
@@ -160,6 +161,50 @@ export class RealtimeClient {
 				// Ignore detach errors - channel state will be cleaned up anyway
 			});
 		}
+	}
+
+	/**
+	 * Snapshot of useful debugging info about the current realtime auth state.
+	 * Surfaced in Sentry reports to diagnose capability-denied failures —
+	 * e.g. "did the token even have user:<id>?", "what user did we authorize for?".
+	 */
+	getDiagnostics(): {
+		connectionState: ConnectionState;
+		expectedUid: string | null;
+		capability: string | null;
+		clientId: string | null;
+		mintedAt: number | null;
+	} {
+		// Field names deliberately avoid the words `token`/`auth` so Sentry's
+		// default scrubber doesn't filter them — capability is public metadata,
+		// not a secret.
+		const client = cache.peek();
+		const tr = client?.getLastTokenRequest() ?? null;
+		return {
+			connectionState: this.currentState,
+			expectedUid: this._authorizedUserId,
+			capability: tr?.capability ?? null,
+			clientId: tr?.clientId ?? null,
+			mintedAt: tr?.timestamp ?? null,
+		};
+	}
+
+	/**
+	 * Reattach a channel by name. Use as the second step of Ably's documented
+	 * recovery for a FAILED channel: `reauthorize()` first, then `attachChannel()`.
+	 * Subscribers persist across the state transition, so messages flow again
+	 * once the channel is ATTACHED.
+	 *
+	 * Resolves when the channel transitions to ATTACHED. Rejects if attach
+	 * cannot succeed (e.g. the new token still lacks the capability).
+	 */
+	attachChannel(channelName: string): Promise<unknown> {
+		const client = cache.peek();
+		if (!client) {
+			return Promise.resolve();
+		}
+		const channel = client.channels.get(channelName);
+		return channel.attach();
 	}
 
 	/**

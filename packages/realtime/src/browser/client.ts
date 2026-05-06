@@ -10,6 +10,13 @@ export interface RealtimeClientOptions {
 export interface RealtimeAblyClient extends Realtime {
 	/** Set a token to be used by the next reauthorize call instead of fetching. */
 	primeToken: (token: TokenRequestType) => void;
+	/**
+	 * The most recent TokenRequest the client received from the auth callback.
+	 * Ably v2 doesn't expose `tokenDetails` publicly, so we capture it here at
+	 * the authCallback boundary for diagnostics (e.g. logging the active
+	 * capability map when a channel goes FAILED).
+	 */
+	getLastTokenRequest: () => TokenRequestType | null;
 }
 
 export function createRealtimeClient(
@@ -17,6 +24,7 @@ export function createRealtimeClient(
 ): RealtimeAblyClient {
 	let primedTokenRequest: TokenRequestType | null =
 		opts.initialTokenRequest ?? null;
+	let lastTokenRequest: TokenRequestType | null = null;
 	const client = new Realtime({
 		disconnectedRetryTimeout: opts.disconnectedRetryTimeoutMs ?? 5000,
 		suspendedRetryTimeout: 10000,
@@ -24,6 +32,7 @@ export function createRealtimeClient(
 			if (primedTokenRequest) {
 				const tr = primedTokenRequest;
 				primedTokenRequest = null;
+				lastTokenRequest = tr;
 				callback(null, tr);
 				return;
 			}
@@ -40,6 +49,7 @@ export function createRealtimeClient(
 				}
 
 				const tokenRequest = (await response.json()) as TokenRequest;
+				lastTokenRequest = tokenRequest;
 				callback(null, tokenRequest);
 			} catch (error) {
 				const message =
@@ -52,6 +62,8 @@ export function createRealtimeClient(
 	client.primeToken = (token: TokenRequestType) => {
 		primedTokenRequest = token;
 	};
+
+	client.getLastTokenRequest = () => lastTokenRequest;
 
 	return client;
 }
