@@ -326,6 +326,94 @@ describe("POST /checkout/claim", () => {
 		});
 	});
 
+	describe("cart hand-off", () => {
+		it("clears claimed listings from the buyer's cart, leaves unclaimed rows alone", async () => {
+			const sellerA = await setupSellerWithListing({ price: 50 });
+			const sellerB = await setupSellerWithListing({ price: 75 });
+			const otherSeller = await setupSellerWithListing({ price: 30 });
+			const buyer = await setupReadyBuyer();
+
+			// Buyer has three items in their cart; we'll only claim two of them.
+			await buyer.api.post("/cart", { listingId: sellerA.listing.id });
+			await buyer.api.post("/cart", { listingId: sellerB.listing.id });
+			await buyer.api.post("/cart", { listingId: otherSeller.listing.id });
+
+			const quoteId = await createQuoteFor(buyer.api, [
+				sellerA.listing.id,
+				sellerB.listing.id,
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("cart-clear"),
+			});
+			await assertResponse(response, 200);
+
+			const remaining = await prisma.cartItem.findMany({
+				where: { buyerId: buyer.session.user.id },
+				select: { listingId: true },
+			});
+			expect(remaining.map((r) => r.listingId)).toEqual([
+				otherSeller.listing.id,
+			]);
+		});
+
+		it("keeps cart intact when claim fails before Tx A (unknown paymentMethodId)", async () => {
+			const seller = await setupSellerWithListing({ price: 50 });
+			const buyer = await setupReadyBuyer();
+			await buyer.api.post("/cart", { listingId: seller.listing.id });
+
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+
+			// Bogus paymentMethodId trips PAYMENT_METHOD_NOT_FOUND, which fires
+			// before Tx A — cart must be untouched.
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: "pm-does-not-exist",
+				idempotencyKey: uniqueIdempotencyKey("cart-keep"),
+			});
+			expect(response.statusCode).toBe(400);
+
+			const stillThere = await prisma.cartItem.findMany({
+				where: { buyerId: buyer.session.user.id },
+				select: { listingId: true },
+			});
+			expect(stillThere.map((r) => r.listingId)).toEqual([seller.listing.id]);
+		});
+
+		it("clears the cart even when Stripe PI creation fails after Tx A — buyer recovers via replay", async () => {
+			const mockPayments = getMockPayments();
+			const seller = await setupSellerWithListing({ price: 50 });
+			const buyer = await setupReadyBuyer();
+
+			await buyer.api.post("/cart", { listingId: seller.listing.id });
+
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const idempotencyKey = uniqueIdempotencyKey("cart-clear-pi-fail");
+
+			mockPayments._failNextCheckoutPaymentIntent({
+				success: false,
+				error: "payment_failed",
+				message: "simulated stripe failure",
+			});
+
+			const first = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey,
+			});
+			expect(first.statusCode).toBe(500);
+
+			// Order materialized → cart row removed in the same Tx A. Matches the
+			// Shopify pattern: cart clears at order placement, not at payment.
+			const afterFail = await prisma.cartItem.findMany({
+				where: { buyerId: buyer.session.user.id },
+			});
+			expect(afterFail).toHaveLength(0);
+		});
+	});
+
 	describe("happy path — pickup", () => {
 		it("all-pickup claim creates an Order with pickup snapshot and null ship-to/ship-from", async () => {
 			const seller = await setupSellerWithListing({
