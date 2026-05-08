@@ -25,7 +25,7 @@ describe("Payout Release", () => {
 	// =========================================================================
 	it("pays seller and records transfer on successful payout", async () => {
 		// Arrange: Create settled auction with earning ready for payout
-		const { auction, earning, seller } = await createPendingPayout();
+		const { auction, earning, order, seller } = await createPendingPayout();
 		const { ctx, mocks } = createTestPayoutsContext();
 
 		// Act: Run release job
@@ -47,7 +47,7 @@ describe("Payout Release", () => {
 
 		// Assert: Success notification queued
 		assertNotificationQueued(mocks, "payoutProcessed", {
-			auctionId: auction.id,
+			orderId: order.id,
 		});
 	});
 
@@ -131,7 +131,7 @@ describe("Payout Release", () => {
 	// =========================================================================
 	it("marks payout as failed when seller has no connect account", async () => {
 		// Arrange: Create earning where seller never set up Stripe Connect
-		const { auction, earning } = await createPendingPayout({
+		const { earning, order } = await createPendingPayout({
 			hasConnectAccount: false,
 		});
 		const { ctx, mocks } = createTestPayoutsContext();
@@ -152,7 +152,7 @@ describe("Payout Release", () => {
 
 		// Assert: Seller notified of failure
 		assertNotificationQueued(mocks, "payoutFailed", {
-			auctionId: auction.id,
+			orderId: order.id,
 		});
 	});
 
@@ -198,7 +198,7 @@ describe("Payout Release", () => {
 	// =========================================================================
 	it("marks payout as failed when Stripe transfer fails", async () => {
 		// Arrange: Create earning ready for payout
-		const { auction, earning } = await createPendingPayout();
+		const { earning, order } = await createPendingPayout();
 		const { ctx, mocks } = createTestPayoutsContext();
 
 		// Mock: Payment fails due to transfer error (e.g., invalid bank account)
@@ -223,7 +223,7 @@ describe("Payout Release", () => {
 
 		// Assert: Seller notified of failure
 		assertNotificationQueued(mocks, "payoutFailed", {
-			auctionId: auction.id,
+			orderId: order.id,
 		});
 	});
 });
@@ -365,9 +365,9 @@ type PayoutNotificationType = "payoutProcessed" | "payoutFailed";
 function assertNotificationQueued(
 	mocks: TestMocksWithPayments,
 	type: PayoutNotificationType,
-	expected: { auctionId: string },
+	expected: { orderId: string },
 ) {
-	const ops = mocks.queues._getOperationsByJob<{ auctionId: string }>(
+	const ops = mocks.queues._getOperationsByJob<{ orderId: string }>(
 		"notifications",
 		type,
 	);
@@ -377,9 +377,9 @@ function assertNotificationQueued(
 		`Expected "${type}" notification to be queued`,
 	).toBeGreaterThan(0);
 
-	const match = ops.find((op) => op.data.auctionId === expected.auctionId);
+	const match = ops.find((op) => op.data.orderId === expected.orderId);
 	expect(
 		match,
-		`Expected "${type}" notification for auctionId=${expected.auctionId}`,
+		`Expected "${type}" notification for orderId=${expected.orderId}`,
 	).toBeDefined();
 }

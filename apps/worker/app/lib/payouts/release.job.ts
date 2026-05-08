@@ -59,13 +59,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	// TODO(NL-179): notification payload schemas still key on `auctionId`.
-	// V1 invariant: every Order has exactly one line item by construction, so
-	// we resolve the listingId off the first line. Revisit when BIN bundles
-	// ship — per-Order notifications should switch to `orderId` and let
-	// consumers decide how to render multi-item content.
-	const listingIdForNotification =
-		earning.order?.lineItems[0]?.listingId ?? null;
+	const orderIdForNotification = earning.order?.id ?? null;
 
 	// Validate payout status - must be in_review or pending
 	if (
@@ -121,11 +115,11 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		);
 		await markPayoutAsFailed(ctx.prisma, { earningId });
 
-		if (listingIdForNotification) {
+		if (orderIdForNotification) {
 			// Fire-and-forget: queue payoutFailed notification
 			void ctx.queues.notifications
 				.payoutFailed({
-					auctionId: listingIdForNotification,
+					orderId: orderIdForNotification,
 					userId: earning.sellerProfile.userId,
 				})
 				.catch((err) => {
@@ -256,11 +250,11 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 		await markPayoutAsFailed(ctx.prisma, { earningId });
 
-		if (listingIdForNotification) {
+		if (orderIdForNotification) {
 			// Fire-and-forget: queue payoutFailed notification (likely bank account issue)
 			void ctx.queues.notifications
 				.payoutFailed({
-					auctionId: listingIdForNotification,
+					orderId: orderIdForNotification,
 					userId: earning.sellerProfile.userId,
 				})
 				.catch((err) => {
@@ -304,11 +298,11 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			},
 		});
 
-		if (listingIdForNotification) {
-			// Fire-and-forget: queue payoutProcessed notification to creator
+		if (orderIdForNotification) {
+			// Fire-and-forget: queue payoutProcessed notification to seller
 			void ctx.queues.notifications
 				.payoutProcessed({
-					auctionId: listingIdForNotification,
+					orderId: orderIdForNotification,
 					userId: earning.sellerProfile.userId,
 				})
 				.catch((err) => {

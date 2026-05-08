@@ -380,7 +380,7 @@ export async function claimCheckout(
 			);
 		}
 
-		return materializeOrders({
+		const materialized = await materializeOrders({
 			tx,
 			buyerId,
 			buyerEmailSnapshot: buyer.email,
@@ -394,6 +394,15 @@ export async function claimCheckout(
 			paymentMethodBrand: paymentMethod.brand,
 			paymentMethodLast4: paymentMethod.last4,
 		});
+
+		// Cart hand-off: once Orders exist, the claimed listings are committed
+		// purchases — drop them from the buyer's cart so they don't render as
+		// "unavailable" rows. Replay path returns earlier so this is one-shot.
+		await tx.cartItem.deleteMany({
+			where: { buyerId, listingId: { in: listingIds } },
+		});
+
+		return materialized;
 	});
 
 	// 9) Stripe call (no tx). Idempotency-keyed on body.idempotencyKey — buyer
