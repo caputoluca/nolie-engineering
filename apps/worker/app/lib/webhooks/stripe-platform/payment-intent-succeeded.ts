@@ -9,9 +9,15 @@ import {
 	OrderStatus,
 	PaymentStatus,
 	PayoutStatus,
+	Prisma,
 } from "@nolie/db";
 import type { NoLieJob } from "@nolie/queues/types";
 import type { webhooksStripeQueue } from "@nolie/queues/webhooks-stripe";
+import {
+	getLetterPreset,
+	LETTER_PLACEHOLDER_PARCEL_DIMS,
+	LETTER_SERVICE_CODE,
+} from "@nolie/shipping/presets";
 import type Stripe from "stripe";
 import { workerTx } from "../../../db/tx.js";
 import {
@@ -158,8 +164,40 @@ export async function paymentIntentSucceeded(
 				skipDuplicates: true,
 			});
 
+			// NL-253: build all ShippingLabel rows up front, then one
+			// createMany. Decision lives on Order.shippingPresetKey
+			// (resolved by checkout/claim) — letter preset routes via
+			// EasyPost FCML; null = parcel rail (Shippo). Dim columns on
+			// letter rows are placeholder (#10 envelope) since on-wire
+			// weight is computed at label-purchase time from line-item
+			// count via `letterWeightOzForCardCount`.
+			const labelRows: Prisma.ShippingLabelCreateManyInput[] = [];
 			for (const order of orders) {
 				if (order.fulfillmentMode !== FulfillmentMode.shipping) continue;
+
+				const isLetterRail =
+					order.shippingPresetKey != null &&
+					getLetterPreset(order.shippingPresetKey) != null;
+
+				if (isLetterRail) {
+					labelRows.push({
+						orderId: order.id,
+						provider: "easypost",
+						serviceCode: LETTER_SERVICE_CODE,
+						weightLbs: new Prisma.Decimal(
+							LETTER_PLACEHOLDER_PARCEL_DIMS.weightLbs,
+						),
+						lengthIn: new Prisma.Decimal(
+							LETTER_PLACEHOLDER_PARCEL_DIMS.lengthIn,
+						),
+						widthIn: new Prisma.Decimal(LETTER_PLACEHOLDER_PARCEL_DIMS.widthIn),
+						heightIn: new Prisma.Decimal(
+							LETTER_PLACEHOLDER_PARCEL_DIMS.heightIn,
+						),
+					});
+					continue;
+				}
+
 				const dims = computeBundleDims(order.lineItems);
 				if (!dims) {
 					ctx.logger.warn(
@@ -168,15 +206,16 @@ export async function paymentIntentSucceeded(
 					);
 					continue;
 				}
-				await tx.shippingLabel.create({
-					data: {
-						orderId: order.id,
-						weightLbs: dims.weightLbs,
-						lengthIn: dims.lengthIn,
-						widthIn: dims.widthIn,
-						heightIn: dims.heightIn,
-					},
+				labelRows.push({
+					orderId: order.id,
+					weightLbs: dims.weightLbs,
+					lengthIn: dims.lengthIn,
+					widthIn: dims.widthIn,
+					heightIn: dims.heightIn,
 				});
+			}
+			if (labelRows.length > 0) {
+				await tx.shippingLabel.createMany({ data: labelRows });
 			}
 		});
 	} catch (err) {
