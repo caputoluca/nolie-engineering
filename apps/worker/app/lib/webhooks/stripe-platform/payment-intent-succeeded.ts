@@ -22,6 +22,7 @@ import {
 import { fanOutCanceledSiblings } from "../../offers/cancel-fanout.js";
 import type { WebhookContext } from "../context.js";
 import {
+	computeBundleDims,
 	loadFinalizableOrdersForPI,
 	type OrderForFinalization,
 } from "./_helpers.js";
@@ -148,12 +149,23 @@ export async function paymentIntentSucceeded(
 			});
 
 			for (const order of orders) {
-				await tx.shippingLabel.updateMany({
-					where: {
-						listingId: { in: order.lineItems.map((l) => l.listingId) },
-						orderId: null,
+				if (order.fulfillmentMode !== FulfillmentMode.shipping) continue;
+				const dims = computeBundleDims(order.lineItems);
+				if (!dims) {
+					ctx.logger.warn(
+						{ orderId: order.id, paymentIntentId },
+						"payment_intent.succeeded: skipping ShippingLabel create — line items missing package dims (un-backfilled?)",
+					);
+					continue;
+				}
+				await tx.shippingLabel.create({
+					data: {
+						orderId: order.id,
+						weightLbs: dims.weightLbs,
+						lengthIn: dims.lengthIn,
+						widthIn: dims.widthIn,
+						heightIn: dims.heightIn,
 					},
-					data: { orderId: order.id },
 				});
 			}
 		});
