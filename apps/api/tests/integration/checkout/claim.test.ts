@@ -1337,4 +1337,140 @@ describe("POST /checkout/claim", () => {
 			expect(orders).toHaveLength(0);
 		});
 	});
+
+	describe("letter shipping (PWE / NL-253)", () => {
+		// At claim time the per-seller bundle is classified onto a shipping
+		// rail — letter (EasyPost FCML), letter-upgraded-to-parcel (Shippo
+		// with a standard_card fallback), or default parcel (Shippo with the
+		// listing's own dims). The decision is frozen on Order.shippingPresetKey
+		// so PI-succeeded + label-purchase don't re-derive it.
+
+		it("single letter listing produces an Order on the letter rail charged at the flat $1.49", async () => {
+			const seller = await setupSellerWithListing({
+				price: 10,
+				itemType: "physical",
+				shippingCostCents: 149,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { shippingPresetKey: "raw_single_pwe" },
+			});
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("letter-single"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+			});
+			expect(order.shippingPresetKey).toBe("raw_single_pwe");
+			expect(order.shippingCents).toBe(149);
+		});
+
+		it("six-card all-letter bundle auto-upgrades to a standard_card parcel at the fallback rate", async () => {
+			// Letter shipping caps at 5 cards (USPS FCML weight tiers + bend
+			// test). A 6th letter listing in the bundle pushes it over the
+			// limit; checkout flips the rail to a default parcel preset
+			// (`standard_card`) so the seller can ship in a bubble mailer
+			// instead of an envelope. The buyer is charged the parcel
+			// fallback rate, not 6× the letter rate.
+			const seller = await setupSellerWithListing({
+				price: 8,
+				itemType: "physical",
+				shippingCostCents: 149,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { shippingPresetKey: "raw_single_pwe" },
+			});
+			const extraIds: string[] = [];
+			for (let i = 0; i < 5; i++) {
+				const extra = await createFixedPriceListingForSeller(
+					seller.sellerProfileId,
+					{ price: 8, itemType: "physical" },
+				);
+				await prisma.listing.update({
+					where: { id: extra.id },
+					data: {
+						shippingPresetKey: "raw_single_pwe",
+						shippingCostCents: 149,
+					},
+				});
+				extraIds.push(extra.id);
+			}
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				...extraIds,
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("letter-upgrade"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+			expect(order.lineItems).toHaveLength(6);
+			expect(order.shippingPresetKey).toBe("standard_card");
+			expect(order.shippingCents).toBe(650);
+		});
+
+		it("mixed letter + parcel bundle stays on the parcel rail with bundle-max shipping", async () => {
+			// Regression: a single non-letter listing in the bundle disables
+			// the letter rail. Bundle ships as parcel using the existing
+			// `max(item.shippingCents)` math — no upgrade needed because the
+			// seller already priced for parcel on at least one item.
+			const seller = await setupSellerWithListing({
+				price: 10,
+				itemType: "physical",
+				shippingCostCents: 149,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { shippingPresetKey: "raw_single_pwe" },
+			});
+			const parcelListing = await createFixedPriceListingForSeller(
+				seller.sellerProfileId,
+				{ price: 25, itemType: "physical" },
+			);
+			await prisma.listing.update({
+				where: { id: parcelListing.id },
+				data: {
+					shippingPresetKey: "standard_card",
+					shippingCostCents: 500,
+				},
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				parcelListing.id,
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("letter-mixed"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+			});
+			expect(order.shippingPresetKey).toBeNull();
+			// max(149, 500) — parcel item dictates the bundle rate.
+			expect(order.shippingCents).toBe(500);
+		});
+	});
 });

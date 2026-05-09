@@ -15,6 +15,7 @@ import type { NoLieJob } from "@nolie/queues/types";
 import type { webhooksStripeQueue } from "@nolie/queues/webhooks-stripe";
 import {
 	getLetterPreset,
+	getPreset,
 	LETTER_PLACEHOLDER_PARCEL_DIMS,
 	LETTER_SERVICE_CODE,
 } from "@nolie/shipping/presets";
@@ -166,20 +167,30 @@ export async function paymentIntentSucceeded(
 
 			// NL-253: build all ShippingLabel rows up front, then one
 			// createMany. Decision lives on Order.shippingPresetKey
-			// (resolved by checkout/claim) — letter preset routes via
-			// EasyPost FCML; null = parcel rail (Shippo). Dim columns on
-			// letter rows are placeholder (#10 envelope) since on-wire
-			// weight is computed at label-purchase time from line-item
-			// count via `letterWeightOzForCardCount`.
+			// (resolved by checkout/claim):
+			//  - letter preset key  → EasyPost FCML; placeholder dims; on-wire
+			//                         weight computed at label-purchase time
+			//                         from line-item count via
+			//                         `letterWeightOzForCardCount`.
+			//  - parcel preset key  → Shippo, dims looked up from PACKAGE_PRESETS
+			//                         (this is the auto-upgrade path; the listings
+			//                         themselves carry no parcel dims because they
+			//                         were created as letter listings).
+			//  - null               → Shippo, dims from `computeBundleDims` on
+			//                         per-listing parcel dims (default parcel rail).
 			const labelRows: Prisma.ShippingLabelCreateManyInput[] = [];
 			for (const order of orders) {
 				if (order.fulfillmentMode !== FulfillmentMode.shipping) continue;
 
-				const isLetterRail =
-					order.shippingPresetKey != null &&
-					getLetterPreset(order.shippingPresetKey) != null;
+				const presetKey = order.shippingPresetKey;
+				const letterPreset =
+					presetKey != null ? getLetterPreset(presetKey) : undefined;
+				const parcelPreset =
+					presetKey != null && letterPreset == null
+						? getPreset(presetKey)
+						: undefined;
 
-				if (isLetterRail) {
+				if (letterPreset) {
 					labelRows.push({
 						orderId: order.id,
 						provider: "easypost",
@@ -194,6 +205,17 @@ export async function paymentIntentSucceeded(
 						heightIn: new Prisma.Decimal(
 							LETTER_PLACEHOLDER_PARCEL_DIMS.heightIn,
 						),
+					});
+					continue;
+				}
+
+				if (parcelPreset) {
+					labelRows.push({
+						orderId: order.id,
+						weightLbs: new Prisma.Decimal(parcelPreset.weightLbs),
+						lengthIn: new Prisma.Decimal(parcelPreset.lengthIn),
+						widthIn: new Prisma.Decimal(parcelPreset.widthIn),
+						heightIn: new Prisma.Decimal(parcelPreset.heightIn),
 					});
 					continue;
 				}
