@@ -395,13 +395,6 @@ export async function claimCheckout(
 			paymentMethodLast4: paymentMethod.last4,
 		});
 
-		// Cart hand-off: once Orders exist, the claimed listings are committed
-		// purchases — drop them from the buyer's cart so they don't render as
-		// "unavailable" rows. Replay path returns earlier so this is one-shot.
-		await tx.cartItem.deleteMany({
-			where: { buyerId, listingId: { in: listingIds } },
-		});
-
 		return materialized;
 	});
 
@@ -596,6 +589,38 @@ async function replayIfExists({
 				{ statusCode: 410, data: { paymentIntentStatus: pi.status } },
 			);
 		}
+		// Card declined on the prior confirm attempt — Stripe transitions the PI
+		// to `requires_payment_method` and clears the `payment_method` slot. The
+		// next `stripe.confirmPayment(clientSecret)` would otherwise hit Stripe
+		// with no PM attached and surface a generic processing-error message.
+		// Re-attach the saved card so the retry charges normally.
+		if (pi.status === "requires_payment_method") {
+			const { stripePaymentMethodId } = await loadReplayWalletContext({
+				db,
+				buyerId,
+				paymentMethodId: body.paymentMethodId,
+			});
+			try {
+				const updated = await payments.customer.updatePaymentIntent({
+					paymentIntentId: pi.id,
+					paymentMethodId: stripePaymentMethodId,
+				});
+				pi = {
+					id: updated.id,
+					status: updated.status,
+					clientSecret: updated.clientSecret,
+					latestChargeId: pi.latestChargeId,
+				};
+			} catch (err) {
+				if (isStripeRateLimitError(err)) {
+					throw errors.tooManyRequests(
+						"We are experiencing high demand. Please try again in a moment.",
+						{ code: "STRIPE_RATE_LIMIT_EXCEEDED" },
+					);
+				}
+				throw err;
+			}
+		}
 		if (!pi.clientSecret) {
 			setReportingContext({
 				operation: "checkout_replay_pi_no_client_secret",
@@ -640,30 +665,11 @@ async function resumeWithoutLinkedPI({
 		sellerProfileId: string;
 	}[];
 }): Promise<CheckoutClaimSuccess> {
-	const buyer = await db.user.findUnique({
-		where: { id: buyerId },
-		select: {
-			billing: {
-				select: {
-					customerId: true,
-					paymentMethods: {
-						where: { id: body.paymentMethodId },
-						select: { stripePaymentMethodId: true },
-						take: 1,
-					},
-				},
-			},
-		},
+	const { customerId, stripePaymentMethodId } = await loadReplayWalletContext({
+		db,
+		buyerId,
+		paymentMethodId: body.paymentMethodId,
 	});
-	const customerId = buyer?.billing?.customerId;
-	const stripePaymentMethodId =
-		buyer?.billing?.paymentMethods[0]?.stripePaymentMethodId;
-	if (!customerId || !stripePaymentMethodId) {
-		throw errors.badRequest(
-			"Buyer wallet or payment method missing during replay",
-			{ code: "REPLAY_BUYER_WALLET_MISSING" },
-		);
-	}
 
 	const orderIds = siblings.map((s) => s.id);
 	const sellerProfileIds = Array.from(
@@ -977,6 +983,38 @@ function computeDrift(
 		}
 	}
 	return drifted.length > 0 ? drifted : null;
+}
+
+async function loadReplayWalletContext(input: {
+	db: PrismaClient;
+	buyerId: string;
+	paymentMethodId: string;
+}): Promise<{ customerId: string; stripePaymentMethodId: string }> {
+	const buyer = await input.db.user.findUnique({
+		where: { id: input.buyerId },
+		select: {
+			billing: {
+				select: {
+					customerId: true,
+					paymentMethods: {
+						where: { id: input.paymentMethodId },
+						select: { stripePaymentMethodId: true },
+						take: 1,
+					},
+				},
+			},
+		},
+	});
+	const customerId = buyer?.billing?.customerId;
+	const stripePaymentMethodId =
+		buyer?.billing?.paymentMethods[0]?.stripePaymentMethodId;
+	if (!customerId || !stripePaymentMethodId) {
+		throw errors.badRequest(
+			"Buyer wallet or payment method missing during replay",
+			{ code: "REPLAY_BUYER_WALLET_MISSING" },
+		);
+	}
+	return { customerId, stripePaymentMethodId };
 }
 
 export type { CheckoutListing, ComputedCheckoutTotals };
