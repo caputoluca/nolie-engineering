@@ -327,16 +327,13 @@ describe("POST /checkout/claim", () => {
 	});
 
 	describe("cart hand-off", () => {
-		it("clears claimed listings from the buyer's cart, leaves unclaimed rows alone", async () => {
+		it("leaves the cart intact on a successful claim — cart clear rides the payment_intent.succeeded webhook", async () => {
 			const sellerA = await setupSellerWithListing({ price: 50 });
 			const sellerB = await setupSellerWithListing({ price: 75 });
-			const otherSeller = await setupSellerWithListing({ price: 30 });
 			const buyer = await setupReadyBuyer();
 
-			// Buyer has three items in their cart; we'll only claim two of them.
 			await buyer.api.post("/cart", { listingId: sellerA.listing.id });
 			await buyer.api.post("/cart", { listingId: sellerB.listing.id });
-			await buyer.api.post("/cart", { listingId: otherSeller.listing.id });
 
 			const quoteId = await createQuoteFor(buyer.api, [
 				sellerA.listing.id,
@@ -346,17 +343,21 @@ describe("POST /checkout/claim", () => {
 			const response = await postClaim(buyer.api, {
 				quoteId,
 				paymentMethodId: buyer.paymentMethodId,
-				idempotencyKey: uniqueIdempotencyKey("cart-clear"),
+				idempotencyKey: uniqueIdempotencyKey("cart-untouched-claim"),
 			});
 			await assertResponse(response, 200);
 
-			const remaining = await prisma.cartItem.findMany({
+			// Claim only creates Orders + PI; the actual charge happens on
+			// stripe.confirmPayment. Cart drop must wait for the webhook so a
+			// card decline doesn't leave the buyer with an empty cart and no
+			// money taken.
+			const stillThere = await prisma.cartItem.findMany({
 				where: { buyerId: buyer.session.user.id },
 				select: { listingId: true },
 			});
-			expect(remaining.map((r) => r.listingId)).toEqual([
-				otherSeller.listing.id,
-			]);
+			expect(stillThere.map((r) => r.listingId).sort()).toEqual(
+				[sellerA.listing.id, sellerB.listing.id].sort(),
+			);
 		});
 
 		it("keeps cart intact when claim fails before Tx A (unknown paymentMethodId)", async () => {
@@ -366,8 +367,6 @@ describe("POST /checkout/claim", () => {
 
 			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
 
-			// Bogus paymentMethodId trips PAYMENT_METHOD_NOT_FOUND, which fires
-			// before Tx A — cart must be untouched.
 			const response = await postClaim(buyer.api, {
 				quoteId,
 				paymentMethodId: "pm-does-not-exist",
@@ -382,7 +381,7 @@ describe("POST /checkout/claim", () => {
 			expect(stillThere.map((r) => r.listingId)).toEqual([seller.listing.id]);
 		});
 
-		it("clears the cart even when Stripe PI creation fails after Tx A — buyer recovers via replay", async () => {
+		it("keeps cart intact when Stripe PI creation fails after Tx A — buyer's cart survives the failure", async () => {
 			const mockPayments = getMockPayments();
 			const seller = await setupSellerWithListing({ price: 50 });
 			const buyer = await setupReadyBuyer();
@@ -390,7 +389,7 @@ describe("POST /checkout/claim", () => {
 			await buyer.api.post("/cart", { listingId: seller.listing.id });
 
 			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
-			const idempotencyKey = uniqueIdempotencyKey("cart-clear-pi-fail");
+			const idempotencyKey = uniqueIdempotencyKey("cart-keep-pi-fail");
 
 			mockPayments._failNextCheckoutPaymentIntent({
 				success: false,
@@ -405,12 +404,14 @@ describe("POST /checkout/claim", () => {
 			});
 			expect(first.statusCode).toBe(500);
 
-			// Order materialized → cart row removed in the same Tx A. Matches the
-			// Shopify pattern: cart clears at order placement, not at payment.
+			// Orders exist (Tx A committed) but no money moved — cart must
+			// stay so a refresh doesn't show an empty cart while the PI is
+			// in limbo. The webhook is what eventually clears it.
 			const afterFail = await prisma.cartItem.findMany({
 				where: { buyerId: buyer.session.user.id },
+				select: { listingId: true },
 			});
-			expect(afterFail).toHaveLength(0);
+			expect(afterFail.map((r) => r.listingId)).toEqual([seller.listing.id]);
 		});
 	});
 
@@ -947,6 +948,60 @@ describe("POST /checkout/claim", () => {
 				},
 			});
 			expect(orders).toHaveLength(1);
+		});
+
+		it("replay path A — re-attaches the saved card when the PI is in requires_payment_method (post-decline retry)", async () => {
+			// After a card decline, Stripe transitions the PI to
+			// `requires_payment_method` and clears the PM slot. Without
+			// re-attaching, the next stripe.confirmPayment hits Stripe with no
+			// PM and surfaces a generic processing-error. Replay must put the
+			// saved card back so the retry actually attempts a charge.
+			const mockPayments = getMockPayments();
+			const seller = await setupSellerWithListing();
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const idempotencyKey = uniqueIdempotencyKey("replay-a-reattach");
+
+			const first = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey,
+			});
+			const firstBody = await assertResponse<{
+				orderIds: string[];
+				clientSecret: string;
+				paymentIntentId: string;
+			}>(first, 200);
+
+			mockPayments._setPaymentIntentStatus(
+				firstBody.paymentIntentId,
+				"requires_payment_method",
+			);
+
+			const retry = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey,
+			});
+			const retryBody = await assertResponse<{
+				orderIds: string[];
+				clientSecret: string;
+				paymentIntentId: string;
+			}>(retry, 200);
+
+			expect(retryBody.paymentIntentId).toBe(firstBody.paymentIntentId);
+			expect(retryBody.orderIds).toEqual(firstBody.orderIds);
+
+			const updateCalls = mockPayments._getOperationsOfType(
+				"customer.updatePaymentIntent",
+			);
+			expect(updateCalls).toHaveLength(1);
+			expect(updateCalls[0]?.params).toMatchObject({
+				paymentIntentId: firstBody.paymentIntentId,
+			});
+
+			const piAfter = mockPayments._getPaymentIntent(firstBody.paymentIntentId);
+			expect(piAfter?.status).toBe("requires_confirmation");
 		});
 
 		it("replay path A — returns 410 when the linked PaymentIntent is canceled", async () => {

@@ -102,6 +102,16 @@ export async function paymentIntentSucceeded(
 				},
 			});
 
+			const buyerIdForCart = orders[0]?.buyerId;
+			if (buyerIdForCart) {
+				await tx.cartItem.deleteMany({
+					where: {
+						buyerId: buyerIdForCart,
+						listingId: { in: listingIds },
+					},
+				});
+			}
+
 			const flipped = await tx.listing.updateMany({
 				where: {
 					reservedByOrderId: { in: orderIds },
