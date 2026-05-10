@@ -9,9 +9,16 @@ import {
 	OrderStatus,
 	PaymentStatus,
 	PayoutStatus,
+	Prisma,
 } from "@nolie/db";
 import type { NoLieJob } from "@nolie/queues/types";
 import type { webhooksStripeQueue } from "@nolie/queues/webhooks-stripe";
+import {
+	getLetterPreset,
+	getPreset,
+	LETTER_PLACEHOLDER_PARCEL_DIMS,
+	LETTER_SERVICE_CODE,
+} from "@nolie/shipping/presets";
 import type Stripe from "stripe";
 import { workerTx } from "../../../db/tx.js";
 import {
@@ -158,8 +165,61 @@ export async function paymentIntentSucceeded(
 				skipDuplicates: true,
 			});
 
+			// NL-253: build all ShippingLabel rows up front, then one
+			// createMany. Decision lives on Order.shippingPresetKey
+			// (resolved by checkout/claim):
+			//  - letter preset key  → EasyPost FCML; placeholder dims; on-wire
+			//                         weight computed at label-purchase time
+			//                         from line-item count via
+			//                         `letterWeightOzForCardCount`.
+			//  - parcel preset key  → Shippo, dims looked up from PACKAGE_PRESETS
+			//                         (this is the auto-upgrade path; the listings
+			//                         themselves carry no parcel dims because they
+			//                         were created as letter listings).
+			//  - null               → Shippo, dims from `computeBundleDims` on
+			//                         per-listing parcel dims (default parcel rail).
+			const labelRows: Prisma.ShippingLabelCreateManyInput[] = [];
 			for (const order of orders) {
 				if (order.fulfillmentMode !== FulfillmentMode.shipping) continue;
+
+				const presetKey = order.shippingPresetKey;
+				const letterPreset =
+					presetKey != null ? getLetterPreset(presetKey) : undefined;
+				const parcelPreset =
+					presetKey != null && letterPreset == null
+						? getPreset(presetKey)
+						: undefined;
+
+				if (letterPreset) {
+					labelRows.push({
+						orderId: order.id,
+						provider: "easypost",
+						serviceCode: LETTER_SERVICE_CODE,
+						weightLbs: new Prisma.Decimal(
+							LETTER_PLACEHOLDER_PARCEL_DIMS.weightLbs,
+						),
+						lengthIn: new Prisma.Decimal(
+							LETTER_PLACEHOLDER_PARCEL_DIMS.lengthIn,
+						),
+						widthIn: new Prisma.Decimal(LETTER_PLACEHOLDER_PARCEL_DIMS.widthIn),
+						heightIn: new Prisma.Decimal(
+							LETTER_PLACEHOLDER_PARCEL_DIMS.heightIn,
+						),
+					});
+					continue;
+				}
+
+				if (parcelPreset) {
+					labelRows.push({
+						orderId: order.id,
+						weightLbs: new Prisma.Decimal(parcelPreset.weightLbs),
+						lengthIn: new Prisma.Decimal(parcelPreset.lengthIn),
+						widthIn: new Prisma.Decimal(parcelPreset.widthIn),
+						heightIn: new Prisma.Decimal(parcelPreset.heightIn),
+					});
+					continue;
+				}
+
 				const dims = computeBundleDims(order.lineItems);
 				if (!dims) {
 					ctx.logger.warn(
@@ -168,15 +228,16 @@ export async function paymentIntentSucceeded(
 					);
 					continue;
 				}
-				await tx.shippingLabel.create({
-					data: {
-						orderId: order.id,
-						weightLbs: dims.weightLbs,
-						lengthIn: dims.lengthIn,
-						widthIn: dims.widthIn,
-						heightIn: dims.heightIn,
-					},
+				labelRows.push({
+					orderId: order.id,
+					weightLbs: dims.weightLbs,
+					lengthIn: dims.lengthIn,
+					widthIn: dims.widthIn,
+					heightIn: dims.heightIn,
 				});
+			}
+			if (labelRows.length > 0) {
+				await tx.shippingLabel.createMany({ data: labelRows });
 			}
 		});
 	} catch (err) {
