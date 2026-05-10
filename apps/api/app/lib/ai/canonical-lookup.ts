@@ -65,9 +65,9 @@ function trimLeadingZeros(num: string): string {
 
 // Render the card number with its printed denominator when we have one. We use
 // `cardCount.official` because that's the number printed on the card face
-// (e.g. "199/165") even for cards numbered beyond it like Special Illustration
-// Rares. Skip the denominator for alphanumeric promo IDs ("SWSH001",
-// "SM-P 045") where there is no printed denominator on the card.
+// (e.g. "199/165") — even for cards numbered beyond it like Special
+// Illustration Rares. Skip the denominator for alphanumeric promo IDs
+// ("SWSH001", "SM-P 045") where there is no printed denominator on the card.
 function formatCardNumber(detail: TcgdexCardDetail): string {
 	const official = detail.set.cardCount?.official;
 	if (!official || official <= 0) return detail.localId;
