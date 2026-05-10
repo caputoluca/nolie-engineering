@@ -35,14 +35,44 @@ interface TcgdexCardDetail {
 	localId: string;
 	image?: string;
 	rarity?: string;
-	set: { id: string; name: string };
+	set: {
+		id: string;
+		name: string;
+		cardCount?: { official?: number; total?: number };
+	};
 }
 
 const TCGDEX_API = "https://api.tcgdex.net/v2";
 const LOOKUP_TIMEOUT_MS = 4000;
 
+// Map our extractor's language enum to TCGdex's path segment. Our enum carries
+// only `ZH` (we can't tell simplified vs traditional from a photo); `zh-tw` has
+// broader Pokemon TCG coverage on TCGdex than `zh-cn`, so default there. OTHER
+// and UNKNOWN fall back to `en` — most cards are English; on a miss the lookup
+// returns null and we drop to the unverified path.
+const TCGDEX_LANG_BY_ENUM: Record<string, string> = {
+	EN: "en",
+	JA: "ja",
+	KO: "ko",
+	ZH: "zh-tw",
+	OTHER: "en",
+	UNKNOWN: "en",
+};
+
 function trimLeadingZeros(num: string): string {
 	return num.replace(/^0+/, "") || "0";
+}
+
+// Render the card number with its printed denominator when we have one.
+// `cardCount.official` is the number printed on the card face (e.g. "199/165")
+// — even for cards numbered beyond it like Special Illustration Rares. Skip
+// the denominator for alphanumeric promo IDs ("SWSH001", "SM-P 045") where
+// there is no printed denominator on the card.
+function formatCardNumber(detail: TcgdexCardDetail): string {
+	const official = detail.set.cardCount?.official;
+	if (!official || official <= 0) return detail.localId;
+	if (!/^\d+$/.test(detail.localId)) return detail.localId;
+	return `${detail.localId}/${official}`;
 }
 
 // TAG cert format is published on their cert-search page: one letter then
@@ -87,7 +117,7 @@ async function searchTcgdex(
 	if (!numerator) return null;
 
 	const trimmed = trimLeadingZeros(numerator);
-	const lang = language === "JP" ? "ja" : "en";
+	const lang = (language && TCGDEX_LANG_BY_ENUM[language]) ?? "en";
 	const searchUrl = `${TCGDEX_API}/${lang}/cards?name=${encodeURIComponent(name)}`;
 
 	const searchRes = await fetch(searchUrl, {
@@ -165,14 +195,14 @@ async function lookupCanonicalInner(
 			record: {
 				kind: "raw_sports",
 				year: nz(f.year),
-				setName: nz(f.setName),
+				setName: null,
 				subject: nz(f.player),
 				cardNumber: nz(f.cardNumber),
 				grader: null,
 				grade: null,
 				certNumber: null,
 				rarity: null,
-				parallel: nz(f.parallel),
+				parallel: null,
 				language: null,
 			},
 			canonical: { imageUrl: null, source: "ai_guess" },
@@ -199,17 +229,21 @@ async function lookupCanonicalInner(
 	}
 
 	const f = facts.fields;
+	// Unverified path: TCGdex didn't confirm this card. Drop every field a buyer
+	// could be misled by — set, number, rarity. The writer short-circuits to
+	// empty copy on source=ai_guess for raw_*, so this record is essentially a
+	// signal to the seller to write their own.
 	const fallback: CanonicalLookupResult = {
 		record: {
 			kind: "raw_pokemon",
 			year: f.year,
-			setName: f.setHint,
+			setName: null,
 			subject: f.name,
-			cardNumber: f.cardNumber,
+			cardNumber: null,
 			grader: null,
 			grade: null,
 			certNumber: null,
-			rarity: f.apparentRarity,
+			rarity: null,
 			parallel: null,
 			language: f.language,
 		},
@@ -228,13 +262,13 @@ async function lookupCanonicalInner(
 			record: {
 				kind: "raw_pokemon",
 				year: f.year,
-				setName: match.set.name ?? f.setHint,
+				setName: match.set.name,
 				subject: match.name,
-				cardNumber: match.localId,
+				cardNumber: formatCardNumber(match),
 				grader: null,
 				grade: null,
 				certNumber: null,
-				rarity: match.rarity ?? f.apparentRarity,
+				rarity: match.rarity ?? null,
 				parallel: null,
 				language: f.language,
 			},
