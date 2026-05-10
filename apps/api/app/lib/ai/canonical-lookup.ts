@@ -41,6 +41,20 @@ interface TcgdexCardDetail {
 const TCGDEX_API = "https://api.tcgdex.net/v2";
 const LOOKUP_TIMEOUT_MS = 4000;
 
+// Map our extractor's language enum to TCGdex's path segment. Our enum carries
+// only `ZH` (we can't tell simplified vs traditional from a photo); `zh-tw` has
+// broader Pokemon TCG coverage on TCGdex than `zh-cn`, so default there. OTHER
+// and UNKNOWN fall back to `en` — most cards are English; on a miss the lookup
+// returns null and we drop to the unverified path.
+const TCGDEX_LANG_BY_ENUM: Record<string, string> = {
+	EN: "en",
+	JA: "ja",
+	KO: "ko",
+	ZH: "zh-tw",
+	OTHER: "en",
+	UNKNOWN: "en",
+};
+
 function trimLeadingZeros(num: string): string {
 	return num.replace(/^0+/, "") || "0";
 }
@@ -87,7 +101,7 @@ async function searchTcgdex(
 	if (!numerator) return null;
 
 	const trimmed = trimLeadingZeros(numerator);
-	const lang = language === "JP" ? "ja" : "en";
+	const lang = (language && TCGDEX_LANG_BY_ENUM[language]) ?? "en";
 	const searchUrl = `${TCGDEX_API}/${lang}/cards?name=${encodeURIComponent(name)}`;
 
 	const searchRes = await fetch(searchUrl, {
@@ -165,14 +179,14 @@ async function lookupCanonicalInner(
 			record: {
 				kind: "raw_sports",
 				year: nz(f.year),
-				setName: nz(f.setName),
+				setName: null,
 				subject: nz(f.player),
 				cardNumber: nz(f.cardNumber),
 				grader: null,
 				grade: null,
 				certNumber: null,
 				rarity: null,
-				parallel: nz(f.parallel),
+				parallel: null,
 				language: null,
 			},
 			canonical: { imageUrl: null, source: "ai_guess" },
@@ -199,17 +213,21 @@ async function lookupCanonicalInner(
 	}
 
 	const f = facts.fields;
+	// Unverified path: TCGdex didn't confirm this card. Drop every field a buyer
+	// could be misled by — set, number, rarity. The writer short-circuits to
+	// empty copy on source=ai_guess for raw_*, so this record is essentially a
+	// signal to the seller to write their own.
 	const fallback: CanonicalLookupResult = {
 		record: {
 			kind: "raw_pokemon",
 			year: f.year,
-			setName: f.setHint,
+			setName: null,
 			subject: f.name,
-			cardNumber: f.cardNumber,
+			cardNumber: null,
 			grader: null,
 			grade: null,
 			certNumber: null,
-			rarity: f.apparentRarity,
+			rarity: null,
 			parallel: null,
 			language: f.language,
 		},
@@ -228,13 +246,13 @@ async function lookupCanonicalInner(
 			record: {
 				kind: "raw_pokemon",
 				year: f.year,
-				setName: match.set.name ?? f.setHint,
+				setName: match.set.name,
 				subject: match.name,
 				cardNumber: match.localId,
 				grader: null,
 				grade: null,
 				certNumber: null,
-				rarity: match.rarity ?? f.apparentRarity,
+				rarity: match.rarity ?? null,
 				parallel: null,
 				language: f.language,
 			},

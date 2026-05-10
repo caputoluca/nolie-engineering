@@ -9,7 +9,12 @@ import dedent from "dedent";
 import { logger } from "../../logger.js";
 import type { AIClient } from "../../plugins/ai.js";
 import { setReportingContext } from "../observability/sentry/report.js";
-import type { CanonicalRecord } from "./canonical-lookup.js";
+import type {
+	CanonicalLookupResult,
+	CanonicalRecord,
+} from "./canonical-lookup.js";
+
+type CanonicalSource = CanonicalLookupResult["canonical"]["source"];
 
 const MODEL = "claude-haiku-4-5-20251001";
 
@@ -31,6 +36,11 @@ function buildPrompt(record: CanonicalRecord): string {
 	You are given a CANONICAL CARD RECORD. The record is authoritative — trust it. Do NOT invent any fact not present in the record. If a field is null or empty, omit it. Never substitute or guess.
 
 	Render \`cardNumber\` exactly as it appears in the record. If the record has "005", write "005" — do NOT add a denominator like "/028" even if you happen to know the set's print run. If the record has "005/028", keep it as "005/028".
+
+	RARITY HANDLING (strict):
+	- The \`rarity\` field, when present, comes from a verified database. Use it verbatim. You may normalize casing (e.g. "Special illustration rare" → "Special Illustration Rare") but do not substitute synonyms, expand abbreviations, or swap in a different variant name.
+	- If \`rarity\` is null, do NOT name a variant. Do not write "Holo", "Reverse Holo", "Secret Rare", or any other variant descriptor that isn't in the record. The photo will speak.
+	- If \`rarity\` is one of "Common", "Uncommon", "Rare", or "None", treat it as "no notable variant" and do NOT mention rarity at all — these tiers aren't worth calling out in prose.
 
 	HARD LIMITS (not aspirational — enforced):
 	- Title: ≤ ${TITLE_MAX_LENGTH} characters.
@@ -72,7 +82,8 @@ function buildPrompt(record: CanonicalRecord): string {
 
 	If kind = "raw_pokemon":
 	- Lead with name + card number + set + year.
-	- Identify the variant clearly using the rarity field if present (Holo, Reverse Holo, Full Art, Alt Art, Illustration Rare, Special Illustration Rare, Secret Rare). For pre-2000 WOTC cards, include print run if it can be inferred from the year/set (1st Edition, Shadowless, or Unlimited).
+	- Name the variant only when rarity is present and notable (per RARITY HANDLING above). Use the rarity string from the record verbatim (casing normalized). Do not infer a variant from the name or set.
+	- Do NOT guess print run for pre-2000 WOTC cards (1st Edition, Shadowless, Unlimited) — the record does not carry this and you cannot tell from the data.
 	- If language is non-English AND not already in the set name, mention it once as a bare adjective; otherwise skip.
 	- Do NOT invent specific defects, centering, or surface notes — you have not seen the card. A general phrase like "Pack-fresh and sleeved" is OK only if you have no reason to doubt it; otherwise omit condition entirely and let the photo speak.
 	- End with "See photos for exact condition."
@@ -106,13 +117,13 @@ function buildPrompt(record: CanonicalRecord): string {
 	EXAMPLES (study the voice; do not copy verbatim):
 
 	slab, Pokemon, Japanese:
-	"Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10, Cert #84512309. A holo from the set commemorating Pokemon's 25th anniversary."
+	"Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10, Cert #84512309. Released for Pokemon's 25th anniversary."
 
 	slab, Pokemon, vintage:
-	"1999 Base Set Charizard 4/102, Unlimited holo. PSA 8, Cert #67223451. The defining card of the original WOTC release."
+	"1999 Base Set Charizard 4/102. PSA 8, Cert #67223451. The defining card of the original WOTC release."
 
 	slab, sports, modern RC:
-	"2018 Panini Prizm Luka Doncic #280, Silver Prizm rookie. PSA 10, Cert #71994023. Key rookie card of the 2018-19 Prizm class."
+	"2018 Panini Prizm Luka Doncic #280 rookie. PSA 10, Cert #71994023. Key rookie card of the 2018-19 Prizm class."
 
 	raw Pokemon, modern:
 	"Charizard ex 199/165 Special Illustration Rare from Scarlet & Violet 151 (2023). Sleeved since the pull. See photos for exact condition."
@@ -131,7 +142,7 @@ function buildPrompt(record: CanonicalRecord): string {
 	<language_handling_examples>
 		<case>Set name already conveys the language.</case>
 		<bad>Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10. Japanese language card commemorating the anniversary.</bad>
-		<good>Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10, Cert #84512309. A holo from the set commemorating Pokemon's 25th anniversary.</good>
+		<good>Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10, Cert #84512309. Released for Pokemon's 25th anniversary.</good>
 	</language_handling_examples>
 
 	<language_handling_examples>
@@ -150,8 +161,22 @@ function buildPrompt(record: CanonicalRecord): string {
 export async function generateListingCopy(
 	ai: AIClient,
 	record: CanonicalRecord,
+	source: CanonicalSource,
 ): Promise<{ title: string; description: string }> {
-	logger.debug({ record }, "[ai-listing] copy: start");
+	logger.debug({ record, source }, "[ai-listing] copy: start");
+
+	// Raw cards without a TCGdex match have unverifiable set/number/rarity. We
+	// will not stitch half-known facts into prose — let the seller write their
+	// own. (Slabs use label OCR, which has independent verifiability via cert.)
+	const isRaw = record.kind === "raw_pokemon" || record.kind === "raw_sports";
+	if (isRaw && source !== "tcgdex") {
+		logger.debug(
+			{ kind: record.kind, source },
+			"[ai-listing] copy: unverified raw card, returning empty",
+		);
+		return { title: "", description: "" };
+	}
+
 	const startedAt = Date.now();
 	try {
 		const response = await ai.claude.messages.parse({
