@@ -96,6 +96,8 @@ const API_SECRETS = [
 	"NOLIE_RATE_LIMITING_ENABLED",
 	"SHIPPO_WEBHOOK_SECRET",
 	"SHIPPO_API_TOKEN",
+	"EASYPOST_API_KEY",
+	"EASYPOST_WEBHOOK_SECRET",
 	"INTERNAL_API_SECRET",
 	// PORT is set in environment array
 ];
@@ -126,6 +128,7 @@ const WORKER_SECRETS = [
 	"SLACK_BOT_TOKEN",
 	"SLACK_CHANNEL_ID",
 	"SHIPPO_API_TOKEN",
+	"EASYPOST_API_KEY",
 ];
 
 // =============================================================================
