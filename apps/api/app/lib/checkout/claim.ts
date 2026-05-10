@@ -292,6 +292,7 @@ export async function claimCheckout(
 			orderId: randomUUID(),
 			sellerProfileId: g.sellerProfileId,
 			fulfillmentMode: g.fulfillmentMode,
+			shippingPresetKey: g.shippingPresetKey,
 			listings: g.listingIds
 				.map((id) => listingsById.get(id))
 				.filter((l): l is CheckoutListing => l !== undefined),

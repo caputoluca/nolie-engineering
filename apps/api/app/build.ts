@@ -49,6 +49,7 @@ import { sitemapRoutes } from "./routes/sitemap.js";
 import { stripeRoutes } from "./routes/stripe.js";
 import { uploadsRoutes } from "./routes/uploads.js";
 import { usersRoutes } from "./routes/users.js";
+import { easypostWebhookRoutes } from "./routes/webhooks/easypost.js";
 
 const REQUEST_TIMEOUT = 20_000; // 20 seconds
 
@@ -172,6 +173,9 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(cartRoutes, { prefix: "/cart" });
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
 	await fastify.register(shippingRoutes, { prefix: "/shipping" });
+	await fastify.register(easypostWebhookRoutes, {
+		prefix: "/shipping/easypost",
+	});
 	await fastify.register(moderationRoutes, { prefix: "/moderations" });
 	await fastify.register(sitemapRoutes, { prefix: "/sitemap" });
 	await fastify.register(exploreRoutes, { prefix: "/explore" });

@@ -49,6 +49,10 @@ export interface MaterializationGroup {
 	sellerProfileId: string;
 	fulfillmentMode: FulfillmentMethodType;
 	listings: CheckoutListing[];
+	/** NL-253: rail decision resolved by `computeCheckoutTotals` for this group.
+	 *  Letter preset key → letter rail; parcel preset key (set on auto-upgrade)
+	 *  → parcel rail with that preset's dims at label time; null → default. */
+	shippingPresetKey: string | null;
 }
 
 interface MaterializeInput {
@@ -225,6 +229,7 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			idempotencyKey: input.idempotencyKey,
 			idempotencyPayloadHash: input.idempotencyPayloadHash,
 			fulfillmentMode: group.fulfillmentMode,
+			shippingPresetKey: group.shippingPresetKey,
 			subtotalCents,
 			shippingCents,
 			taxCents,
