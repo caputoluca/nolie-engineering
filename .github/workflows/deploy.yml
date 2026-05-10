@@ -220,6 +220,10 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
+      - name: Set Pulumi default org
+        working-directory: infra/pulumi
+        run: pulumi org set-default ${{ vars.PULUMI_ORG }}
+
       - name: Get current image tags from Pulumi
         id: current-tags
         working-directory: infra/pulumi
