@@ -221,15 +221,11 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
-      - name: Set Pulumi default org
-        working-directory: infra/pulumi
-        run: pulumi org set-default ${{ vars.PULUMI_ORG }}
-
       - name: Get current image tags from Pulumi
         id: current-tags
         working-directory: infra/pulumi
         run: |
-          pulumi stack select ${{ github.ref_name == 'main' && 'prod' || 'staging' }}
+          pulumi stack select ${{ vars.PULUMI_ORG }}/nolie/${{ github.ref_name == 'main' && 'prod' || 'staging' }}
           echo "api=$(pulumi stack output currentApiImageTag 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
           echo "worker=$(pulumi stack output currentWorkerImageTag 2>/dev/null || echo '')" >> $GITHUB_OUTPUT
 
@@ -253,7 +249,7 @@ jobs:
         uses: pulumi/actions@v6
         with:
           command: up
-          stack-name: ${{ github.ref_name == 'main' && 'prod' || 'staging' }}
+          stack-name: ${{ vars.PULUMI_ORG }}/nolie/${{ github.ref_name == 'main' && 'prod' || 'staging' }}
           work-dir: infra/pulumi
         env:
           API_IMAGE_TAG: ${{ steps.tags.outputs.api }}
