@@ -1473,4 +1473,164 @@ describe("POST /checkout/claim", () => {
 			expect(order.shippingCents).toBe(500);
 		});
 	});
+
+	describe("signature + carrier service bundle resolution", () => {
+		// The bundle resolver lives in compute-totals' `deriveBundleServiceAndSignature`
+		// and runs at every quote + claim. These tests pin the four invariants
+		// that the seller-facing UI assumes:
+		//   - bundle subtotal ≥ $500 → signature required (catches cart-bundled cases)
+		//   - per-line flag → bundle requires signature (OR rule)
+		//   - bundle service = max-cost line's service (matches `allocateBundleShipping`)
+		//   - pickup groups never auto-flip signature
+
+		it("auto-requires signature on a bundle whose subtotal hits $500 even when no line was individually flagged", async () => {
+			// The cart-bundled case the per-listing rule alone would miss.
+			// Two sub-threshold BIN listings combine into a $600 bundle that
+			// the buyer is committed to — same protection trigger applies as
+			// a single $600 BIN.
+			const seller = await setupSellerWithListing({
+				price: 300,
+				itemType: "physical",
+				shippingCostCents: 500,
+			});
+			const secondListing = await createFixedPriceListingForSeller(
+				seller.sellerProfileId,
+				{ price: 300, itemType: "physical" },
+			);
+			await prisma.listing.update({
+				where: { id: secondListing.id },
+				data: { shippingCostCents: 500 },
+			});
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				secondListing.id,
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("sig-subtotal"),
+			});
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+			});
+			expect(order.signatureRequired).toBe(true);
+		});
+
+		it("propagates a per-line signature flag onto the bundle (OR rule)", async () => {
+			// Even a sub-threshold bundle requires signature if any line was
+			// flagged at listing creation. Catches the seller-opt-in path
+			// surviving through compute-totals → claim → Order.
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 500,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { signatureRequired: true },
+			});
+			const secondListing = await createFixedPriceListingForSeller(
+				seller.sellerProfileId,
+				{ price: 50, itemType: "physical" },
+			);
+			await prisma.listing.update({
+				where: { id: secondListing.id },
+				data: { shippingCostCents: 500 },
+			});
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				secondListing.id,
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("sig-perline-or"),
+			});
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+			});
+			expect(order.signatureRequired).toBe(true);
+		});
+
+		it("snapshots the bundle's shippingServiceKey from the line that owns the package (max shippingCents)", async () => {
+			// The owner-line tiebreak must match `allocateBundleShipping` so
+			// the seller buys the same service that drove the buyer's quoted
+			// cost. A regression that picked, say, the first line would
+			// silently buy a cheaper-service label and leave us absorbing
+			// the cost diff if the cheaper line wasn't the priciest.
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 400,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { shippingServiceKey: "usps_ground" },
+			});
+			const owner = await createFixedPriceListingForSeller(
+				seller.sellerProfileId,
+				{ price: 50, itemType: "physical" },
+			);
+			await prisma.listing.update({
+				where: { id: owner.id },
+				data: {
+					shippingCostCents: 1200, // higher → owns the package
+					shippingServiceKey: "usps_priority",
+				},
+			});
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				owner.id,
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("sig-owner-service"),
+			});
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+			});
+			expect(order.shippingServiceKey).toBe("usps_priority");
+		});
+
+		it("never auto-requires signature on a pickup-only bundle regardless of subtotal", async () => {
+			// Pickup has no carrier leg, so the surcharge would be money for
+			// nothing. The bypass must stay even if the subtotal would have
+			// triggered for a shipping bundle.
+			const seller = await setupSellerWithListing({
+				price: 600,
+				itemType: "physical",
+				fulfillmentMode: "pickup",
+			});
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id], {
+				fulfillment: { [seller.listing.id]: "pickup" },
+			});
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("sig-pickup-bypass"),
+			});
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+			});
+			expect(order.signatureRequired).toBe(false);
+			expect(order.shippingServiceKey).toBeNull();
+		});
+	});
 });
