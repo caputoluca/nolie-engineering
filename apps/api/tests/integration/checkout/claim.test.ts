@@ -1478,24 +1478,24 @@ describe("POST /checkout/claim", () => {
 		// The bundle resolver lives in compute-totals' `deriveBundleServiceAndSignature`
 		// and runs at every quote + claim. These tests pin the four invariants
 		// that the seller-facing UI assumes:
-		//   - bundle subtotal ≥ $500 → signature required (catches cart-bundled cases)
+		//   - bundle subtotal ≥ $1,000 → signature required (catches cart-bundled cases)
 		//   - per-line flag → bundle requires signature (OR rule)
 		//   - bundle service = max-cost line's service (matches `allocateBundleShipping`)
 		//   - pickup groups never auto-flip signature
 
-		it("auto-requires signature on a bundle whose subtotal hits $500 even when no line was individually flagged", async () => {
+		it("auto-requires signature on a bundle whose subtotal hits $1,000 even when no line was individually flagged", async () => {
 			// The cart-bundled case the per-listing rule alone would miss.
-			// Two sub-threshold BIN listings combine into a $600 bundle that
+			// Two sub-threshold BIN listings combine into a $1,200 bundle that
 			// the buyer is committed to — same protection trigger applies as
-			// a single $600 BIN.
+			// a single $1,200 BIN.
 			const seller = await setupSellerWithListing({
-				price: 300,
+				price: 600,
 				itemType: "physical",
 				shippingCostCents: 500,
 			});
 			const secondListing = await createFixedPriceListingForSeller(
 				seller.sellerProfileId,
-				{ price: 300, itemType: "physical" },
+				{ price: 600, itemType: "physical" },
 			);
 			await prisma.listing.update({
 				where: { id: secondListing.id },
@@ -1610,7 +1610,7 @@ describe("POST /checkout/claim", () => {
 			// nothing. The bypass must stay even if the subtotal would have
 			// triggered for a shipping bundle.
 			const seller = await setupSellerWithListing({
-				price: 600,
+				price: 1200,
 				itemType: "physical",
 				fulfillmentMode: "pickup",
 			});
