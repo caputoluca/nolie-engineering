@@ -327,6 +327,68 @@ describe("Payout Release", () => {
 			expect(transfers[1]?.amountCents).toBe(lineB.netCents);
 		});
 
+		it("pays seller in full when a line's dispute resolves as platform_absorb", async () => {
+			// Production shape after admin chose PLATFORM_ABSORB:
+			//   • createRefund ran with platformAbsorbs=true → bumped both
+			//     EarningLine.refundedNetCents AND .platformAbsorbedNetCents
+			//   • Dispute flipped to DisputeStatus.absorbed
+			//   • Release re-queued
+			// The release math (netCents − refundedNetCents + platformAbsorbedNetCents)
+			// must net out to the full netCents so the seller is paid in full
+			// even though the buyer was refunded.
+			const { earning, orderLineItem, order, seller, winner } =
+				await createPendingPayout();
+			const { ctx, mocks } = createTestPayoutsContext();
+
+			const line = await prisma.earningLine.findUniqueOrThrow({
+				where: { orderLineItemId: orderLineItem.id },
+			});
+
+			await prisma.earningLine.update({
+				where: { id: line.id },
+				data: {
+					refundedNetCents: line.netCents,
+					platformAbsorbedNetCents: line.netCents,
+				},
+			});
+			await prisma.fulfillmentDispute.create({
+				data: {
+					orderLineItemId: orderLineItem.id,
+					userId: winner.id,
+					issueType: DisputeIssueType.not_received,
+					status: DisputeStatus.absorbed,
+					resolvedAt: new Date(),
+				},
+			});
+
+			await release(createMockJob({ earningId: earning.id }), ctx);
+
+			// Seller paid the full net — absorbed credit cancelled the refund debit.
+			assertSellerPaid(mocks, {
+				sellerConnectAccountId: seller.connectAccountId as string,
+				amount: earning.netAmount / 100,
+			});
+
+			const transfers = await prisma.payoutTransfer.findMany({
+				where: { sellerProfileId: earning.sellerProfileId },
+			});
+			expect(transfers).toHaveLength(1);
+			expect(transfers[0]?.amountCents).toBe(earning.netAmount);
+
+			const updatedLine = await prisma.earningLine.findUniqueOrThrow({
+				where: { id: line.id },
+			});
+			expect(updatedLine.paidAt).not.toBeNull();
+			expect(updatedLine.payoutTransferId).toBe(transfers[0]?.id);
+			// Counters remain — they're the audit record, not a release latch.
+			expect(updatedLine.refundedNetCents).toBe(line.netCents);
+			expect(updatedLine.platformAbsorbedNetCents).toBe(line.netCents);
+
+			assertNotificationQueued(mocks, "payoutProcessed", {
+				orderId: order.id,
+			});
+		});
+
 		it("Earning.netAmount equals sum(EarningLine.netCents)", async () => {
 			const { earning, lineA, lineB } = await createTwoLineEarning({});
 

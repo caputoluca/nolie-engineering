@@ -72,6 +72,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 					id: true,
 					netCents: true,
 					refundedNetCents: true,
+					platformAbsorbedNetCents: true,
 					paidAt: true,
 					orderLineItem: {
 						select: {

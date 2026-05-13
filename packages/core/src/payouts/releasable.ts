@@ -46,6 +46,13 @@ export interface ReleasableLineInput {
 	id: string;
 	netCents: number;
 	refundedNetCents: number;
+	/**
+	 * Of `refundedNetCents`, how much the platform absorbed (refunds issued
+	 * with `platformAbsorbs=true`). Added back into release math so the
+	 * seller is paid in full on absorbed slices while `refundedNetCents`
+	 * remains the audit-honest "net refunded to buyer" tally.
+	 */
+	platformAbsorbedNetCents: number;
 	paidAt: Date | null;
 	orderLineItem: {
 		fulfillmentDispute: { status: ReleasableDisputeStatus } | null;
@@ -86,7 +93,10 @@ export interface GetReleasableLinesResult {
  *   • Its FulfillmentDispute (if any) is not in `pending` or
  *     `refunded` state — undisputed, or resolved as `released` /
  *     `absorbed` (both unblock payout).
- *   • Its remaining net (netCents − refundedNetCents) is positive.
+ *   • Its remaining net
+ *     (netCents − refundedNetCents + platformAbsorbedNetCents) is positive.
+ *     The absorbed-net term adds back slices the platform ate (buyer was
+ *     refunded but seller is being made whole) so they stay payable.
  *
  * Already-paid lines are skipped silently — re-firing the job after a
  * dispute resolves pays only the lines that still need money.
@@ -117,7 +127,8 @@ export function getReleasableLines(earning: {
 			continue;
 		}
 
-		const remaining = line.netCents - line.refundedNetCents;
+		const remaining =
+			line.netCents - line.refundedNetCents + line.platformAbsorbedNetCents;
 		if (remaining <= 0) continue;
 
 		releasable.push({ earningLineId: line.id, cents: remaining });
