@@ -1,12 +1,8 @@
-import { DisputeStatus, PayoutStatus } from "@nolie/db";
+import { PayoutStatus } from "@nolie/db";
 import type { WorkerContextBase } from "../context.js";
 import { reportError } from "../observability/sentry/report.js";
 
-export type ReleaseOnFulfillmentResult =
-	| "released"
-	| "blocked_by_dispute"
-	| "raced"
-	| "failed";
+export type ReleaseOnFulfillmentResult = "released" | "raced" | "failed";
 
 interface Input {
 	earningId: string;
@@ -36,7 +32,10 @@ type Ctx = Pick<WorkerContextBase, "prisma" | "queues">;
  * **Dispute interaction.** A pending or refunded `FulfillmentDispute`
  * does NOT block the earning transition — `markedAsFulfilledAt`
  * reflects "we believe fulfillment landed", which is true even if the
- * buyer is disputing it. The dispute only blocks the payout enqueue.
+ * buyer is disputing it. Per NL-183, the dispute also does NOT block
+ * the payout enqueue: the release.job is per-line aware and decides
+ * what to actually pay at execution time. Caller-side gating only
+ * duplicates the worker's gate and risks drift.
  *
  * **Rollback.** If the `payout.release` enqueue throws, the earning is
  * rolled back to `requires_action` so a follow-up tick / webhook
@@ -67,31 +66,6 @@ export async function releaseEarningOnFulfillment(
 
 	if (updated.count === 0) {
 		return { result: "raced" };
-	}
-
-	const earning = await ctx.prisma.earning.findUnique({
-		where: { id: earningId },
-		select: {
-			order: {
-				select: {
-					lineItems: {
-						select: {
-							fulfillmentDispute: { select: { id: true, status: true } },
-						},
-					},
-				},
-			},
-		},
-	});
-	const dispute = earning?.order?.lineItems.find(
-		(li) => li.fulfillmentDispute != null,
-	)?.fulfillmentDispute;
-
-	if (
-		dispute?.status === DisputeStatus.pending ||
-		dispute?.status === DisputeStatus.refunded
-	) {
-		return { result: "blocked_by_dispute" };
 	}
 
 	try {
