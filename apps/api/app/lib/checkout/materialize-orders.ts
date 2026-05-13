@@ -53,6 +53,10 @@ export interface MaterializationGroup {
 	 *  Letter preset key → letter rail; parcel preset key (set on auto-upgrade)
 	 *  → parcel rail with that preset's dims at label time; null → default. */
 	shippingPresetKey: string | null;
+	/** Bundle carrier service (max-cost line's service); null on letter rail. */
+	shippingServiceKey: string | null;
+	/** Bundle signature flag (OR'd across line items); false on letter rail. */
+	signatureRequired: boolean;
 }
 
 interface MaterializeInput {
@@ -230,6 +234,8 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			idempotencyPayloadHash: input.idempotencyPayloadHash,
 			fulfillmentMode: group.fulfillmentMode,
 			shippingPresetKey: group.shippingPresetKey,
+			shippingServiceKey: group.shippingServiceKey,
+			signatureRequired: group.signatureRequired,
 			subtotalCents,
 			shippingCents,
 			taxCents,
