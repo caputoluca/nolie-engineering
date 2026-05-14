@@ -1,6 +1,7 @@
 import { getReleasableLines } from "@nolie/core/payouts";
 import {
 	isPrismaRecordNotFoundError,
+	isPrismaUniqueError,
 	PayoutStatus,
 	type Prisma,
 } from "@nolie/db";
@@ -32,6 +33,17 @@ import type { PayoutJob } from "./types.js";
  * worker pod that didn't populate EarningLine, lines.length is 0.
  * We fall back to the legacy single-Transfer path AND insert a
  * PayoutTransfer row so the new webhook handler can still reconcile.
+ *
+ * Concurrency safety (race against double-pay): the PayoutTransfer
+ * INSERT is the lock. A partial unique index on (earningId) WHERE
+ * status='pending' AND stripeTransferId IS NULL enforces "at most
+ * one in-flight pre-Stripe transfer per earning." Two concurrent
+ * workers contend at INSERT — one wins, the other catches P2002
+ * and skips with `inflight_lock_held`. The race window closes the
+ * moment the winner writes stripeTransferId in the success tx
+ * (the row exits the partial index, freeing the slot for a future
+ * partial-release re-fire). Industry pattern: idempotency-key row
+ * as the mutex (Brandur/Stripe/Shopify).
  */
 export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	const { earningId } = job.data;
@@ -274,14 +286,34 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	// idempotency key — one row = one Transfer. Inserted BEFORE the
 	// Stripe call so that if we crash mid-flight, the row exists for
 	// audit and the Stripe idempotency replay returns the same Transfer.
-	const payoutTransfer = await ctx.prisma.payoutTransfer.create({
-		data: {
-			sellerProfileId: earning.sellerProfileId,
-			amountCents,
-			status: "pending",
-		},
-		select: { id: true },
-	});
+	//
+	// `earningId` is the lock: a partial unique index on
+	// (earningId) WHERE status='pending' AND stripeTransferId IS NULL
+	// prevents a second concurrent worker from creating a second
+	// in-flight transfer for this earning. P2002 here means "another
+	// worker is mid-release for this earning right now" — skip cleanly
+	// rather than racing into Stripe with a different idempotency key.
+	let payoutTransfer: { id: string };
+	try {
+		payoutTransfer = await ctx.prisma.payoutTransfer.create({
+			data: {
+				sellerProfileId: earning.sellerProfileId,
+				earningId,
+				amountCents,
+				status: "pending",
+			},
+			select: { id: true },
+		});
+	} catch (err) {
+		if (isPrismaUniqueError(err)) {
+			logger.info(
+				{ earningId, reason: "inflight_lock_held" },
+				"payout.release.skipped",
+			);
+			return;
+		}
+		throw err;
+	}
 
 	logger.info(
 		{

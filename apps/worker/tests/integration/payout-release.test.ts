@@ -509,6 +509,127 @@ describe("Payout Release", () => {
 			expect(mocks.payments._getOperationsOfType("seller.pay")).toHaveLength(0);
 		});
 	});
+
+	// =========================================================================
+	// NL-183: Concurrent execution race. Two release jobs picking up the same
+	// earningId (cross-pod, or same pod with concurrency > 1) must NOT both
+	// call Stripe — that would create two transfers with two different
+	// idempotency keys and double-pay the seller. The partial unique index on
+	// PayoutTransfer(earningId) WHERE status='pending' AND stripeTransferId
+	// IS NULL is the mutex: the loser's INSERT fails with P2002 and exits
+	// with a structured skip log.
+	// =========================================================================
+	describe("concurrent execution race (NL-183)", () => {
+		it("serializes parallel release() calls for the same earning into exactly one Stripe transfer", async () => {
+			// Arrange: a single earning ready for payout. Note that the test
+			// harness's mock recorders (payments, queues) are module-level
+			// singletons reset between tests — both contexts here share the
+			// same underlying recorder, so we assert on either one.
+			const { earning, seller } = await createPendingPayout();
+			const ctxA = createTestPayoutsContext();
+			const ctxB = createTestPayoutsContext();
+
+			// Act: two workers fire concurrently against the same earningId.
+			await Promise.all([
+				release(createMockJob({ earningId: earning.id }), ctxA.ctx),
+				release(createMockJob({ earningId: earning.id }), ctxB.ctx),
+			]);
+
+			// Assert: exactly one Stripe transfer call (the loser caught
+			// P2002 and exited cleanly without reaching Stripe).
+			expect(
+				ctxA.mocks.payments._getOperationsOfType("seller.pay"),
+			).toHaveLength(1);
+
+			// Assert: exactly one PayoutTransfer row exists for this earning.
+			const transfers = await prisma.payoutTransfer.findMany({
+				where: { sellerProfileId: seller.id },
+			});
+			expect(transfers).toHaveLength(1);
+			expect(transfers[0]?.earningId).toBe(earning.id);
+			expect(transfers[0]?.stripeTransferId).toBeTruthy();
+
+			// Assert: every line is paid, linked to that single transfer.
+			const lines = await prisma.earningLine.findMany({
+				where: { earningId: earning.id },
+			});
+			expect(lines.length).toBeGreaterThan(0);
+			expect(lines.every((l) => l.paidAt !== null)).toBe(true);
+			expect(lines.every((l) => l.payoutTransferId === transfers[0]?.id)).toBe(
+				true,
+			);
+
+			// Assert: exactly one payoutProcessed notification queued — the
+			// loser didn't fire one since it didn't transfer.
+			expect(
+				ctxA.mocks.queues._getOperationsByJob(
+					"notifications",
+					"payoutProcessed",
+				),
+			).toHaveLength(1);
+		});
+
+		it("allows a second transfer for the same earning after the first completes (Pattern B partial release)", async () => {
+			// The partial unique index condition is `stripeTransferId IS NULL`,
+			// so once the first transfer's Stripe response is recorded, its row
+			// exits the index — freeing the slot for a subsequent release
+			// after a dispute resolves. This pins that Pattern B isn't broken.
+			//
+			// Arrange: multi-line earning, line B disputed-pending. First
+			// release pays only line A.
+			const { earning, lineB } = await createTwoLineEarning({
+				disputeOn: "B",
+				disputeStatus: DisputeStatus.pending,
+			});
+
+			const ctx = createTestPayoutsContext();
+			await release(createMockJob({ earningId: earning.id }), ctx.ctx);
+
+			// Assert: one transfer for line A, race-window slot now FREE
+			// (stripeTransferId set in the success tx).
+			expect(
+				ctx.mocks.payments._getOperationsOfType("seller.pay"),
+			).toHaveLength(1);
+			const firstTransfers = await prisma.payoutTransfer.findMany({
+				where: { earningId: earning.id },
+			});
+			expect(firstTransfers).toHaveLength(1);
+			expect(firstTransfers[0]?.stripeTransferId).toBeTruthy();
+
+			// Resolve line B's dispute as released → unblocks its payout.
+			await prisma.fulfillmentDispute.update({
+				where: { orderLineItemId: lineB.orderLineItemId },
+				data: { status: DisputeStatus.released },
+			});
+
+			// Act: second release fires. (Module-level mock recorder is shared,
+			// so we re-use the same ctx — fresh ctx wouldn't reset it anyway.)
+			await release(createMockJob({ earningId: earning.id }), ctx.ctx);
+
+			// Assert: second transfer happened. Total Stripe calls is now 2
+			// (one per release fire), proving the unique index didn't block
+			// the second transfer once the first's slot freed.
+			expect(
+				ctx.mocks.payments._getOperationsOfType("seller.pay"),
+			).toHaveLength(2);
+			const allTransfers = await prisma.payoutTransfer.findMany({
+				where: { earningId: earning.id },
+				orderBy: { createdAt: "asc" },
+			});
+			expect(allTransfers).toHaveLength(2);
+			expect(allTransfers[0]?.id).not.toBe(allTransfers[1]?.id);
+			expect(allTransfers[1]?.earningId).toBe(earning.id);
+			expect(allTransfers[1]?.stripeTransferId).toBeTruthy();
+
+			// Assert: both lines are now marked paid, each to its own transfer.
+			const lines = await prisma.earningLine.findMany({
+				where: { earningId: earning.id },
+			});
+			expect(lines.every((l) => l.paidAt !== null)).toBe(true);
+			const distinctTransferIds = new Set(lines.map((l) => l.payoutTransferId));
+			expect(distinctTransferIds.size).toBe(2);
+		});
+	});
 });
 
 // ============================================================================
