@@ -165,6 +165,39 @@ export async function paymentIntentSucceeded(
 				skipDuplicates: true,
 			});
 
+			// NL-183: per-line ledger alongside each Earning. Read back the
+			// just-created Earnings (we can't pre-generate IDs cleanly
+			// because skipDuplicates is keyed on `orderId @unique`; on a
+			// webhook redelivery the existing Earning's id is the
+			// authoritative one). Then createMany the EarningLines —
+			// skipDuplicates on the `orderLineItemId @unique` index makes
+			// redeliveries no-op on already-created lines.
+			const createdEarnings = await tx.earning.findMany({
+				where: { orderId: { in: orderIds } },
+				select: { id: true, orderId: true },
+			});
+			const earningIdByOrderId = new Map(
+				createdEarnings.map((e) => [e.orderId, e.id]),
+			);
+			const earningLineRows = orders.flatMap((order) => {
+				const earningId = earningIdByOrderId.get(order.id);
+				if (!earningId) return [];
+				return order.lineItems.map((li) => ({
+					earningId,
+					orderLineItemId: li.id,
+					grossCents: li.priceCents,
+					platformFeeCents: li.applicationFeeCents,
+					processingFeeCents: li.processingFeeCents,
+					netCents: li.sellerEarningCents,
+				}));
+			});
+			if (earningLineRows.length > 0) {
+				await tx.earningLine.createMany({
+					data: earningLineRows,
+					skipDuplicates: true,
+				});
+			}
+
 			// NL-253: build all ShippingLabel rows up front, then one
 			// createMany. Decision lives on Order.shippingPresetKey
 			// (resolved by checkout/claim):
