@@ -643,11 +643,11 @@ describe("POST /checkout/claim", () => {
 	});
 
 	describe("fee math", () => {
-		it("computes applicationFeeCents per-line from each listing's own platformFeeRate", async () => {
-			// Same seller, two listings with different fee rates. The per-line
-			// fee uses the listing's own rate; the Order aggregate is the sum.
-			// Catches a regression where we'd accidentally apply one rate to
-			// the whole bundle.
+		it("applies the seller's current rate to every line in the bundle", async () => {
+			// NL-203: fees resolve at claim time from SellerProfile, so all
+			// listings under one seller share one rate. The bundle's
+			// applicationFeeCents is the sum of per-line fees, each computed
+			// from the seller's current platformFee.
 			const seller = await setupSellerWithListing({
 				price: 50,
 				itemType: "physical",
@@ -660,10 +660,7 @@ describe("POST /checkout/claim", () => {
 			);
 			await prisma.listing.update({
 				where: { id: second.id },
-				data: {
-					shippingCostCents: 0,
-					platformFeeRate: new Prisma.Decimal(0.1),
-				},
+				data: { shippingCostCents: 0 },
 			});
 			const buyer = await setupReadyBuyer();
 			const quoteId = await createQuoteFor(buyer.api, [
@@ -683,21 +680,89 @@ describe("POST /checkout/claim", () => {
 				include: { lineItems: true },
 			});
 
-			// Per-line fees come from each listing's own rate.
+			// Both lines use the seller's 20% rate.
 			// Processing pass-through temporarily zeroed (see @nolie/config).
 			const line50 = order.lineItems.find((l) => l.priceCents === 5000);
 			const line100 = order.lineItems.find((l) => l.priceCents === 10000);
 			expect(line50?.applicationFeeCents).toBe(1000); // 20% of 5000
 			expect(line50?.processingFeeCents).toBe(0);
 			expect(line50?.sellerEarningCents).toBe(4000); // 5000 - 1000
-			expect(line100?.applicationFeeCents).toBe(1000); // 10% of 10000
+			expect(line100?.applicationFeeCents).toBe(2000); // 20% of 10000
 			expect(line100?.processingFeeCents).toBe(0);
-			expect(line100?.sellerEarningCents).toBe(9000); // 10000 - 1000
+			expect(line100?.sellerEarningCents).toBe(8000); // 10000 - 2000
 
 			// Order aggregate is the sum.
-			expect(order.applicationFeeCents).toBe(2000);
+			expect(order.applicationFeeCents).toBe(3000);
 			expect(order.processingFeeCents).toBe(0);
 			expect(order.subtotalCents).toBe(15000);
+		});
+
+		// =====================================================================
+		// NL-203: Settle-time fee resolution
+		// =====================================================================
+		it("applies the seller's current platformFee at claim time, even if changed after listing creation", async () => {
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 0,
+				platformFeeRate: 0.2,
+			});
+
+			// Admin changes the rate to 5% AFTER the listing exists. Claim must
+			// use 5%, not the 20% snapshotted on the listing.
+			await prisma.sellerProfile.update({
+				where: { id: seller.sellerProfileId },
+				data: { platformFee: new Prisma.Decimal(0.05) },
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("fee-promo"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+			// 5% of 5000 = 250, not 1000 (which would be 20% from the snapshot).
+			expect(order.applicationFeeCents).toBe(250);
+			expect(order.lineItems[0]?.applicationFeeCents).toBe(250);
+		});
+
+		it("applies a per-seller processing fee override at claim time", async () => {
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 0,
+			});
+
+			await prisma.sellerProfile.update({
+				where: { id: seller.sellerProfileId },
+				data: {
+					processingFeeBps: 290,
+					processingFlatCents: 30,
+				},
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("fee-proc"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+			});
+			// Globals are zeroed (May 2026 hotfix). A non-zero processingFeeCents
+			// proves the per-seller override path is wired.
+			expect(order.processingFeeCents).toBeGreaterThan(0);
 		});
 	});
 
