@@ -709,6 +709,70 @@ describe("Payout Release", () => {
 			);
 			expect(lines.every((l) => l.paidAt !== null)).toBe(true);
 		});
+
+		it("does not pay when the lines are already claimed by another transfer, even with the in-flight index free", async () => {
+			// The actual double-pay bug: the partial unique index frees the
+			// instant a sibling writes stripeTransferId, so a release still
+			// holding a pre-claim snapshot would sail past it into a SECOND
+			// Stripe transfer. Reproduce that precise window — a concurrent
+			// sibling has claimed every line (Phase 1 committed) and its
+			// PayoutTransfer has already exited the in-flight index (Stripe
+			// responded), but this release's snapshot predates the paidAt
+			// stamp so it still reaches Phase 1. The EarningLine claim, not
+			// the freed index, has to stop it. Pre-fix, this double-paid:
+			// the sequential post-success test above passes on the buggy
+			// code too because its second release re-reads paid lines and
+			// bails early; only a stale-claim state exercises the mutex.
+			const { earning, seller } = await createPendingPayout();
+			const { ctx, mocks } = createTestPayoutsContext();
+
+			// Sibling transfer: succeeded (so out of the partial in-flight
+			// index — the old code's only mutex is now free), owning all of
+			// this earning's lines, paidAt not yet stamped.
+			const siblingTransfer = await prisma.payoutTransfer.create({
+				data: {
+					sellerProfileId: seller.id,
+					earningId: earning.id,
+					amountCents: earning.netAmount,
+					status: "succeeded",
+					stripeTransferId: `tr_sibling_${randomUUID()}`,
+					stripeDestinationPaymentId: `py_sibling_${randomUUID()}`,
+					paidAt: new Date(),
+				},
+			});
+			await prisma.earningLine.updateMany({
+				where: { earningId: earning.id },
+				data: { payoutTransferId: siblingTransfer.id },
+			});
+
+			await release(createMockJob({ earningId: earning.id }), ctx);
+
+			// No Stripe call — the claim matched zero unowned lines.
+			expect(mocks.payments._getOperationsOfType("seller.pay")).toHaveLength(0);
+
+			// The pre-allocated row rolled back with the lost claim: the
+			// sibling's transfer is the only one that survives.
+			const transfers = await prisma.payoutTransfer.findMany({
+				where: { sellerProfileId: seller.id },
+			});
+			expect(transfers).toHaveLength(1);
+			expect(transfers[0]?.id).toBe(siblingTransfer.id);
+
+			// Lines untouched: still the sibling's, still unpaid.
+			const lines = await prisma.earningLine.findMany({
+				where: { earningId: earning.id },
+			});
+			expect(lines.length).toBeGreaterThan(0);
+			expect(
+				lines.every((l) => l.payoutTransferId === siblingTransfer.id),
+			).toBe(true);
+			expect(lines.every((l) => l.paidAt === null)).toBe(true);
+
+			// Nothing was paid, so no success notification fired.
+			expect(
+				mocks.queues._getOperationsByJob("notifications", "payoutProcessed"),
+			).toHaveLength(0);
+		});
 	});
 });
 
