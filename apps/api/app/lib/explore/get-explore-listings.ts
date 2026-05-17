@@ -6,6 +6,10 @@ import {
 	type ExploreQueryType,
 } from "@nolie/schemas/explore";
 import { queryListings } from "../listings/query.js";
+import {
+	publicListingsWhere,
+	SOLD_VISIBILITY_DAYS,
+} from "../listings/statuses.js";
 import { exploreListingSelect } from "./select.js";
 import { toExploreListingSummary } from "./transform.js";
 
@@ -27,20 +31,29 @@ async function loadExploreListings(
 	if (filter === "live") {
 		where.status = ListingStatus.active;
 	} else if (filter === "ended") {
-		// failed means all payments failed
-		where.status = { in: [ListingStatus.closed, ListingStatus.failed] };
+		// "ended" = recently-ended listings. Auction-won (closed +
+		// winningAmount) obey the SOLD_VISIBILITY_DAYS cutoff; auction-failed
+		// (closed without winningAmount) and payment-failed listings have no
+		// time gate since they aren't "sold" in any commerce sense.
+		const cutoff = new Date(
+			Date.now() - SOLD_VISIBILITY_DAYS * 24 * 60 * 60 * 1000,
+		);
+		where.OR = [
+			{ status: ListingStatus.failed },
+			{ status: ListingStatus.closed, winningAmount: null },
+			{
+				status: ListingStatus.closed,
+				winningAmount: { not: null },
+				soldAt: { gte: cutoff },
+			},
+		];
 	} else {
-		where.status = {
-			in: [
-				ListingStatus.active,
-				ListingStatus.scheduled,
-				ListingStatus.closed,
-				ListingStatus.failed, // failed means all payments failed
-				ListingStatus.pending,
-				ListingStatus.sold,
-				ListingStatus.reserved,
-			],
-		};
+		// `all` filter: visible statuses + sold/auction-won within the cutoff.
+		// Explore historically also surfaces `pending` (mid-creation listings)
+		// which the seller-profile path does not — preserve that here without
+		// pushing it into the shared helper.
+		const base = publicListingsWhere();
+		where.OR = [...(base.OR ?? []), { status: ListingStatus.pending }];
 	}
 
 	const listings = await queryListings(db, {
