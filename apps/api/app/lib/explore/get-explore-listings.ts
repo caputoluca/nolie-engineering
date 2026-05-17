@@ -6,6 +6,10 @@ import {
 	type ExploreQueryType,
 } from "@nolie/schemas/explore";
 import { queryListings } from "../listings/query.js";
+import {
+	getSoldVisibilityCutoff,
+	publicListingsOrClauses,
+} from "../listings/statuses.js";
 import { exploreListingSelect } from "./select.js";
 import { toExploreListingSummary } from "./transform.js";
 
@@ -27,20 +31,33 @@ async function loadExploreListings(
 	if (filter === "live") {
 		where.status = ListingStatus.active;
 	} else if (filter === "ended") {
-		// failed means all payments failed
-		where.status = { in: [ListingStatus.closed, ListingStatus.failed] };
+		// "ended" = recently-ended listings. Auction-won (closed +
+		// winningAmount) obey the cutoff via soldAt; auction-closed without a
+		// winner obeys the cutoff via endAt (UI labels these "Sold on endAt"
+		// too). Payment-failed listings have no time gate.
+		const cutoff = getSoldVisibilityCutoff();
+		where.OR = [
+			{ status: ListingStatus.failed },
+			{
+				status: ListingStatus.closed,
+				winningAmount: { not: null },
+				soldAt: { gte: cutoff },
+			},
+			{
+				status: ListingStatus.closed,
+				winningAmount: null,
+				endAt: { gte: cutoff },
+			},
+		];
 	} else {
-		where.status = {
-			in: [
-				ListingStatus.active,
-				ListingStatus.scheduled,
-				ListingStatus.closed,
-				ListingStatus.failed, // failed means all payments failed
-				ListingStatus.pending,
-				ListingStatus.sold,
-				ListingStatus.reserved,
-			],
-		};
+		// `all` filter: public listings + sold/auction-won within the cutoff.
+		// Explore historically also surfaces `pending` (mid-creation listings)
+		// which the seller-profile path does not — append it here without
+		// pushing the quirk into the shared helper.
+		where.OR = [
+			...publicListingsOrClauses(),
+			{ status: ListingStatus.pending },
+		];
 	}
 
 	const listings = await queryListings(db, {

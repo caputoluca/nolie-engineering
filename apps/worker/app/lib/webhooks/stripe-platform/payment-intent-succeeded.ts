@@ -126,6 +126,7 @@ export async function paymentIntentSucceeded(
 				},
 				data: {
 					status: ListingStatus.sold,
+					soldAt: new Date(),
 					reservedUntil: null,
 					reservedByOrderId: null,
 				},
