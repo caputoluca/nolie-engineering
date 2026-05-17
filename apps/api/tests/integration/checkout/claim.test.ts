@@ -145,18 +145,19 @@ describe("POST /checkout/claim", () => {
 
 			// Fee math, single-line. Default platformFeeRate is 0.20 (see
 			// `createFixedPriceListingForSeller` fixture). Mock tax is 8% of price.
-			// Processing pass-through temporarily zeroed (see @nolie/config) —
-			// platform absorbs the actual Stripe fee for the May 2026 promo.
+			// Standard 2.9% + $0.30 processing on the full charged base
+			// (subtotal + shipping + tax = 5000 + 500 + 400 = 5900):
+			// (290 * 5900 + 5000) / 10000 + 30 = 171 + 30 = 201.
 			expect(order.subtotalCents).toBe(5000);
 			expect(order.shippingCents).toBe(500);
 			expect(order.taxCents).toBe(400);
 			expect(order.applicationFeeCents).toBe(1000); // 20% of 5000
-			expect(order.processingFeeCents).toBe(0);
+			expect(order.processingFeeCents).toBe(201);
 			expect(order.totalCents).toBe(5900);
 			expect(order.lineItems[0]?.priceCents).toBe(5000);
 			expect(order.lineItems[0]?.applicationFeeCents).toBe(1000);
-			expect(order.lineItems[0]?.processingFeeCents).toBe(0);
-			expect(order.lineItems[0]?.sellerEarningCents).toBe(4000); // 5000 - 1000
+			expect(order.lineItems[0]?.processingFeeCents).toBe(201);
+			expect(order.lineItems[0]?.sellerEarningCents).toBe(3799); // 5000 - 1000 fee - 201 processing
 			expect(order.lineItems[0]?.taxCents).toBe(400);
 
 			const listing = await prisma.listing.findUniqueOrThrow({
@@ -220,10 +221,12 @@ describe("POST /checkout/claim", () => {
 
 			// Fee math: $30 + $70 at 20% rate. Per-line fees ($600 + $1400) sum
 			// to the Order aggregate. Bundle shipping = max(200, 200) = 200.
-			// Processing pass-through temporarily zeroed (see @nolie/config).
+			// Processing 2.9% + $0.30 on base 10000 + 200 + 800 = 11000:
+			// (290 * 11000 + 5000) / 10000 + 30 = 319 + 30 = 349, allocated by
+			// price → $30 line 104, $70 line 245 (remainder cent to $70 line).
 			expect(order.subtotalCents).toBe(10000);
 			expect(order.applicationFeeCents).toBe(2000);
-			expect(order.processingFeeCents).toBe(0);
+			expect(order.processingFeeCents).toBe(349);
 			expect(order.shippingCents).toBe(200);
 			expect(order.taxCents).toBe(800); // 8% of subtotal
 			expect(order.totalCents).toBe(11000);
@@ -233,11 +236,11 @@ describe("POST /checkout/claim", () => {
 			const line30 = order.lineItems.find((l) => l.priceCents === 3000);
 			const line70 = order.lineItems.find((l) => l.priceCents === 7000);
 			expect(line30?.applicationFeeCents).toBe(600);
-			expect(line30?.processingFeeCents).toBe(0);
-			expect(line30?.sellerEarningCents).toBe(2400); // 3000 - 600
+			expect(line30?.processingFeeCents).toBe(104);
+			expect(line30?.sellerEarningCents).toBe(2296); // 3000 - 600 fee - 104 processing
 			expect(line70?.applicationFeeCents).toBe(1400);
-			expect(line70?.processingFeeCents).toBe(0);
-			expect(line70?.sellerEarningCents).toBe(5600); // 7000 - 1400
+			expect(line70?.processingFeeCents).toBe(245);
+			expect(line70?.sellerEarningCents).toBe(5355); // 7000 - 1400 fee - 245 processing
 
 			// Order aggregates are the sum of per-line values.
 			const lineFeesSum = order.lineItems.reduce(
@@ -680,20 +683,22 @@ describe("POST /checkout/claim", () => {
 				include: { lineItems: true },
 			});
 
-			// Both lines use the seller's 20% rate.
-			// Processing pass-through temporarily zeroed (see @nolie/config).
+			// Both lines use the seller's 20% rate. Processing 2.9% + $0.30 on
+			// base 15000 + 0 shipping + 1200 tax = 16200:
+			// (290 * 16200 + 5000) / 10000 + 30 = 470 + 30 = 500, allocated by
+			// price → $50 line 166, $100 line 334 (remainder cent to $100 line).
 			const line50 = order.lineItems.find((l) => l.priceCents === 5000);
 			const line100 = order.lineItems.find((l) => l.priceCents === 10000);
 			expect(line50?.applicationFeeCents).toBe(1000); // 20% of 5000
-			expect(line50?.processingFeeCents).toBe(0);
-			expect(line50?.sellerEarningCents).toBe(4000); // 5000 - 1000
+			expect(line50?.processingFeeCents).toBe(166);
+			expect(line50?.sellerEarningCents).toBe(3834); // 5000 - 1000 fee - 166 processing
 			expect(line100?.applicationFeeCents).toBe(2000); // 20% of 10000
-			expect(line100?.processingFeeCents).toBe(0);
-			expect(line100?.sellerEarningCents).toBe(8000); // 10000 - 2000
+			expect(line100?.processingFeeCents).toBe(334);
+			expect(line100?.sellerEarningCents).toBe(7666); // 10000 - 2000 fee - 334 processing
 
 			// Order aggregate is the sum.
 			expect(order.applicationFeeCents).toBe(3000);
-			expect(order.processingFeeCents).toBe(0);
+			expect(order.processingFeeCents).toBe(500);
 			expect(order.subtotalCents).toBe(15000);
 		});
 
