@@ -17,6 +17,16 @@ import {
 import type { PayoutJob } from "./types.js";
 
 /**
+ * Phase-1 rollback signal: the EarningLine claim matched zero rows, so
+ * a concurrent — or already-completed — sibling release owns these
+ * lines. Thrown inside the claim transaction to roll the pre-allocated
+ * PayoutTransfer row back rather than leaving an orphan `pending` row
+ * parked in the partial unique index (which would wedge every future
+ * release for this earning).
+ */
+class ClaimLost extends Error {}
+
+/**
  * Payout release (NL-183 / Pattern B).
  *
  * For each Earning, releases the seller's net via a Stripe Transfer.
@@ -34,16 +44,20 @@ import type { PayoutJob } from "./types.js";
  * We fall back to the legacy single-Transfer path AND insert a
  * PayoutTransfer row so the new webhook handler can still reconcile.
  *
- * Concurrency safety (race against double-pay): the PayoutTransfer
- * INSERT is the lock. A partial unique index on (earningId) WHERE
- * status='pending' AND stripeTransferId IS NULL enforces "at most
- * one in-flight pre-Stripe transfer per earning." Two concurrent
- * workers contend at INSERT — one wins, the other catches P2002
- * and skips with `inflight_lock_held`. The race window closes the
- * moment the winner writes stripeTransferId in the success tx
- * (the row exits the partial index, freeing the slot for a future
- * partial-release re-fire). Industry pattern: idempotency-key row
- * as the mutex (Brandur/Stripe/Shopify).
+ * Concurrency safety (race against double-pay): the EarningLine rows
+ * are the mutex. Phase 1 (one tx) creates the PayoutTransfer row and
+ * claims its lines — `UPDATE earning_line SET payoutTransferId WHERE
+ * paidAt IS NULL AND payoutTransferId IS NULL`. The row lock on those
+ * lines serializes concurrent releases for the same earning: the
+ * loser blocks, re-evaluates after the winner commits, claims zero,
+ * and skips with `claim_lost` (its PayoutTransfer INSERT rolls back
+ * with the aborted tx). The Stripe call (Phase 2) happens AFTER this
+ * commits — never under the lock. The partial unique index on
+ * PayoutTransfer(earningId) is kept as a DB-level backstop for the
+ * pure simultaneous-INSERT case (P2002 → `inflight_lock_held`) but is
+ * no longer load-bearing. Phase 3 marks the claimed lines paidAt.
+ * Industry pattern: Brandur/Stripe atomic-phase + durable claim, the
+ * claim record as the mutex.
  */
 export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	const { earningId } = job.data;
@@ -195,7 +209,11 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	const isOrphan = earning.lines.length === 0;
 
 	let amountCents: number;
-	let earningLineIdsToMark: string[];
+	// earningLineId → releasable cents this run. Empty for the orphan
+	// shim (no EarningLine rows). Drives both the transfer size and the
+	// post-claim amount re-derivation (a crashed or concurrent sibling
+	// run may already hold part of the releasable set).
+	const releasableCentsByLine = new Map<string, number>();
 
 	if (isOrphan) {
 		// Deploy-window orphan: Earning created by an old worker pod
@@ -241,7 +259,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		}
 
 		amountCents = earning.netAmount;
-		earningLineIdsToMark = []; // no lines to mark
+		// Orphan shim: no EarningLine rows — releasableCentsByLine stays empty.
 	} else {
 		// Normal per-line path
 		const releasable = getReleasableLines({ lines: earning.lines });
@@ -263,14 +281,14 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			return;
 		}
 		amountCents = releasable.totalCents;
-		earningLineIdsToMark = releasable.lines.map((l) => l.earningLineId);
+		for (const l of releasable.lines) {
+			releasableCentsByLine.set(l.earningLineId, l.cents);
+		}
 	}
 
-	const amountInDollars = amountCents / 100;
-
-	if (amountInDollars <= 0) {
+	if (amountCents <= 0) {
 		logger.error(
-			{ earningId, orderId: earning.orderId, amountInDollars },
+			{ earningId, orderId: earning.orderId, amountCents },
 			"payout.release: amount is less than or equal to 0; failing",
 		);
 		reportWarning("Net amount is <= 0 in payout release job", {
@@ -282,38 +300,114 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		return;
 	}
 
-	// Pre-allocate the PayoutTransfer row. Its id is the Stripe
-	// idempotency key — one row = one Transfer. Inserted BEFORE the
-	// Stripe call so that if we crash mid-flight, the row exists for
-	// audit and the Stripe idempotency replay returns the same Transfer.
-	//
-	// `earningId` is the lock: a partial unique index on
-	// (earningId) WHERE status='pending' AND stripeTransferId IS NULL
-	// prevents a second concurrent worker from creating a second
-	// in-flight transfer for this earning. P2002 here means "another
-	// worker is mid-release for this earning right now" — skip cleanly
-	// rather than racing into Stripe with a different idempotency key.
-	let payoutTransfer: { id: string };
-	try {
-		payoutTransfer = await ctx.prisma.payoutTransfer.create({
-			data: {
-				sellerProfileId: earning.sellerProfileId,
-				earningId,
-				amountCents,
-				status: "pending",
-			},
-			select: { id: true },
-		});
-	} catch (err) {
-		if (isPrismaUniqueError(err)) {
-			logger.info(
-				{ earningId, reason: "inflight_lock_held" },
-				"payout.release.skipped",
-			);
-			return;
+	// ────────────────────────────────────────────────────────────
+	// Phase 1 — claim (one tx, no Stripe). See the function header
+	// for the mutex argument. The PayoutTransfer INSERT shares the
+	// claim's transaction so a lost claim rolls the row back rather
+	// than leaving an orphan `pending` row in the partial index.
+	// ────────────────────────────────────────────────────────────
+	let payoutTransferId: string;
+
+	if (isOrphan) {
+		// Orphan shim has no EarningLine rows to claim; the partial
+		// unique index on PayoutTransfer(earningId) stays its mutex
+		// (rare legacy deploy-window path; self-heals on re-backfill).
+		try {
+			const pt = await ctx.prisma.payoutTransfer.create({
+				data: {
+					sellerProfileId: earning.sellerProfileId,
+					earningId,
+					amountCents,
+					status: "pending",
+				},
+				select: { id: true },
+			});
+			payoutTransferId = pt.id;
+		} catch (err) {
+			if (isPrismaUniqueError(err)) {
+				logger.info(
+					{ earningId, reason: "inflight_lock_held" },
+					"payout.release.skipped",
+				);
+				return;
+			}
+			throw err;
 		}
-		throw err;
+	} else {
+		const releasableLineIds = [...releasableCentsByLine.keys()];
+		try {
+			const claim = await ctx.prisma.$transaction(async (tx) => {
+				const pt = await tx.payoutTransfer.create({
+					data: {
+						sellerProfileId: earning.sellerProfileId,
+						earningId,
+						amountCents,
+						status: "pending",
+					},
+					select: { id: true },
+				});
+
+				// The mutex. The row lock on these lines + the
+				// `payoutTransferId IS NULL` predicate means a
+				// concurrent release for the same lines blocks, then
+				// matches zero rows once we commit.
+				const claimed = await tx.earningLine.updateMany({
+					where: {
+						id: { in: releasableLineIds },
+						paidAt: null,
+						payoutTransferId: null,
+					},
+					data: { payoutTransferId: pt.id },
+				});
+
+				if (claimed.count === 0) {
+					throw new ClaimLost();
+				}
+
+				// Re-derive the amount from exactly the lines we won —
+				// a crashed/concurrent sibling may hold part of the set.
+				let claimedCents = amountCents;
+				if (claimed.count !== releasableLineIds.length) {
+					const claimedLines = await tx.earningLine.findMany({
+						where: { payoutTransferId: pt.id },
+						select: { id: true },
+					});
+					claimedCents = claimedLines.reduce(
+						(sum, l) => sum + (releasableCentsByLine.get(l.id) ?? 0),
+						0,
+					);
+					await tx.payoutTransfer.update({
+						where: { id: pt.id },
+						data: { amountCents: claimedCents },
+					});
+				}
+
+				return { payoutTransferId: pt.id, amountCents: claimedCents };
+			});
+			payoutTransferId = claim.payoutTransferId;
+			amountCents = claim.amountCents;
+		} catch (err) {
+			if (err instanceof ClaimLost) {
+				logger.info(
+					{ earningId, reason: "claim_lost" },
+					"payout.release.skipped",
+				);
+				return;
+			}
+			if (isPrismaUniqueError(err)) {
+				// Partial-index backstop fired on the pure
+				// simultaneous-INSERT race — sibling is mid-release.
+				logger.info(
+					{ earningId, reason: "inflight_lock_held" },
+					"payout.release.skipped",
+				);
+				return;
+			}
+			throw err;
+		}
 	}
+
+	const amountInDollars = amountCents / 100;
 
 	logger.info(
 		{
@@ -322,8 +416,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			amountInDollars,
 			connectAccountId,
 			buyerId,
-			payoutTransferId: payoutTransfer.id,
-			lineCount: earningLineIdsToMark.length,
+			payoutTransferId,
 			orphan: isOrphan,
 		},
 		"payout.release: calling payments.seller.pay",
@@ -335,24 +428,40 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		orderId: earning.order.id,
 		buyerId,
 		sourceChargeId: earning.order.paymentChargeId,
-		payoutTransferId: payoutTransfer.id,
+		payoutTransferId,
 	});
 
 	if (!result.success) {
 		// Failed Transfer — mark the pre-allocated PayoutTransfer row as
-		// failed. A future retry creates a NEW PayoutTransfer row with a
-		// fresh id (and therefore a fresh Stripe idempotency key).
+		// failed and release its line claim. A future retry then claims
+		// the lines into a NEW PayoutTransfer with a fresh id (and so a
+		// fresh Stripe idempotency key — a genuine new attempt, not
+		// Stripe's cached 24h failure for the old key).
 		await ctx.prisma.payoutTransfer
 			.update({
-				where: { id: payoutTransfer.id },
+				where: { id: payoutTransferId },
 				data: { status: "failed", failedAt: new Date() },
 			})
 			.catch((err) => {
 				logger.error(
-					{ err, earningId, payoutTransferId: payoutTransfer.id },
+					{ err, earningId, payoutTransferId },
 					"payout.release: failed to mark PayoutTransfer as failed",
 				);
 			});
+
+		if (!isOrphan) {
+			await ctx.prisma.earningLine
+				.updateMany({
+					where: { payoutTransferId, paidAt: null },
+					data: { payoutTransferId: null },
+				})
+				.catch((err) => {
+					logger.error(
+						{ err, earningId, payoutTransferId },
+						"payout.release: failed to unclaim lines after failed transfer",
+					);
+				});
+		}
 
 		if (result.error === PaymentErrorCode.insufficient_funds) {
 			reportWarning("Insufficient platform balance when paying out seller", {
@@ -423,7 +532,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			earningId,
 			orderId: earning.orderId,
 			transferId: result.transferId,
-			payoutTransferId: payoutTransfer.id,
+			payoutTransferId,
 		},
 		"payout.release: payout succeeded",
 	);
@@ -436,18 +545,20 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			//    stays `pending` — flips to `succeeded` when payout.paid
 			//    webhook lands.
 			await tx.payoutTransfer.update({
-				where: { id: payoutTransfer.id },
+				where: { id: payoutTransferId },
 				data: {
 					stripeTransferId: result.transferId,
 					stripeDestinationPaymentId: result.destinationPaymentId,
 				},
 			});
 
-			// 2. Mark the released EarningLines as paid + link to the transfer.
-			if (earningLineIdsToMark.length > 0) {
+			// 2. Flip the lines this transfer claimed in Phase 1 to paid.
+			//    payoutTransferId was set under the claim mutex already;
+			//    here we only stamp paidAt. Orphan shim has no lines.
+			if (!isOrphan) {
 				await tx.earningLine.updateMany({
-					where: { id: { in: earningLineIdsToMark }, paidAt: null },
-					data: { paidAt: now, payoutTransferId: payoutTransfer.id },
+					where: { payoutTransferId, paidAt: null },
+					data: { paidAt: now },
 				});
 			}
 
