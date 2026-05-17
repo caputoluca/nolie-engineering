@@ -32,17 +32,21 @@ async function loadExploreListings(
 		where.status = ListingStatus.active;
 	} else if (filter === "ended") {
 		// "ended" = recently-ended listings. Auction-won (closed +
-		// winningAmount) obey the visibility cutoff; auction-failed (closed
-		// without winningAmount) and payment-failed listings have no time
-		// gate since they aren't "sold" in any commerce sense.
+		// winningAmount) obey the cutoff via soldAt; auction-closed without a
+		// winner obeys the cutoff via endAt (UI labels these "Sold on endAt"
+		// too). Payment-failed listings have no time gate.
 		const cutoff = getSoldVisibilityCutoff();
 		where.OR = [
 			{ status: ListingStatus.failed },
-			{ status: ListingStatus.closed, winningAmount: null },
 			{
 				status: ListingStatus.closed,
 				winningAmount: { not: null },
 				soldAt: { gte: cutoff },
+			},
+			{
+				status: ListingStatus.closed,
+				winningAmount: null,
+				endAt: { gte: cutoff },
 			},
 		];
 	} else {
