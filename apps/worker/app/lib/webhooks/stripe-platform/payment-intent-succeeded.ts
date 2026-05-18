@@ -254,13 +254,25 @@ export async function paymentIntentSucceeded(
 					continue;
 				}
 
-				const dims = computeBundleDims(order.lineItems);
-				if (!dims) {
-					ctx.logger.warn(
-						{ orderId: order.id, paymentIntentId },
-						"payment_intent.succeeded: skipping ShippingLabel create — line items missing package dims (un-backfilled?)",
+				// `computeBundleDims` always returns a usable box now — a
+				// dims-less line falls back to the standard_card upgrade size
+				// rather than stranding the (already-charged) order. A
+				// letter-tagged line in a mixed bundle hitting the fallback
+				// is by design and stays silent; `anomalousFallback` flags
+				// only a non-letter listing with no dims (un-backfilled
+				// parcel listing, or a future path that didn't freeze the
+				// rail) — a real problem worth a Sentry signal.
+				const { dims, anomalousFallback } = computeBundleDims(order.lineItems);
+				if (anomalousFallback) {
+					reportError(
+						new Error(
+							"payment_intent.succeeded: ShippingLabel sized from fallback dims — non-letter listing reached payment with no package dims",
+						),
+						{
+							operation: "pi_succeeded_label_fallback_dims",
+							extra: { orderId: order.id, paymentIntentId },
+						},
 					);
-					continue;
 				}
 				labelRows.push({
 					orderId: order.id,
