@@ -20,6 +20,7 @@ import {
 	getSoldVisibilityCutoff,
 	publicListingsOrClauses,
 } from "../listings/statuses.js";
+import { reportError } from "../observability/sentry/report.js";
 import { exploreListingSelect } from "./select.js";
 import { toExploreListingSummary } from "./transform.js";
 
@@ -356,10 +357,23 @@ export async function getExploreListings(
 	if (enabledRaw !== "1") {
 		return legacyGetExploreListings(db, query, caches.exploreListings);
 	}
-	return loadRankedExploreListings(
-		db,
-		query,
-		caches.exploreSnapshot,
-		parseEpoch(epochRaw),
-	);
+	// Defensive degrade: the switch read above is fail-safe, but the ranked
+	// path itself must never 500 /explore on an unforeseen data edge. A throw
+	// here serves exactly today's feed and pages us, instead of breaking the
+	// page until a human with prod-network Redis access can set "0" (§10).
+	try {
+		return await loadRankedExploreListings(
+			db,
+			query,
+			caches.exploreSnapshot,
+			parseEpoch(epochRaw),
+		);
+	} catch (err) {
+		reportError(err, { operation: "getExploreListings.ranked" });
+		logger.error(
+			{ err, event: "explore_ranked_fallback" },
+			"ranked explore path threw; serving legacy",
+		);
+		return legacyGetExploreListings(db, query, caches.exploreListings);
+	}
 }

@@ -10,40 +10,45 @@ import {
 
 const HOUR_MS = 3_600_000;
 
-// v1 (sellerTrust weight 0): base ∈ [0, 0.35], full score ∈ [0, 0.80].
-const BASE_MAX = 0.35;
-const SCORE_MAX = 0.8;
+// v1 (sellerTrust weight 0): base ∈ [-lowEffortPenalty, 0], full score ∈
+// [-lowEffortPenalty, recencyWeight].
+const PENALTY = DEFAULT_RANKING_CONFIG.lowEffortPenalty; // 0.12
+const RECENCY_W = DEFAULT_RANKING_CONFIG.weights.recency; // 0.45
+
+// The cold-start catalog norm: a ~80-char bulk-lister template. Must NOT be
+// treated as low-effort (median desc len is 81 chars — see §5 analysis).
+const TEMPLATE_DESC =
+	"Charizard 4/102 from Base Set (1999). See photos for exact condition.";
 
 describe("computeRankBaseScore / computeRankScore", () => {
 	it("keeps base and full scores within v1 bounds across extremes", () => {
 		const extremes = [
-			{ photoCount: 0, priceCents: null },
-			{ photoCount: 0, priceCents: 100 }, // bottom price band
-			{ photoCount: 5, priceCents: 100_000 }, // top price band
-			{ photoCount: 50, priceCents: 100_000 }, // photo count saturated
+			{ title: "Charizard", description: null }, // empty ⇒ low-effort
+			{ title: "Charizard", description: "Charizard" }, // title echo
+			{ title: "Charizard", description: TEMPLATE_DESC }, // normal
 		];
 		const now = new Date("2026-05-17T12:00:00Z");
 		const ages = [now, new Date("2010-01-01T00:00:00Z")]; // now and very old
 
 		for (const input of extremes) {
 			const base = computeRankBaseScore(input, DEFAULT_RANKING_CONFIG);
-			expect(base).toBeGreaterThanOrEqual(0);
-			expect(base).toBeLessThanOrEqual(BASE_MAX);
+			expect(base).toBeGreaterThanOrEqual(-PENALTY);
+			expect(base).toBeLessThanOrEqual(0);
 
 			for (const createdAt of ages) {
 				const score = computeRankScore(
 					{ rankBaseScore: base, createdAt, now },
 					DEFAULT_RANKING_CONFIG,
 				);
-				expect(score).toBeGreaterThanOrEqual(0);
-				expect(score).toBeLessThanOrEqual(SCORE_MAX);
+				expect(score).toBeGreaterThanOrEqual(-PENALTY);
+				expect(score).toBeLessThanOrEqual(RECENCY_W);
 			}
 		}
 	});
 
 	it("scores a newer listing strictly higher than an older one with the same base", () => {
 		const now = new Date("2026-05-17T12:00:00Z");
-		const rankBaseScore = 0.2;
+		const rankBaseScore = 0;
 
 		const newer = computeRankScore(
 			{
@@ -67,7 +72,7 @@ describe("computeRankBaseScore / computeRankScore", () => {
 
 	it("halves the recency contribution at exactly one half-life of age", () => {
 		const now = new Date("2026-05-17T12:00:00Z");
-		const rankBaseScore = 0.2;
+		const rankBaseScore = 0;
 		const { recencyHalfLifeHours } = DEFAULT_RANKING_CONFIG;
 
 		const atHalfLife = computeRankScore(
@@ -86,7 +91,7 @@ describe("computeRankBaseScore / computeRankScore", () => {
 
 	it("floors a future-dated createdAt at age 0 (never exceeds the age-0 max)", () => {
 		const now = new Date("2026-05-17T12:00:00Z");
-		const rankBaseScore = 0.3;
+		const rankBaseScore = 0;
 
 		const future = computeRankScore(
 			{
@@ -105,76 +110,86 @@ describe("computeRankBaseScore / computeRankScore", () => {
 		expect(future).toBe(rankBaseScore + DEFAULT_RANKING_CONFIG.weights.recency);
 	});
 
-	it("raises a photo-rich listing's base score when the quality weight increases", () => {
-		const input = { photoCount: 5, priceCents: 100_000 };
+	it("softly demotes low-effort listings (empty / title-echo) but not the template norm", () => {
+		const title = "2002 Pokemon 151 Nidoran 029/165";
 
-		const higherQuality: RankingConfig = {
+		const empty = computeRankBaseScore(
+			{ title, description: null },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const tooShort = computeRankBaseScore(
+			{ title, description: "NM" },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const titleEcho = computeRankBaseScore(
+			{ title, description: "  2002 Pokemon 151 Nidoran 029/165  " },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const normal = computeRankBaseScore(
+			{ title, description: TEMPLATE_DESC },
+			DEFAULT_RANKING_CONFIG,
+		);
+
+		// Every low-effort form gets the same soft demerit; the template norm
+		// is untouched (a graded quality score would be fiction here — §5).
+		expect(empty).toBe(-PENALTY);
+		expect(tooShort).toBe(-PENALTY);
+		expect(titleEcho).toBe(-PENALTY);
+		expect(normal).toBe(0);
+		expect(normal).toBeGreaterThan(titleEcho);
+
+		// The demerit is a soft down-rank, not burial: a fresh low-effort
+		// listing still outranks the same listing a week later.
+		const now = new Date("2026-05-17T12:00:00Z");
+		const freshLowEffort = computeRankScore(
+			{ rankBaseScore: empty, createdAt: now, now },
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(freshLowEffort).toBeGreaterThan(0);
+	});
+
+	it("the lowEffortPenalty knob is fully reversible (0 ⇒ no demerit)", () => {
+		const input = { title: "Charizard", description: null };
+
+		const penalized = computeRankBaseScore(input, DEFAULT_RANKING_CONFIG);
+		const off = computeRankBaseScore(input, {
 			...DEFAULT_RANKING_CONFIG,
-			weights: { ...DEFAULT_RANKING_CONFIG.weights, quality: 0.5 },
+			lowEffortPenalty: 0,
+		});
+
+		expect(penalized).toBe(-PENALTY);
+		expect(off).toBe(0);
+	});
+
+	it("keeps the sellerTrust seam inert at weight 0 but live when the weight is flipped", () => {
+		const input = { title: "Charizard", description: TEMPLATE_DESC };
+
+		// v1: weight 0 ⇒ a trusted seller scores identically to an unknown one.
+		const trustedV1 = computeRankBaseScore(
+			{ ...input, sellerTrust: 1 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const unknownV1 = computeRankBaseScore(
+			{ ...input, sellerTrust: 0 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(trustedV1).toBe(unknownV1);
+
+		// Badge fast-follow (NL-266): flip the weight, no formula rewrite.
+		const withBadge: RankingConfig = {
+			...DEFAULT_RANKING_CONFIG,
+			weights: { ...DEFAULT_RANKING_CONFIG.weights, sellerTrust: 0.2 },
 		};
-
-		const baseDefault = computeRankBaseScore(input, DEFAULT_RANKING_CONFIG);
-		const baseHigher = computeRankBaseScore(input, higherQuality);
-
-		expect(baseHigher).toBeGreaterThan(baseDefault);
-	});
-
-	it("gives more photos a higher base score and saturates at 5", () => {
-		const priceCents = 100_000;
-		const zero = computeRankBaseScore(
-			{ photoCount: 0, priceCents },
-			DEFAULT_RANKING_CONFIG,
+		const trusted = computeRankBaseScore(
+			{ ...input, sellerTrust: 1 },
+			withBadge,
 		);
-		const three = computeRankBaseScore(
-			{ photoCount: 3, priceCents },
-			DEFAULT_RANKING_CONFIG,
+		const unknown = computeRankBaseScore(
+			{ ...input, sellerTrust: 0 },
+			withBadge,
 		);
-		const five = computeRankBaseScore(
-			{ photoCount: 5, priceCents },
-			DEFAULT_RANKING_CONFIG,
-		);
-		const six = computeRankBaseScore(
-			{ photoCount: 6, priceCents },
-			DEFAULT_RANKING_CONFIG,
-		);
-
-		expect(three).toBeGreaterThan(zero);
-		expect(five).toBeGreaterThan(three);
-		expect(six).toBe(five); // min(photoCount, 5) / 5 saturates
-	});
-
-	it("softly down-ranks the bottom price band and treats null price as neutral middle", () => {
-		const photoCount = 0; // isolate the priceTier contribution
-		const bottomBand = computeRankBaseScore(
-			{ photoCount, priceCents: 100 }, // < 500 ⇒ bottom band
-			DEFAULT_RANKING_CONFIG,
-		);
-		const higherBand = computeRankBaseScore(
-			{ photoCount, priceCents: 1_000 }, // 500..2500 ⇒ band above bottom
-			DEFAULT_RANKING_CONFIG,
-		);
-		const nullPrice = computeRankBaseScore(
-			{ photoCount, priceCents: null },
-			DEFAULT_RANKING_CONFIG,
-		);
-
-		expect(bottomBand).toBeLessThan(higherBand);
-		// null is the neutral 0.5 tier — above the bottom band, not penalized.
-		expect(nullPrice).toBeGreaterThan(bottomBand);
-		expect(nullPrice).toBeGreaterThan(higherBand);
-
-		// The priceFloorPenalty knob must actually move the bottom band —
-		// guards the regression where band 0's tier was 0 so the multiplier
-		// was inert (any penalty produced the same score).
-		const penalized = computeRankBaseScore(
-			{ photoCount, priceCents: 100 },
-			{ ...DEFAULT_RANKING_CONFIG, priceFloorPenalty: 0.5 },
-		);
-		const unpenalized = computeRankBaseScore(
-			{ photoCount, priceCents: 100 },
-			{ ...DEFAULT_RANKING_CONFIG, priceFloorPenalty: 1 },
-		);
-		expect(penalized).toBeLessThan(unpenalized);
+		expect(trusted).toBeGreaterThan(unknown);
+		expect(trusted - unknown).toBeCloseTo(0.2, 10);
 	});
 });
 

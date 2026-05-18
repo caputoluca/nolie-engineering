@@ -26,10 +26,6 @@ const ALWAYS_RANKABLE_STATUSES = [
 	ListingStatus.reserved,
 ] as const;
 
-function toCents(value: Prisma.Decimal | null): number | null {
-	return value == null ? null : Math.round(value.toNumber() * 100);
-}
-
 /**
  * /explore default-feed ranking refresh (NL-284, docs/explore-ranking.md §7).
  * Sole writer of the time-decaying `rankScore`. Pure formula lives in
@@ -70,13 +66,11 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 		},
 		select: {
 			id: true,
+			title: true,
+			description: true,
 			createdAt: true,
 			rankBaseScore: true,
 			rankBaseVersion: true,
-			listingType: true,
-			price: true,
-			startingBid: true,
-			_count: { select: { listingAssets: true } },
 		},
 	});
 
@@ -92,12 +86,8 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 		// written under an older RANK_BASE_VERSION (also covers freshly
 		// migrated rows defaulted to 0).
 		if (rankBaseVersion < RANK_BASE_VERSION) {
-			const priceCents =
-				r.listingType === "fixed_price"
-					? toCents(r.price)
-					: toCents(r.startingBid);
 			rankBaseScore = computeRankBaseScore(
-				{ photoCount: r._count.listingAssets, priceCents },
+				{ title: r.title, description: r.description },
 				DEFAULT_RANKING_CONFIG,
 			);
 			rankBaseVersion = RANK_BASE_VERSION;
