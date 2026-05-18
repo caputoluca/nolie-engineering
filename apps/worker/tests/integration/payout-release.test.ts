@@ -559,6 +559,42 @@ describe("Payout Release", () => {
 
 			expect(mocks.payments._getOperationsOfType("seller.pay")).toHaveLength(0);
 		});
+
+		it("skips an earning on an admin payout hold, and resumes once cleared", async () => {
+			// `in_review` so the terminal-state gate passes — this pins the
+			// dedicated hold gate, not the requires_action skip above.
+			const { earning } = await createPendingPayout({});
+			await prisma.earning.update({
+				where: { id: earning.id },
+				data: { payoutHoldAt: new Date(), payoutHoldReason: "manual review" },
+			});
+			const { ctx, mocks } = createTestPayoutsContext();
+
+			await release(createMockJob({ earningId: earning.id }), ctx);
+
+			// No Stripe transfer, no PayoutTransfer row while held.
+			expect(mocks.payments._getOperationsOfType("seller.pay")).toHaveLength(0);
+			expect(
+				await prisma.payoutTransfer.count({
+					where: { sellerProfileId: earning.sellerProfileId },
+				}),
+			).toBe(0);
+
+			// A hold is a resumable park, NOT a failure: status is left
+			// untouched (still in_review), so clearing it pays out normally.
+			const heldEarning = await prisma.earning.findUniqueOrThrow({
+				where: { id: earning.id },
+			});
+			expect(heldEarning.payoutStatus).toBe(PayoutStatus.in_review);
+
+			await prisma.earning.update({
+				where: { id: earning.id },
+				data: { payoutHoldAt: null, payoutHoldReason: null },
+			});
+			await release(createMockJob({ earningId: earning.id }), ctx);
+
+			expect(mocks.payments._getOperationsOfType("seller.pay")).toHaveLength(1);
+		});
 	});
 
 	// =========================================================================
