@@ -256,15 +256,17 @@ export async function paymentIntentSucceeded(
 
 				// `computeBundleDims` always returns a usable box now — a
 				// dims-less line falls back to the standard_card upgrade size
-				// rather than stranding the (already-charged) order with no
-				// label. `usedFallback` means a listing reached payment with
-				// no package dims; not silently swallowed — alert so we can
-				// confirm the buyer was charged enough shipping.
-				const { dims, usedFallback } = computeBundleDims(order.lineItems);
-				if (usedFallback) {
+				// rather than stranding the (already-charged) order. A
+				// letter-tagged line in a mixed bundle hitting the fallback
+				// is by design and stays silent; `anomalousFallback` flags
+				// only a non-letter listing with no dims (un-backfilled
+				// parcel listing, or a future path that didn't freeze the
+				// rail) — a real problem worth a Sentry signal.
+				const { dims, anomalousFallback } = computeBundleDims(order.lineItems);
+				if (anomalousFallback) {
 					reportError(
 						new Error(
-							"payment_intent.succeeded: ShippingLabel sized from fallback dims — listing reached payment with no package dims",
+							"payment_intent.succeeded: ShippingLabel sized from fallback dims — non-letter listing reached payment with no package dims",
 						),
 						{
 							operation: "pi_succeeded_label_fallback_dims",
