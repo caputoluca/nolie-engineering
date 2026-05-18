@@ -2,7 +2,11 @@ import { PayoutStatus } from "@nolie/db";
 import type { WorkerContextBase } from "../context.js";
 import { reportError } from "../observability/sentry/report.js";
 
-export type ReleaseOnFulfillmentResult = "released" | "raced" | "failed";
+export type ReleaseOnFulfillmentResult =
+	| "released"
+	| "raced"
+	| "held"
+	| "failed";
 
 interface Input {
 	earningId: string;
@@ -28,6 +32,12 @@ type Ctx = Pick<WorkerContextBase, "prisma" | "queues">;
  * the parcel webhook firing while the letter reconciler is mid-tick on
  * the same order, or two reconciler ticks back-to-back) that already
  * advanced this earning gets `result: "raced"` with no side effects.
+ *
+ * **Hold.** An admin/manual payout hold (`Earning.payoutHoldAt`) also
+ * fails the guard; the caller gets `result: "held"` (distinct from
+ * `raced` so telemetry is honest and the parcel webhook skips its
+ * buyer notifications). `release.job` re-checks the live hold and is
+ * the authoritative gate — this just avoids needless enqueue churn.
  *
  * **Dispute interaction.** A pending or refunded `FulfillmentDispute`
  * does NOT block the earning transition — `markedAsFulfilledAt`
@@ -57,6 +67,11 @@ export async function releaseEarningOnFulfillment(
 			sellerProfileId,
 			payoutStatus: PayoutStatus.requires_action,
 			stripeTransferId: null,
+			// Admin/manual hold short-circuit. A held earning fails this
+			// guard, so it never leaves `requires_action` and no
+			// `payout.release` is enqueued. `count === 0` is then
+			// disambiguated below into `held` vs a genuine `raced`.
+			payoutHoldAt: null,
 		},
 		data: {
 			payoutStatus: PayoutStatus.in_review,
@@ -65,7 +80,16 @@ export async function releaseEarningOnFulfillment(
 	});
 
 	if (updated.count === 0) {
-		return { result: "raced" };
+		// Either a genuine race (already advanced past `requires_action`)
+		// or a deliberate hold. One cheap cold-path read tells them apart
+		// so callers don't mislabel an operator hold as a race (and the
+		// parcel webhook doesn't fire false delivery/review notifications
+		// for a parked payout).
+		const earning = await ctx.prisma.earning.findUnique({
+			where: { id: earningId },
+			select: { payoutHoldAt: true },
+		});
+		return { result: earning?.payoutHoldAt ? "held" : "raced" };
 	}
 
 	try {
