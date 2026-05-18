@@ -73,6 +73,8 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			sellerProfileId: true,
 			insufficientFundsRetryAttempts: true,
 			payoutStatus: true,
+			payoutHoldAt: true,
+			payoutHoldReason: true,
 			createdAt: true,
 			// Legacy single-Transfer fields — kept nullable in the expand
 			// step; written on the FIRST transfer for old-webhook back-compat,
@@ -138,6 +140,31 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 				earningId,
 				reason: "earning_terminal_state",
 				payoutStatus: earning.payoutStatus,
+			},
+			"payout.release.skipped",
+		);
+		return;
+	}
+
+	// Admin/manual payout hold. The single authoritative gate: every
+	// release rail (letter clock, parcel `delivered` webhook, pickup
+	// auto-complete, confirm-delivery, admin manual) funnels through
+	// this job before any Stripe Transfer, so checking the hold here —
+	// against the live row, not a stale candidate-query snapshot —
+	// closes every path including an already-`in_review` earning with a
+	// delayed release in flight. A hold is a resumable park, NOT a
+	// failure: do not `markPayoutAsFailed`. Clearing `payoutHoldAt` and
+	// re-enqueuing `payout.release` pays out normally. Deliberate
+	// operator action, so it's a skip log (not Sentry) like the gates
+	// above.
+	if (earning.payoutHoldAt) {
+		logger.info(
+			{
+				earningId,
+				orderId: earning.orderId,
+				reason: "payout_on_hold",
+				payoutHoldAt: earning.payoutHoldAt,
+				payoutHoldReason: earning.payoutHoldReason,
 			},
 			"payout.release.skipped",
 		);
