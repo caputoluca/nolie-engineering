@@ -810,6 +810,80 @@ describe("Payout Release", () => {
 			).toHaveLength(0);
 		});
 	});
+
+	// =========================================================================
+	// NL-275: Manual admin refund interplay with the release job. The admin
+	// refund endpoint only mutates EarningLine state + re-queues release;
+	// these pin that the release job then does the right thing for the
+	// manual (no-dispute) shapes the Phase 1 admin UI produces. The existing
+	// platform_absorb test above carries an `absorbed` dispute row; a manual
+	// refund has none, so the no-dispute shape is exercised explicitly here.
+	// =========================================================================
+	describe("manual refund interplay (NL-275)", () => {
+		it("does not pay the seller after a full manual refund (no dispute)", async () => {
+			const { earning, orderLineItem } = await createPendingPayout();
+			const { ctx, mocks } = createTestPayoutsContext();
+
+			// Shape after a full manual refund: refundedNetCents == netCents,
+			// no platform absorb, no dispute. Releasable = net - refunded = 0.
+			const line = await prisma.earningLine.findUniqueOrThrow({
+				where: { orderLineItemId: orderLineItem.id },
+			});
+			await prisma.earningLine.update({
+				where: { id: line.id },
+				data: { refundedNetCents: line.netCents },
+			});
+
+			await release(createMockJob({ earningId: earning.id }), ctx);
+
+			expect(mocks.payments._getOperationsOfType("seller.pay")).toHaveLength(0);
+			expect(
+				await prisma.payoutTransfer.count({
+					where: { sellerProfileId: earning.sellerProfileId },
+				}),
+			).toBe(0);
+			const after = await prisma.earningLine.findUniqueOrThrow({
+				where: { id: line.id },
+			});
+			expect(after.paidAt).toBeNull();
+			expect(after.payoutTransferId).toBeNull();
+		});
+
+		it("pays the seller in full when the manual refund used platform_absorb (no dispute)", async () => {
+			const { earning, orderLineItem, order, seller } =
+				await createPendingPayout();
+			const { ctx, mocks } = createTestPayoutsContext();
+
+			// Shape after a manual refund with platformAbsorbs=true: both
+			// counters bumped to net. Releasable = net - refunded + absorbed
+			// = net, so the seller is still paid in full.
+			const line = await prisma.earningLine.findUniqueOrThrow({
+				where: { orderLineItemId: orderLineItem.id },
+			});
+			await prisma.earningLine.update({
+				where: { id: line.id },
+				data: {
+					refundedNetCents: line.netCents,
+					platformAbsorbedNetCents: line.netCents,
+				},
+			});
+
+			await release(createMockJob({ earningId: earning.id }), ctx);
+
+			assertSellerPaid(mocks, {
+				sellerConnectAccountId: seller.connectAccountId as string,
+				amount: earning.netAmount / 100,
+			});
+			const transfers = await prisma.payoutTransfer.findMany({
+				where: { sellerProfileId: earning.sellerProfileId },
+			});
+			expect(transfers).toHaveLength(1);
+			expect(transfers[0]?.amountCents).toBe(earning.netAmount);
+			assertNotificationQueued(mocks, "payoutProcessed", {
+				orderId: order.id,
+			});
+		});
+	});
 });
 
 // ============================================================================
