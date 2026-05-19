@@ -1,6 +1,5 @@
 "use client";
 
-import { isHttpError } from "@nolie/http";
 import type { GenerateListingFromPhotoResponse } from "@nolie/schemas/ai/listing-extraction";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDebounce } from "use-debounce";
@@ -21,11 +20,9 @@ interface PendingMap {
 }
 
 export type AiState = "idle" | "loading" | "ready" | "failed";
-export type AiFailureKind = "rate_limited" | "generic";
 
 export interface ListingAiApi {
 	state: AiState;
-	failureKind: AiFailureKind | null;
 	/** Last successfully-applied/displayed result, if any. */
 	result: GenerateListingFromPhotoResponse | null;
 	/** Number of images used for the displayed result (for the provenance pill). */
@@ -217,17 +214,8 @@ export function useListingAi({ imageKeys }: UseListingAiArgs): ListingAiApi {
 		setPending((p) => ({ ...p, [field]: null }));
 	}, []);
 
-	const failureKind = useMemo<AiFailureKind | null>(() => {
-		if (!query.isError || result) return null;
-		if (isHttpError(query.error) && query.error.statusCode === 429) {
-			return "rate_limited";
-		}
-		return "generic";
-	}, [query.isError, query.error, result]);
-
 	return {
 		state,
-		failureKind,
 		result,
 		resultImageCount,
 		pending,
