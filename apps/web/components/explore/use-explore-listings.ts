@@ -1,16 +1,31 @@
 "use client";
 
-import type { ExploreListingsResponse } from "@nolie/schemas/explore";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import type {
+	ExploreListingsResponse,
+	ExploreSort,
+} from "@nolie/schemas/explore";
+import { keepPreviousData, useInfiniteQuery } from "@tanstack/react-query";
 import { browser } from "@/lib/http/browser";
 import { EXPLORE_LISTINGS_QUERY_KEY } from "./queries";
+import { useExploreSort } from "./use-explore-sort";
 
-export function useExploreListings() {
+interface UseExploreListingsOptions {
+	/**
+	 * SSR-fetched first page. Used only when the React Query cache has no
+	 * existing entry — so on back-nav from a listing/profile, the cached
+	 * multi-page infinite-scroll state is preserved (and scroll restoration
+	 * works) instead of being clobbered by a fresh single-page seed.
+	 */
+	initialData?: ExploreListingsResponse;
+}
+
+export function useExploreListings(options?: UseExploreListingsOptions) {
+	const sort: ExploreSort = useExploreSort();
 	const res = useInfiniteQuery({
-		queryKey: [EXPLORE_LISTINGS_QUERY_KEY],
+		queryKey: [EXPLORE_LISTINGS_QUERY_KEY, sort],
 		queryFn: async ({ pageParam }) => {
 			const res = await browser.get<ExploreListingsResponse>("/explore", {
-				params: { cursor: pageParam },
+				params: { cursor: pageParam, sort },
 				timeout: 7_000,
 			});
 			return res.data;
@@ -18,6 +33,18 @@ export function useExploreListings() {
 		initialPageParam: undefined as string | undefined,
 		getNextPageParam: (lastPage) => lastPage.nextCursor,
 		staleTime: 60 * 1000 * 2, // 2 minutes
+		// Keep the previous sort's listings visible while the new sort loads —
+		// the dropdown change feels instant instead of flashing a skeleton.
+		placeholderData: keepPreviousData,
+		initialData: options?.initialData
+			? {
+					pages: [options.initialData],
+					pageParams: [undefined as string | undefined],
+				}
+			: undefined,
+		// Treat the SSR page as freshly fetched so we don't trigger an
+		// immediate refetch on first mount.
+		initialDataUpdatedAt: options?.initialData ? Date.now() : undefined,
 	});
 
 	// Clock drift = serverNow - dataUpdatedAt. Both values are frozen at fetch time,
