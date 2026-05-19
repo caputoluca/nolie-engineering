@@ -105,6 +105,7 @@ export async function paymentIntentSucceeded(
 				data: {
 					paymentStatus: PaymentStatus.succeeded,
 					paymentChargeId: chargeId,
+					paidAt: new Date(),
 					fulfillmentStatus: OrderStatus.awaiting_shipment,
 				},
 			});
