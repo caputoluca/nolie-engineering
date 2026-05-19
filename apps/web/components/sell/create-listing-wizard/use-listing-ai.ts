@@ -1,6 +1,5 @@
 "use client";
 
-import { isHttpError } from "@nolie/http";
 import type { GenerateListingFromPhotoResponse } from "@nolie/schemas/ai/listing-extraction";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDebounce } from "use-debounce";
@@ -21,18 +20,9 @@ interface PendingMap {
 }
 
 export type AiState = "idle" | "loading" | "ready" | "failed";
-export type AiFailureKind = "rate_limited" | "generic";
 
 export interface ListingAiApi {
 	state: AiState;
-	/**
-	 * Set when `state === "failed"`. Lets the UI distinguish "you've hit the
-	 * AI generation rate limit" (recoverable, wait it out) from a generic
-	 * error or empty result (try again, or fill manually).
-	 */
-	failureKind: AiFailureKind | null;
-	/** Seconds until the rate-limit window opens, when failureKind === "rate_limited". */
-	retryAfterSeconds: number | null;
 	/** Last successfully-applied/displayed result, if any. */
 	result: GenerateListingFromPhotoResponse | null;
 	/** Number of images used for the displayed result (for the provenance pill). */
@@ -51,7 +41,6 @@ export interface ListingAiApi {
 	apply: (field: Field) => void;
 	dismiss: (field: Field) => void;
 	clearField: (field: Field) => void;
-	regenerate: () => void;
 	/** True while a request is in flight (initial OR refetch). */
 	isFetching: boolean;
 }
@@ -146,11 +135,9 @@ export function useListingAi({ imageKeys }: UseListingAiArgs): ListingAiApi {
 			return;
 		}
 
-		// Subsequent re-run: clean fields auto-apply (the user hasn't typed
-		// anything custom there, so silently swapping is fine and matches their
-		// expectation when they hit Regenerate). Dirty fields stash as pending
-		// suggestions so we don't stomp their edits — that's where the chip
-		// earns its keep.
+		// Subsequent re-run (e.g. seller swapped the hero photo): clean fields
+		// auto-apply; dirty fields stash as pending suggestions so we don't
+		// stomp the seller's edits — that's where the chip earns its keep.
 		setResult(data);
 		setResultImageCount(imageCount);
 
@@ -227,30 +214,8 @@ export function useListingAi({ imageKeys }: UseListingAiArgs): ListingAiApi {
 		setPending((p) => ({ ...p, [field]: null }));
 	}, []);
 
-	const regenerate = useCallback(() => {
-		// refetch bypasses the cache — re-runs queryFn even if cached.
-		query.refetch();
-	}, [query]);
-
-	const failure = useMemo<{
-		kind: AiFailureKind;
-		retryAfterSeconds: number | null;
-	} | null>(() => {
-		if (!query.isError || result) return null;
-		const err = query.error;
-		if (isHttpError(err) && err.statusCode === 429) {
-			return {
-				kind: "rate_limited",
-				retryAfterSeconds: err.retryAfter ?? null,
-			};
-		}
-		return { kind: "generic", retryAfterSeconds: null };
-	}, [query.isError, query.error, result]);
-
 	return {
 		state,
-		failureKind: failure?.kind ?? null,
-		retryAfterSeconds: failure?.retryAfterSeconds ?? null,
 		result,
 		resultImageCount,
 		pending,
@@ -263,7 +228,6 @@ export function useListingAi({ imageKeys }: UseListingAiArgs): ListingAiApi {
 		apply,
 		dismiss,
 		clearField,
-		regenerate,
 		isFetching: query.isFetching,
 	};
 }

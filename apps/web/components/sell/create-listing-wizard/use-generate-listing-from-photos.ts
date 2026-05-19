@@ -14,8 +14,7 @@ interface UseGenerateListingFromPhotosArgs {
  * angles, etc.) don't trigger a new generation, since they rarely add facts
  * to the title/description and silently overwriting the user's accepted
  * copy is the bigger annoyance. Replacing the hero (delete + re-upload, or
- * a future drag-to-reorder) refetches. Manual `regenerate()` always
- * refetches and sends the full current list.
+ * a future drag-to-reorder) refetches.
  */
 export function useGenerateListingFromPhotos({
 	imageKeys,
