@@ -10,18 +10,14 @@ import {
 import { type DbClient, ListingStatus, type Prisma } from "@nolie/db";
 import {
 	DEFAULT_EXPLORE_LIMIT,
-	ExploreFilterSchema,
 	type ExploreListingSummary,
 	type ExploreQueryType,
 } from "@nolie/schemas/explore";
 import { logger } from "../../logger.js";
 import { queryListings } from "../listings/query.js";
-import {
-	getSoldVisibilityCutoff,
-	publicListingsOrClauses,
-} from "../listings/statuses.js";
 import { reportError } from "../observability/sentry/report.js";
 import { exploreListingSelect } from "./select.js";
+import { loadSortedExploreListings } from "./sort.js";
 import { toExploreListingSummary } from "./transform.js";
 
 interface LoadExploreListingsResult {
@@ -46,51 +42,39 @@ interface ExploreRedis {
  */
 const EXPLORE_SNAPSHOT_DEPTH = 2000;
 
-type ExploreFilter = ExploreQueryType["filter"];
-
 /**
- * The eligible-rows filter for one /explore tab. Single source of truth shared
- * by the ranked snapshot build and the legacy fallback path so the two never
- * drift on visibility.
+ * The eligible-rows filter for /explore. Single source of truth shared by the
+ * ranked snapshot build, the legacy fallback path, and the sort-mode path so
+ * they never drift on visibility.
+ *
+ * The browse grid surfaces only ACTIVE inventory — listings a buyer could
+ * actually act on. Sold / auction-closed are intentionally excluded; they
+ * live in the dedicated "Recently sold" carousel instead. Keeping them out
+ * of the grid removes the duplicate-card problem (same listing in both the
+ * carousel and the grid) and keeps browse focused on "what can I buy now."
+ *
+ * Included statuses:
+ *   - active     — live (buyable / biddable)
+ *   - scheduled  — upcoming auctions
+ *   - pending    — mid-creation (NoLie quirk; explore surfaces these)
+ *   - reserved   — mid-checkout BIN, still showable until paid (10-min hold)
+ *   - failed     — BIN payment failed, listing returns to available
  */
-function buildExploreWhere(filter: ExploreFilter): Prisma.ListingWhereInput {
-	const where: Prisma.ListingWhereInput = {
+export function buildExploreWhere(): Prisma.ListingWhereInput {
+	return {
 		// exclude listings without thumbnails (e.g. load test artifacts)
 		listingAssets: { some: {} },
 		hidden: false,
+		status: {
+			in: [
+				ListingStatus.active,
+				ListingStatus.scheduled,
+				ListingStatus.pending,
+				ListingStatus.reserved,
+				ListingStatus.failed,
+			],
+		},
 	};
-	if (filter === "live") {
-		where.status = ListingStatus.active;
-	} else if (filter === "ended") {
-		// "ended" = recently-ended listings. Auction-won (closed +
-		// winningAmount) obey the cutoff via soldAt; auction-closed without a
-		// winner obeys the cutoff via endAt (UI labels these "Sold on endAt"
-		// too). Payment-failed listings have no time gate.
-		const cutoff = getSoldVisibilityCutoff();
-		where.OR = [
-			{ status: ListingStatus.failed },
-			{
-				status: ListingStatus.closed,
-				winningAmount: { not: null },
-				soldAt: { gte: cutoff },
-			},
-			{
-				status: ListingStatus.closed,
-				winningAmount: null,
-				endAt: { gte: cutoff },
-			},
-		];
-	} else {
-		// `all` filter: public listings + sold/auction-won within the cutoff.
-		// Explore historically also surfaces `pending` (mid-creation listings)
-		// which the seller-profile path does not — append it here without
-		// pushing the quirk into the shared helper.
-		where.OR = [
-			...publicListingsOrClauses(),
-			{ status: ListingStatus.pending },
-		];
-	}
-	return where;
 }
 
 // ---------------------------------------------------------------------------
@@ -98,15 +82,16 @@ function buildExploreWhere(filter: ExploreFilter): Prisma.ListingWhereInput {
 // orderBy [sortPriority, sortTimeMs, id] + id-cursor + exploreListingsCache.
 // ---------------------------------------------------------------------------
 
+type LegacyExploreQuery = Pick<ExploreQueryType, "cursor" | "limit">;
+
 async function loadExploreListings(
 	db: DbClient,
-	query: ExploreQueryType,
+	query: LegacyExploreQuery,
 ): Promise<LoadExploreListingsResult> {
-	const { filter = "all", cursor, limit = DEFAULT_EXPLORE_LIMIT } = query;
-	const where = buildExploreWhere(filter);
+	const { cursor, limit = DEFAULT_EXPLORE_LIMIT } = query;
 
 	const listings = await queryListings(db, {
-		where,
+		where: buildExploreWhere(),
 		select: exploreListingSelect,
 		...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
 		take: limit + 1,
@@ -135,15 +120,15 @@ async function legacyGetExploreListings(
 	query: ExploreQueryType,
 	exploreListingsCache: CacheOf<"exploreListings">,
 ): Promise<LoadExploreListingsResult> {
-	const { filter = "all", limit, cursor } = query;
+	const { limit, cursor } = query;
 
 	if (limit === DEFAULT_EXPLORE_LIMIT && !cursor) {
-		return exploreListingsCache.get(filter, {
-			load: () => loadExploreListings(db, { filter }),
+		return exploreListingsCache.get("default", {
+			load: () => loadExploreListings(db, {}),
 		});
 	}
 
-	return loadExploreListings(db, { filter, limit, cursor });
+	return loadExploreListings(db, { limit, cursor });
 }
 
 // ---------------------------------------------------------------------------
@@ -153,8 +138,6 @@ async function legacyGetExploreListings(
 interface ExploreCursor {
 	/** rankEpoch the snapshot was minted under. */
 	e: number;
-	/** filter tab. */
-	f: ExploreFilter;
 	/** offset into the frozen ID array. */
 	o: number;
 }
@@ -166,9 +149,8 @@ function encodeCursor(c: ExploreCursor): string {
 function decodeCursor(raw: string): ExploreCursor | null {
 	try {
 		const c = JSON.parse(Buffer.from(raw, "base64url").toString());
-		const f = ExploreFilterSchema.safeParse(c?.f);
-		if (typeof c?.e === "number" && typeof c?.o === "number" && f.success) {
-			return { e: c.e, f: f.data, o: c.o };
+		if (typeof c?.e === "number" && typeof c?.o === "number") {
+			return { e: c.e, o: c.o };
 		}
 	} catch {
 		// Malformed/foreign cursor (e.g. a legacy id-cursor after a kill-switch
@@ -206,7 +188,6 @@ function compareForSnapshot(
 }
 
 interface SnapshotBuildLog {
-	filter: ExploreFilter;
 	candidateCount: number;
 	keptCount: number;
 	rankEpoch: number;
@@ -215,12 +196,11 @@ interface SnapshotBuildLog {
 
 async function buildSnapshotIds(
 	db: DbClient,
-	filter: ExploreFilter,
 	rankEpoch: number,
 ): Promise<string[]> {
 	const start = Date.now();
 	const rows = await db.listing.findMany({
-		where: buildExploreWhere(filter),
+		where: buildExploreWhere(),
 		select: {
 			id: true,
 			sellerProfileId: true,
@@ -236,7 +216,6 @@ async function buildSnapshotIds(
 	const ids = ordered.slice(0, EXPLORE_SNAPSHOT_DEPTH);
 
 	const log: SnapshotBuildLog = {
-		filter,
 		candidateCount: rows.length,
 		keptCount: ids.length,
 		rankEpoch,
@@ -279,12 +258,11 @@ async function loadRankedExploreListings(
 ): Promise<LoadExploreListingsResult> {
 	const limit = query.limit ?? DEFAULT_EXPLORE_LIMIT;
 	const parsed = query.cursor ? decodeCursor(query.cursor) : null;
-	const filter: ExploreFilter = parsed?.f ?? query.filter ?? "all";
 	const offset = parsed?.o ?? 0;
 
 	const loadSnapshot = (epoch: number) =>
-		snapshotCache.get(`${filter}:${epoch}`, {
-			load: async () => ({ ids: await buildSnapshotIds(db, filter, epoch) }),
+		snapshotCache.get(`${epoch}`, {
+			load: async () => ({ ids: await buildSnapshotIds(db, epoch) }),
 		});
 
 	// Continuing a scroll whose epoch has since rolled: prefer the snapshot
@@ -294,7 +272,7 @@ async function loadRankedExploreListings(
 	let effectiveEpoch = currentEpoch;
 	let frozen: { ids: string[] } | null = null;
 	if (parsed && parsed.e !== currentEpoch) {
-		const stable = await snapshotCache.get(`${filter}:${parsed.e}`);
+		const stable = await snapshotCache.get(`${parsed.e}`);
 		if (stable) {
 			frozen = stable;
 			effectiveEpoch = parsed.e;
@@ -307,7 +285,7 @@ async function loadRankedExploreListings(
 	const nextOffset = offset + limit;
 	const nextCursor =
 		nextOffset < snap.ids.length
-			? encodeCursor({ e: effectiveEpoch, f: filter, o: nextOffset })
+			? encodeCursor({ e: effectiveEpoch, o: nextOffset })
 			: null;
 
 	return { listings, nextCursor };
@@ -336,6 +314,12 @@ export async function getExploreListings(
 	input: GetExploreListingsInput,
 ): Promise<LoadExploreListingsResult> {
 	const { db, query, caches, redis } = input;
+
+	// Sort modes bypass the ranking + caching system entirely. Opt-in feature,
+	// low traffic; forking the snapshot cache per sort would blow memory.
+	if (query.sort && query.sort !== "featured") {
+		return loadSortedExploreListings(db, query);
+	}
 
 	// Kill switch + rank epoch in one round trip, not two. Fail-safe (§10):
 	// ranked serves ONLY on an explicit "1"; a missing key, "0", or a Redis
