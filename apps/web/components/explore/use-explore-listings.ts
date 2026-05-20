@@ -9,7 +9,14 @@ import { browser } from "@/lib/http/browser";
 import { EXPLORE_LISTINGS_QUERY_KEY } from "./queries";
 import { useExploreSort } from "./use-explore-sort";
 
-export function useExploreListings() {
+interface UseExploreListingsOptions {
+	// SSR-fetched first page. Used only when the React Query cache is empty
+	// for this sort key — on back-nav from a listing page, the cache's
+	// existing multi-page state wins, which preserves scroll position.
+	initialData?: ExploreListingsResponse;
+}
+
+export function useExploreListings(options?: UseExploreListingsOptions) {
 	const sort: ExploreSort = useExploreSort();
 	const res = useInfiniteQuery({
 		queryKey: [EXPLORE_LISTINGS_QUERY_KEY, sort],
@@ -23,6 +30,15 @@ export function useExploreListings() {
 		initialPageParam: undefined as string | undefined,
 		getNextPageParam: (lastPage) => lastPage.nextCursor,
 		staleTime: 60 * 1000 * 2, // 2 minutes
+		initialData: options?.initialData
+			? {
+					pages: [options.initialData],
+					pageParams: [undefined as string | undefined],
+				}
+			: undefined,
+		// Treat the SSR page as freshly fetched so we don't trigger an
+		// immediate refetch on first mount.
+		initialDataUpdatedAt: options?.initialData ? Date.now() : undefined,
 	});
 
 	// Clock drift = serverNow - dataUpdatedAt. Both values are frozen at fetch time,
