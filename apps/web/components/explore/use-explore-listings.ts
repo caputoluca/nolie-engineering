@@ -4,7 +4,7 @@ import type {
 	ExploreListingsResponse,
 	ExploreSort,
 } from "@nolie/schemas/explore";
-import { keepPreviousData, useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { browser } from "@/lib/http/browser";
 import { EXPLORE_LISTINGS_QUERY_KEY } from "./queries";
 import { useExploreSort } from "./use-explore-sort";
@@ -33,9 +33,6 @@ export function useExploreListings(options?: UseExploreListingsOptions) {
 		initialPageParam: undefined as string | undefined,
 		getNextPageParam: (lastPage) => lastPage.nextCursor,
 		staleTime: 60 * 1000 * 2, // 2 minutes
-		// Keep the previous sort's listings visible while the new sort loads —
-		// the dropdown change feels instant instead of flashing a skeleton.
-		placeholderData: keepPreviousData,
 		initialData: options?.initialData
 			? {
 					pages: [options.initialData],
