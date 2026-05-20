@@ -14,10 +14,19 @@ interface UseExploreListingsOptions {
 	// for this sort key — on back-nav from a listing page, the cache's
 	// existing multi-page state wins, which preserves scroll position.
 	initialData?: ExploreListingsResponse;
+	// Sort the SSR payload was fetched for. When the user switches sort via
+	// the shallow router, initialData no longer applies and we must let
+	// React Query fetch the new sort instead of seeding the new key with
+	// stale rows.
+	initialSort?: ExploreSort;
 }
 
 export function useExploreListings(options?: UseExploreListingsOptions) {
 	const sort: ExploreSort = useExploreSort();
+	const seedInitialData =
+		options?.initialData && options.initialSort === sort
+			? options.initialData
+			: undefined;
 	const res = useInfiniteQuery({
 		queryKey: [EXPLORE_LISTINGS_QUERY_KEY, sort],
 		queryFn: async ({ pageParam }) => {
@@ -30,15 +39,15 @@ export function useExploreListings(options?: UseExploreListingsOptions) {
 		initialPageParam: undefined as string | undefined,
 		getNextPageParam: (lastPage) => lastPage.nextCursor,
 		staleTime: 60 * 1000 * 2, // 2 minutes
-		initialData: options?.initialData
+		initialData: seedInitialData
 			? {
-					pages: [options.initialData],
+					pages: [seedInitialData],
 					pageParams: [undefined as string | undefined],
 				}
 			: undefined,
 		// Treat the SSR page as freshly fetched so we don't trigger an
 		// immediate refetch on first mount.
-		initialDataUpdatedAt: options?.initialData ? Date.now() : undefined,
+		initialDataUpdatedAt: seedInitialData ? Date.now() : undefined,
 	});
 
 	// Clock drift = serverNow - dataUpdatedAt. Both values are frozen at fetch time,
