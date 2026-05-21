@@ -45,12 +45,15 @@ export function getLetterPayoutReleaseAt(now: Date = new Date()): Date {
  * and fires a soft-worded review prompt (no "we confirmed delivery"
  * email — we didn't).
  *
- * 7 business days = ~10 calendar days; comfortably past USPS's 1–5
- * business-day FCML service objective. The flip is decoupled from
- * payout (which already released at day-3) and from buyer INR rights
- * (which are user-initiated and time-from-purchase, not status-gated).
+ * 10 business days = ~14 calendar days; well past USPS's 1–5 business-
+ * day FCML service objective with a comfortable cushion for late
+ * deliveries. Bumped from the original 7 after live data showed real
+ * envelopes still landing past the 7-business-day mark. The flip is
+ * decoupled from payout (which already released at day-3) and from
+ * buyer INR rights (user-initiated, time-from-purchase, not status-
+ * gated).
  */
-export const LETTER_DEEMED_DELIVERED_BUSINESS_DAYS = 7;
+export const LETTER_DEEMED_DELIVERED_BUSINESS_DAYS = 10;
 
 /**
  * Resolves the absolute timestamp at which a letter-mail order is
