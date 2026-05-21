@@ -1,3 +1,4 @@
+import { getSortFieldsForTransition } from "@nolie/core/auctions";
 import { addBusinessDays } from "@nolie/core/business-days";
 import { DAYS_PASSED_BEFORE_FULFILLMENT_DISPUTE_WINDOW } from "@nolie/core/disputes";
 import {
@@ -120,6 +121,14 @@ export async function paymentIntentSucceeded(
 				});
 			}
 
+			// All listings in this batch share the same soldAt, and the BIN→sold
+			// sort fields depend only on soldAt, so compute once and reuse.
+			const soldAt = new Date();
+			const sortFields = getSortFieldsForTransition(ListingStatus.sold, {
+				listingType: "fixed_price",
+				createdAt: soldAt,
+				soldAt,
+			});
 			const flipped = await tx.listing.updateMany({
 				where: {
 					reservedByOrderId: { in: orderIds },
@@ -127,7 +136,10 @@ export async function paymentIntentSucceeded(
 				},
 				data: {
 					status: ListingStatus.sold,
-					soldAt: new Date(),
+					soldAt,
+					sortPriority: sortFields.sortPriority,
+					sortTime: sortFields.sortTime,
+					sortTimeMs: sortFields.sortTimeMs,
 					reservedUntil: null,
 					reservedByOrderId: null,
 				},
