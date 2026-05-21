@@ -36,3 +36,29 @@ export const LETTER_PAYOUT_RELEASE_BUSINESS_DAYS = 3;
 export function getLetterPayoutReleaseAt(now: Date = new Date()): Date {
 	return addBusinessDays(now, LETTER_PAYOUT_RELEASE_BUSINESS_DAYS);
 }
+
+/**
+ * Letter-mail (NL-285) "deemed delivered" window. USPS scans ~40–50% of
+ * FCML envelopes, so an unscanned order is normally a delivered order
+ * with a missing scan — not a lost one. After this many business days,
+ * the `flagLetterDelivered` reconciler flips the order to `delivered`
+ * and fires a soft-worded review prompt (no "we confirmed delivery"
+ * email — we didn't).
+ *
+ * 7 business days = ~10 calendar days; comfortably past USPS's 1–5
+ * business-day FCML service objective. The flip is decoupled from
+ * payout (which already released at day-3) and from buyer INR rights
+ * (which are user-initiated and time-from-purchase, not status-gated).
+ */
+export const LETTER_DEEMED_DELIVERED_BUSINESS_DAYS = 7;
+
+/**
+ * Resolves the absolute timestamp at which a letter-mail order is
+ * deemed delivered if no real EasyPost delivery scan has landed.
+ * Computed once at label-creation time and persisted to
+ * `ShippingLabel.deemedDeliveredAt` so the reconciler can do a trivial
+ * indexed scan.
+ */
+export function getLetterDeemedDeliveredAt(now: Date = new Date()): Date {
+	return addBusinessDays(now, LETTER_DEEMED_DELIVERED_BUSINESS_DAYS);
+}
