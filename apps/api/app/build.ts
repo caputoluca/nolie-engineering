@@ -1,3 +1,4 @@
+// deploy-trigger: 2026-05-20
 import type { S3Client } from "@aws-sdk/client-s3";
 import fastifyCookie from "@fastify/cookie";
 import corsPlugin from "@fastify/cors";
