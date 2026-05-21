@@ -38,30 +38,63 @@ export function getLetterPayoutReleaseAt(now: Date = new Date()): Date {
 }
 
 /**
- * Letter-mail (NL-285) "deemed delivered" window. USPS scans ~40–50% of
- * FCML envelopes, so an unscanned order is normally a delivered order
- * with a missing scan — not a lost one. After this many business days,
- * the `flagLetterDelivered` reconciler flips the order to `delivered`
- * and fires a soft-worded review prompt (no "we confirmed delivery"
- * email — we didn't).
- *
- * 10 business days = ~14 calendar days; well past USPS's 1–5 business-
- * day FCML service objective with a comfortable cushion for late
- * deliveries. Bumped from the original 7 after live data showed real
- * envelopes still landing past the 7-business-day mark. The flip is
- * decoupled from payout (which already released at day-3) and from
- * buyer INR rights (user-initiated, time-from-purchase, not status-
- * gated).
+ * Time-based "deemed shipped" window (NL-314). Applies to BOTH parcel
+ * and letter rails. If no carrier "shipped"/`in_transit` scan arrives
+ * within this many business days of label purchase, the
+ * `promoteStaleOrders` cron flips the Order from `awaiting_shipment`
+ * → `shipped`. The carrier's `trackingStatus` is intentionally left
+ * untouched (we *deem* it shipped — we don't know).
  */
-export const LETTER_DEEMED_DELIVERED_BUSINESS_DAYS = 10;
+export const DEEMED_SHIPPED_BUSINESS_DAYS = 2;
 
 /**
- * Resolves the absolute timestamp at which a letter-mail order is
- * deemed delivered if no real EasyPost delivery scan has landed.
- * Computed once at label-creation time and persisted to
- * `ShippingLabel.deemedDeliveredAt` so the reconciler can do a trivial
- * indexed scan.
+ * Time-based "deemed delivered" window (NL-314, generalizing NL-285).
+ * Applies to BOTH parcel and letter rails. After this many business
+ * days the cron flips the Order to `delivered`. Rail-specific behavior
+ * lives in the cron handler:
+ *   - Parcel: full delivery flow (deliveryConfirmed email, review
+ *     prompts, payout release).
+ *   - Letter: review prompts only with `deliveryConfirmed: false`
+ *     copy — payout already released at day-3 via the letter rail.
+ *
+ * 10 business days = ~14 calendar days. Bumped from the original 7
+ * after NL-285 live data showed real envelopes still landing past the
+ * 7-business-day mark. Decoupled from buyer INR rights (user-initiated,
+ * time-from-purchase, not status-gated).
  */
+export const DEEMED_DELIVERED_BUSINESS_DAYS = 10;
+
+/**
+ * Resolves the absolute timestamp at which a label is deemed shipped
+ * if no carrier scan has elevated it past `pre_transit` first.
+ * Computed once at physical label purchase and persisted to
+ * `ShippingLabel.deemedShippedAt` so the cron can do an indexed scan.
+ */
+export function getDeemedShippedAt(now: Date = new Date()): Date {
+	return addBusinessDays(now, DEEMED_SHIPPED_BUSINESS_DAYS);
+}
+
+/**
+ * Resolves the absolute timestamp at which an order is deemed
+ * delivered if no real carrier delivery scan has landed. Computed
+ * once at physical label purchase and persisted to
+ * `ShippingLabel.deemedDeliveredAt`.
+ */
+export function getDeemedDeliveredAt(now: Date = new Date()): Date {
+	return addBusinessDays(now, DEEMED_DELIVERED_BUSINESS_DAYS);
+}
+
+/**
+ * @deprecated Use `DEEMED_DELIVERED_BUSINESS_DAYS` (NL-314). Kept
+ * exclusively for legacy
+ * `apps/api/scripts/backfill-letter-deemed-delivered.ts` bit-for-bit
+ * compatibility during the NL-314 rollout. Drop in a follow-up PR
+ * once the new backfill has run.
+ */
+export const LETTER_DEEMED_DELIVERED_BUSINESS_DAYS =
+	DEEMED_DELIVERED_BUSINESS_DAYS;
+
+/** @deprecated Use `getDeemedDeliveredAt` (NL-314). See above. */
 export function getLetterDeemedDeliveredAt(now: Date = new Date()): Date {
-	return addBusinessDays(now, LETTER_DEEMED_DELIVERED_BUSINESS_DAYS);
+	return getDeemedDeliveredAt(now);
 }
