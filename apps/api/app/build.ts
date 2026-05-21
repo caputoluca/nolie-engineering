@@ -1,3 +1,4 @@
+// deploy-trigger: 2026-05-20
 import type { S3Client } from "@aws-sdk/client-s3";
 import fastifyCookie from "@fastify/cookie";
 import corsPlugin from "@fastify/cors";
@@ -44,6 +45,7 @@ import { meRoutes } from "./routes/me/index.js";
 import { moderationRoutes } from "./routes/moderations.js";
 import { offerRoutes } from "./routes/offers.js";
 import { realtimeRoutes } from "./routes/realtime.js";
+import { sellersRoutes } from "./routes/sellers.js";
 import { shippingRoutes } from "./routes/shipping.js";
 import { sitemapRoutes } from "./routes/sitemap.js";
 import { stripeRoutes } from "./routes/stripe.js";
@@ -179,6 +181,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(moderationRoutes, { prefix: "/moderations" });
 	await fastify.register(sitemapRoutes, { prefix: "/sitemap" });
 	await fastify.register(exploreRoutes, { prefix: "/explore" });
+	await fastify.register(sellersRoutes, { prefix: "/sellers" });
 	await fastify.register(usersRoutes, { prefix: "/users" });
 	/* ------------------- End Routes ------------------- */
 	fastify.log.info(
