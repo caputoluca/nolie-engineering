@@ -440,6 +440,71 @@ describe("Payout Release", () => {
 			});
 		});
 
+		it("pays the seller the remainder after a partial_refund resolves the line", async () => {
+			// Production shape after admin chose PARTIAL_REFUND:
+			//   • createRefund ran with a partial line subtotal → bumped
+			//     EarningLine.refundedNetCents by the proportional seller-net
+			//     slice (less than netCents — the seller is paid the remainder).
+			//   • Dispute flipped to DisputeStatus.released (seller-favorable
+			//     terminal; the Refund row carries the partial detail; see the
+			//     ACTION_TO_DISPUTE_STATUS map in admin/disputes.ts).
+			//   • Release re-queued.
+			// The release math (netCents − refundedNetCents + platformAbsorbedNetCents)
+			// must net out to the unrefunded remainder so the seller is paid
+			// exactly that slice — not the full net, not zero.
+			const { earning, orderLineItem, order, seller, winner } =
+				await createPendingPayout();
+			const { ctx, mocks } = createTestPayoutsContext();
+
+			const line = await prisma.earningLine.findUniqueOrThrow({
+				where: { orderLineItemId: orderLineItem.id },
+			});
+
+			const partialRefundedCents = Math.floor(line.netCents / 4);
+			const expectedRemainderCents = line.netCents - partialRefundedCents;
+
+			await prisma.earningLine.update({
+				where: { id: line.id },
+				data: { refundedNetCents: partialRefundedCents },
+			});
+			await prisma.fulfillmentDispute.create({
+				data: {
+					orderLineItemId: orderLineItem.id,
+					userId: winner.id,
+					issueType: DisputeIssueType.not_received,
+					status: DisputeStatus.released,
+					resolvedAt: new Date(),
+				},
+			});
+
+			await release(createMockJob({ earningId: earning.id }), ctx);
+
+			// Seller paid only the remainder, not the full net.
+			assertSellerPaid(mocks, {
+				sellerConnectAccountId: seller.connectAccountId as string,
+				amount: expectedRemainderCents / 100,
+			});
+
+			const transfers = await prisma.payoutTransfer.findMany({
+				where: { sellerProfileId: earning.sellerProfileId },
+			});
+			expect(transfers).toHaveLength(1);
+			expect(transfers[0]?.amountCents).toBe(expectedRemainderCents);
+
+			const updatedLine = await prisma.earningLine.findUniqueOrThrow({
+				where: { id: line.id },
+			});
+			expect(updatedLine.paidAt).not.toBeNull();
+			expect(updatedLine.payoutTransferId).toBe(transfers[0]?.id);
+			// refundedNetCents stays put — audit, not a release latch.
+			expect(updatedLine.refundedNetCents).toBe(partialRefundedCents);
+			expect(updatedLine.platformAbsorbedNetCents).toBe(0);
+
+			assertNotificationQueued(mocks, "payoutProcessed", {
+				orderId: order.id,
+			});
+		});
+
 		it("Earning.netAmount equals sum(EarningLine.netCents)", async () => {
 			const { earning, lineA, lineB } = await createTwoLineEarning({});
 
