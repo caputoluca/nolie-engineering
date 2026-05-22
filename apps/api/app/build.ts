@@ -16,6 +16,7 @@ import { cachePlugin } from "./plugins/cache.js";
 import { envPlugin } from "./plugins/config.js";
 import { prismaPlugin } from "./plugins/db.js";
 import { errorsPlugin } from "./plugins/errors.js";
+import { eventsPlugin } from "./plugins/events.js";
 import { inboxPlugin } from "./plugins/inbox.js";
 import {
 	type ModerationClient,
@@ -120,6 +121,9 @@ export async function buildApp(options?: BuildAppOptions) {
 
 	fastify.log.debug("Initializing queues");
 	await fastify.register(queuesPlugin, { instance: options?.queues }); // connect to queues
+
+	fastify.log.debug("Initializing engagement event hook");
+	await fastify.register(eventsPlugin);
 
 	fastify.log.debug("Initializing cache");
 	await fastify.register(cachePlugin); // connect to cache

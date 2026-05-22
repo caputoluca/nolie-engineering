@@ -1,6 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { getSortFieldsForTransition } from "@nolie/core/auctions";
 import { addBusinessDays } from "@nolie/core/business-days";
 import { DAYS_PASSED_BEFORE_FULFILLMENT_DISPUTE_WINDOW } from "@nolie/core/disputes";
+import {
+	EngagementEventName,
+	EngagementSystemSessionId,
+} from "@nolie/core/engagement/catalog";
 import {
 	FulfillmentMode,
 	ListingStatus,
@@ -323,6 +328,50 @@ export async function paymentIntentSucceeded(
 		},
 		"payment_intent.succeeded: orders finalized",
 	);
+
+	// purchase_completed engagement events (NL-310 §5.1). One event per line
+	// item per order — token-popularity attribution needs per-listing rows.
+	// `session_id` is the synthetic settle sentinel since there's no user
+	// session in the worker. Single bulk enqueue → one Redis pipeline for the
+	// whole multi-seller bundle instead of N round trips. Fire-and-forget;
+	// never block the settle path.
+	const purchaseOccurredAt = new Date().toISOString();
+	const purchaseEventItems = orders.flatMap((order) =>
+		order.lineItems.map((li) => ({
+			data: {
+				eventId: randomUUID(),
+				eventName: EngagementEventName.purchaseCompleted,
+				eventVersion: 1,
+				occurredAt: purchaseOccurredAt,
+				sessionId: EngagementSystemSessionId.settle,
+				userId: order.buyerId,
+				anonymousId: null,
+				listingId: li.listingId,
+				sellerId: order.sellerProfileId,
+				orderId: order.id,
+				surface: null,
+				queryId: null,
+				rankPosition: null,
+				rankEpoch: null,
+				referrerSurface: null,
+				client: null,
+				appVersion: null,
+				userAgent: null,
+				ipCountry: null,
+				payload: { amount_cents: li.priceCents },
+			},
+		})),
+	);
+	if (purchaseEventItems.length > 0) {
+		void ctx.queues.engagementEvents.write
+			.bulk(purchaseEventItems)
+			.catch((err) => {
+				reportError(err, {
+					operation: "engagement_event_emit_purchase_completed",
+					extra: { orderIds, batchSize: purchaseEventItems.length },
+				});
+			});
+	}
 
 	fanOutCanceledSiblings({
 		realtime: ctx.realtime(),
