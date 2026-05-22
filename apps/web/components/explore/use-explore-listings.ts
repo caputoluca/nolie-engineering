@@ -71,9 +71,19 @@ export function useExploreListings(options?: UseExploreListingsOptions) {
 
 	const listings = res.data?.pages.flatMap((p) => p.listings) ?? [];
 
+	// §19 referrer carry-back. All pages of one infinite-query session share
+	// the same queryId/rankEpoch (the snapshot is frozen per epoch; new
+	// pages are slices of the same ranked query). Read from page 0 so the
+	// values stay stable across pagination and back-nav even if a future
+	// page rolled into a new epoch — we always attribute to the originating
+	// query the user first saw.
+	const firstPage = res.data?.pages[0];
+
 	return {
 		listings,
 		serverOffset,
+		queryId: firstPage?.queryId,
+		rankEpoch: firstPage?.rankEpoch,
 		...res,
 	};
 }
