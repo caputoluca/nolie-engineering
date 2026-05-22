@@ -50,11 +50,30 @@ interface ExploreRedis {
 
 /**
  * How deep the frozen snapshot goes. Scale-prep — at current volume the
- * eligible set is far smaller, so this is effectively "all of it". The
- * SQL-LIMIT pushdown of this bound is the documented scale escape hatch
- * (docs/explore-ranking.md §8/§9 [DEFER]); applied here as a post-sort slice.
+ * eligible set is far smaller, so this is effectively "all of it". Applied
+ * as a post-sort slice over the diversity-capped, JS-sorted candidate set.
  */
 const EXPLORE_SNAPSHOT_DEPTH = 2000;
+
+/**
+ * Upper bound on the candidate set the snapshot is built from. SQL-LIMIT
+ * pushdown via the existing `(sortPriority, rankScore DESC, id)` covering
+ * index — index-only scan, sub-linear with catalog size.
+ *
+ * Sized comfortably above `EXPLORE_SNAPSHOT_DEPTH` so the per-seller
+ * diversity demotion (rows pushed to a tail, not dropped — see
+ * `applyDiversity`) has headroom before the snapshot runs short: a single
+ * seller owning >60% of the candidate set still leaves enough diverse rows
+ * to fill the 2000-row snapshot.
+ *
+ * The SQL ordering is a candidate filter, not the final order. The JS-side
+ * `compareForSnapshot` re-orders the bounded set because ACTIVE_AUCTION rows
+ * sort by `sortTimeMs` (ending soonest), which Prisma's `orderBy` can't
+ * express conditionally on `sortPriority`. Holds as long as the count of
+ * simultaneous live auctions stays below this limit (well under 1k even at
+ * the 50k-catalog projection).
+ */
+const EXPLORE_CANDIDATE_LIMIT = 5000;
 
 /**
  * The eligible-rows filter for /explore. Single source of truth shared by the
@@ -234,6 +253,8 @@ async function buildSnapshotIds(
 			sortTimeMs: true,
 			rankScore: true,
 		},
+		orderBy: [{ sortPriority: "asc" }, { rankScore: "desc" }, { id: "asc" }],
+		take: EXPLORE_CANDIDATE_LIMIT,
 	});
 
 	rows.sort(compareForSnapshot);
@@ -255,17 +276,23 @@ async function buildSnapshotIds(
 
 interface HydratedWindow {
 	listings: ExploreListingSummary[];
-	/** Per-listing seller profile id, parallel to `listings`. Internal only;
-	 *  consumed by the impression emit path, never surfaces to the API client. */
-	sellerProfileIds: string[];
+	impressions: ExploreImpression[];
 }
 
-/** Hydrate a sliced ID window into ordered summaries (`IN` loses order). */
+/**
+ * Hydrate a sliced ID window into ordered summaries (`IN` loses order) and
+ * the parallel impression envelopes. `rankPosition` is the position the user
+ * actually saw (post-drop): if a listing was hidden/deleted between snapshot
+ * build and hydrate it drops from the page entirely and the next surviving
+ * row inherits its slot. IPS-correct — an action joins back to the slot the
+ * user clicked.
+ */
 async function hydrateWindow(
 	db: DbClient,
 	window: string[],
+	offset: number,
 ): Promise<HydratedWindow> {
-	if (window.length === 0) return { listings: [], sellerProfileIds: [] };
+	if (window.length === 0) return { listings: [], impressions: [] };
 	const records = await queryListings(db, {
 		where: { id: { in: window } },
 		select: exploreListingSelect,
@@ -273,17 +300,21 @@ async function hydrateWindow(
 	});
 	const byId = new Map(records.map((r) => [r.id, r]));
 	const listings: ExploreListingSummary[] = [];
-	const sellerProfileIds: string[] = [];
+	const impressions: ExploreImpression[] = [];
+	let position = offset;
 	for (const id of window) {
 		const record = byId.get(id);
-		// A row hidden/deleted between snapshot build and hydrate just drops
-		// from this page — accepted, documented tradeoff (don't backfill).
 		if (record) {
+			position += 1;
 			listings.push(toExploreListingSummary(record));
-			sellerProfileIds.push(record.sellerProfileId);
+			impressions.push({
+				listingId: record.id,
+				sellerId: record.sellerProfileId,
+				rankPosition: position,
+			});
 		}
 	}
-	return { listings, sellerProfileIds };
+	return { listings, impressions };
 }
 
 async function loadRankedExploreListings(
@@ -317,20 +348,12 @@ async function loadRankedExploreListings(
 	const snap = frozen ?? (await loadSnapshot(currentEpoch));
 
 	const window = snap.ids.slice(offset, offset + limit);
-	const { listings, sellerProfileIds } = await hydrateWindow(db, window);
+	const { listings, impressions } = await hydrateWindow(db, window, offset);
 	const nextOffset = offset + limit;
 	const nextCursor =
 		nextOffset < snap.ids.length
 			? encodeCursor({ e: effectiveEpoch, o: nextOffset })
 			: null;
-
-	// rankPosition = offset + i + 1 (1-indexed, doesn't reset on page 2+).
-	// IPS-correct: an action event from this user joins back to this exact slot.
-	const impressions: ExploreImpression[] = listings.map((listing, i) => ({
-		listingId: listing.id,
-		sellerId: sellerProfileIds[i] ?? "",
-		rankPosition: offset + i + 1,
-	}));
 
 	return { listings, nextCursor, impressions };
 }
