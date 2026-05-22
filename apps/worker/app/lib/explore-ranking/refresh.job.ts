@@ -1,14 +1,17 @@
 import { DAY_MS, SOLD_VISIBILITY_DAYS } from "@nolie/core/constants/listings";
 import { EngagementEventName } from "@nolie/core/engagement/catalog";
 import {
+	computePHat,
 	computeRankBaseScore,
 	computeRankScore,
 	computeTokenBoost,
 	DEFAULT_RANKING_CONFIG,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
+	fitBetaPrior,
 	type MatchedToken,
 	matchTokens,
+	PRIOR_STRENGTH_FALLBACK,
 	RANK_BASE_VERSION,
 	TOKEN_BOOST_MIN,
 	TOKEN_BOOST_VERSION,
@@ -34,11 +37,6 @@ const TOKEN_POPULARITY_HALF_LIFE_DAYS = 7;
 // purchase is a stronger intent signal than a cart-add. Doc §17 open Q#6
 // flags the 3× as tunable from real data.
 const PURCHASE_SUCCESS_WEIGHT = 3;
-
-// Cold-start prior strength `α + β` when method-of-moments can't fit (fewer
-// than 2 tokens with trials in a bucket, or zero/clipped variance). Split
-// evenly so the prior mean is 0.5 — neutral. Doc §17 open Q#1.
-const PRIOR_STRENGTH_FALLBACK = 50;
 
 // Cross above this in any single refresh tick and we warn — by then the
 // tokenize-on-fly cost is in the danger zone and the §6.2 "denorm titleTokens
@@ -315,39 +313,6 @@ async function loadCartAddCounts(
 }
 
 /**
- * Beta(α, β) prior fit by method-of-moments over the raw success-rates
- * of OTHER tokens in the same bucket (docs §6.1, Robinson's baseball
- * walkthrough). Falls back to the cold-start prior when there isn't
- * enough signal — fewer than 2 tokens with trials, or a degenerate
- * variance that yields a non-positive prior strength.
- *
- * Cold-start fallback `α = β = PRIOR_STRENGTH_FALLBACK / 2` means a fresh
- * token in a cold bucket starts at `pHat = 0.5` with prior strength 50:
- * at ~3-5 sales/day for popular tokens, that's "half prior, half observed"
- * after ~50 impressions (~1 week of data). Tunable from real data (§17 Q#1).
- */
-function fitBetaPrior(tokens: ReadonlyArray<TokenAcc>): {
-	alpha: number;
-	beta: number;
-} {
-	const half = PRIOR_STRENGTH_FALLBACK / 2;
-	const rates: number[] = [];
-	for (const t of tokens) {
-		if (t.trials > 0) rates.push(t.successes / t.trials);
-	}
-	if (rates.length < 2) return { alpha: half, beta: half };
-
-	const m = rates.reduce((s, r) => s + r, 0) / rates.length;
-	const v = rates.reduce((s, r) => s + (r - m) ** 2, 0) / rates.length;
-	// Degenerate moments ⇒ clamp to fallback rather than emit a nonsense prior.
-	if (m <= 0 || m >= 1 || v <= 0 || v >= m * (1 - m)) {
-		return { alpha: half, beta: half };
-	}
-	const strength = (m * (1 - m)) / v - 1;
-	return { alpha: m * strength, beta: (1 - m) * strength };
-}
-
-/**
  * Aggregate 30d of `engagement_event` into `token_popularity` and return
  * the in-memory pHat lookup + matched-token map for the scoring pass
  * (NL-310 commit #8 — docs §6, §9 stages 1-2).
@@ -502,8 +467,12 @@ async function aggregateTokenPopularity(
 	> = [];
 	for (const a of accByKey.values()) {
 		const prior = priorByKind.get(a.kind) ?? { alpha: half, beta: half };
-		const pHat =
-			(a.successes + prior.alpha) / (a.trials + prior.alpha + prior.beta);
+		const pHat = computePHat({
+			successes: a.successes,
+			trials: a.trials,
+			alpha: prior.alpha,
+			beta: prior.beta,
+		});
 		pHatByKey.set(tokenKey(a.kind, a.value), pHat);
 		upsertRows.push({ ...a, pHat, alpha: prior.alpha, beta: prior.beta });
 	}
