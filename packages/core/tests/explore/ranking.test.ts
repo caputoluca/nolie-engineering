@@ -574,6 +574,181 @@ describe("computeTokenBoost", () => {
 	});
 });
 
+describe("computePriceMult", () => {
+	it("returns 1.0 (neutral) when the listing has no price", async () => {
+		const { computePriceMult } = await import("../../src/explore/ranking");
+		const mult = computePriceMult(
+			{ priceUSD: null, refMedianUSD: 50 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(mult).toBe(1.0);
+	});
+
+	it("returns 1.0 (neutral) when no token median is available", async () => {
+		const { computePriceMult } = await import("../../src/explore/ranking");
+		const mult = computePriceMult(
+			{ priceUSD: 25, refMedianUSD: null },
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(mult).toBe(1.0);
+	});
+
+	it("returns exactly 1.0 at the median (log2(1) = 0 → tanh(0) = 0)", async () => {
+		const { computePriceMult } = await import("../../src/explore/ranking");
+		const mult = computePriceMult(
+			{ priceUSD: 50, refMedianUSD: 50 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(mult).toBe(1.0);
+	});
+
+	it("demotes below-median listings (e.g. $5 vs $50 median ≈ 0.90x)", async () => {
+		const { computePriceMult } = await import("../../src/explore/ranking");
+		// ratio = 0.1, log2(0.1) ≈ -3.32, tanh ≈ -0.998
+		// mult = 1 + 0.10 · (-0.998) ≈ 0.900
+		const mult = computePriceMult(
+			{ priceUSD: 5, refMedianUSD: 50 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(mult).toBeCloseTo(0.9, 2);
+		expect(mult).toBeLessThan(1.0);
+	});
+
+	it("lifts above-median listings (e.g. $100 vs $50 median ≈ 1.08x)", async () => {
+		const { computePriceMult } = await import("../../src/explore/ranking");
+		// ratio = 2.0, log2(2) = 1, tanh(1) ≈ 0.762
+		// mult = 1 + 0.10 · 0.762 ≈ 1.076
+		const mult = computePriceMult(
+			{ priceUSD: 100, refMedianUSD: 50 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(mult).toBeCloseTo(1.076, 2);
+		expect(mult).toBeGreaterThan(1.0);
+	});
+
+	it("clamps to priceMultMin for extreme below-median (saturates the sigmoid)", async () => {
+		const { computePriceMult } = await import("../../src/explore/ranking");
+		// ratio ≈ 0.001 — well past the 0.01 floor. tanh(log2(0.01)) = tanh(-6.64) ≈ -1
+		// mult ≈ 1 - 0.10 = 0.90, which is within [0.85, 1.10] — not clamped to floor.
+		// To force the floor we'd need a more aggressive k. Verify with k=0.30:
+		const aggressive = {
+			...DEFAULT_RANKING_CONFIG,
+			priceMultSensitivity: 0.3,
+		};
+		const mult = computePriceMult(
+			{ priceUSD: 0.5, refMedianUSD: 100 },
+			aggressive,
+		);
+		expect(mult).toBe(aggressive.priceMultMin);
+	});
+
+	it("clamps to priceMultMax for extreme above-median", async () => {
+		const { computePriceMult } = await import("../../src/explore/ranking");
+		// $5000 vs $50 median = 100x; sigmoid saturates near +1.
+		// With k=0.30 aggressive: mult = 1 + 0.30 ≈ 1.30, clamped to 1.10.
+		const aggressive = {
+			...DEFAULT_RANKING_CONFIG,
+			priceMultSensitivity: 0.3,
+		};
+		const mult = computePriceMult(
+			{ priceUSD: 5000, refMedianUSD: 50 },
+			aggressive,
+		);
+		expect(mult).toBe(aggressive.priceMultMax);
+	});
+
+	it("treats priceUSD ≤ 0 as neutral (defensive against bad data)", async () => {
+		const { computePriceMult } = await import("../../src/explore/ranking");
+		expect(
+			computePriceMult(
+				{ priceUSD: 0, refMedianUSD: 50 },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBe(1.0);
+		expect(
+			computePriceMult(
+				{ priceUSD: -10, refMedianUSD: 50 },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBe(1.0);
+	});
+
+	it("the priceMultSensitivity knob is fully reversible (0 ⇒ no adjustment)", async () => {
+		const { computePriceMult } = await import("../../src/explore/ranking");
+		// k=0 collapses the sigmoid contribution to zero; mult is always 1.0
+		// regardless of the price/median ratio.
+		const off = { ...DEFAULT_RANKING_CONFIG, priceMultSensitivity: 0 };
+		expect(computePriceMult({ priceUSD: 1, refMedianUSD: 1000 }, off)).toBe(
+			1.0,
+		);
+		expect(computePriceMult({ priceUSD: 1000, refMedianUSD: 1 }, off)).toBe(
+			1.0,
+		);
+	});
+});
+
+describe("computeRankScore with priceMult", () => {
+	it("priceMult multiplies the full (base + recency)·tokenBoost score", async () => {
+		const now = new Date("2026-05-21T12:00:00Z");
+		// Fresh listing, no base score, neutral tokenBoost → score = 0.30 · 1 · priceMult.
+		const fresh = {
+			rankBaseScore: 0,
+			createdAt: now,
+			now,
+			tokenBoost: 1.0,
+		};
+		const neutral = computeRankScore(
+			{ ...fresh, priceMult: 1.0 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const lifted = computeRankScore(
+			{ ...fresh, priceMult: 1.1 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const demoted = computeRankScore(
+			{ ...fresh, priceMult: 0.85 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(neutral).toBeCloseTo(RECENCY_W, 10);
+		expect(lifted).toBeCloseTo(RECENCY_W * 1.1, 10);
+		expect(demoted).toBeCloseTo(RECENCY_W * 0.85, 10);
+	});
+
+	it("defaults priceMult to 1.0 — back-compat for callers that don't supply it", () => {
+		const now = new Date("2026-05-21T12:00:00Z");
+		const withDefault = computeRankScore(
+			{ rankBaseScore: 0, createdAt: now, now, tokenBoost: 1.0 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const withExplicit1 = computeRankScore(
+			{
+				rankBaseScore: 0,
+				createdAt: now,
+				now,
+				tokenBoost: 1.0,
+				priceMult: 1.0,
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(withDefault).toBe(withExplicit1);
+	});
+
+	it("composes tokenBoost and priceMult multiplicatively (1.20 × 0.90 = 1.08)", () => {
+		const now = new Date("2026-05-21T12:00:00Z");
+		const score = computeRankScore(
+			{
+				rankBaseScore: 0,
+				createdAt: now,
+				now,
+				tokenBoost: 1.2,
+				priceMult: 0.9,
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(score).toBeCloseTo(RECENCY_W * 1.2 * 0.9, 10);
+	});
+});
+
 describe("applyDiversity", () => {
 	const cand = (
 		id: string,

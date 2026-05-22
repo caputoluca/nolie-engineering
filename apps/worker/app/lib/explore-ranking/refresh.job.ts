@@ -2,6 +2,7 @@ import { DAY_MS, SOLD_VISIBILITY_DAYS } from "@nolie/core/constants/listings";
 import { EngagementEventName } from "@nolie/core/engagement/catalog";
 import {
 	computePHat,
+	computePriceMult,
 	computeRankBaseScore,
 	computeRankScore,
 	computeTokenBoost,
@@ -206,7 +207,63 @@ interface RankableListing {
 	sellerProfileId: string;
 	rankBaseScore: number;
 	rankBaseVersion: number;
+	/** Fixed-price asking price (Decimal(10,2) dollars). Null for auctions
+	 * or unpriced fixed-price listings. */
+	price: Prisma.Decimal | null;
+	/** Auction starting bid (Decimal(10,2) dollars — same column shape as
+	 * `price`, despite the historical "bid" naming). Null for fixed-price
+	 * listings. */
+	startingBid: Prisma.Decimal | null;
+	listingType: string;
 }
+
+/**
+ * Effective dollar price for ranking purposes. Fixed-price uses `price`;
+ * auctions use `startingBid`. Both columns are `Decimal(10, 2)` dollars
+ * (despite "Bid" naming, `startingBid` is NOT cents). Returns null when
+ * neither is set — those listings get a neutral priceMult.
+ *
+ * Auctions use the starting bid as a stand-in for "asking price" because
+ * the live winning amount isn't known at refresh time and would lag as
+ * bids accrue anyway. ~96% of listings on `/explore` are fixed-price (per
+ * the doc), so the auction approximation is a minor edge.
+ */
+function effectivePriceUSD(l: {
+	listingType: string;
+	price: Prisma.Decimal | null;
+	startingBid: Prisma.Decimal | null;
+}): number | null {
+	const raw =
+		l.listingType === "fixed_price"
+			? l.price
+			: l.listingType === "auction"
+				? l.startingBid
+				: null;
+	if (raw === null) return null;
+	const n = Number(raw);
+	return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Median of a numeric array. Assumes the caller has already filtered out
+ * non-finite / non-positive values. Sorts in place to avoid an allocation
+ * — caller passes a one-shot copy each time.
+ */
+function median(values: number[]): number {
+	values.sort((a, b) => a - b);
+	const n = values.length;
+	const mid = Math.floor(n / 2);
+	if (n % 2 === 1) return values[mid] as number;
+	return ((values[mid - 1] as number) + (values[mid] as number)) / 2;
+}
+
+/**
+ * Minimum number of priced listings in a token bucket before we trust the
+ * median enough to use it as a sigmoid reference. Below this we fall back
+ * to the overall catalog median — keeps a 2-listing token from anchoring
+ * the sigmoid on whatever those two sellers happened to price at.
+ */
+const PRICE_MEDIAN_MIN_BUCKET = 3;
 
 interface TokenAcc {
 	kind: string;
@@ -222,6 +279,14 @@ interface TokenPopularityResult {
 	/** `${tokenKind}:${tokenValue}` → EB posterior `pHat`. Empty when the
 	 * `ENABLE_TOKEN_BOOST` kill switch is off or no signal landed yet. */
 	pHatByKey: Map<string, number>;
+	/** `${tokenKind}:${tokenValue}` → median price (USD) across listings
+	 * matching this token. Tokens with fewer than `PRICE_MEDIAN_MIN_BUCKET`
+	 * priced listings are absent — caller falls back to `overallMedianPrice`. */
+	medianPriceByKey: Map<string, number>;
+	/** Catalog-wide median price (USD) — the fallback when a listing's
+	 * matched tokens don't have enough listings to anchor their own median.
+	 * Null when no listing in the scan has a price. */
+	overallMedianPrice: number | null;
 	/** Mean of `pHat` across all known tokens — the z-score baseline for
 	 * `computeTokenBoost`. */
 	mu: number;
@@ -307,6 +372,9 @@ async function loadRankableListings(
 			sellerProfileId: true,
 			rankBaseScore: true,
 			rankBaseVersion: true,
+			price: true,
+			startingBid: true,
+			listingType: true,
 		},
 	});
 }
@@ -387,6 +455,8 @@ async function aggregateTokenPopularity(
 
 	const empty = {
 		pHatByKey: new Map<string, number>(),
+		medianPriceByKey: new Map<string, number>(),
+		overallMedianPrice: null,
 		mu: 0,
 		sigma: 0,
 		tokensRefreshed: 0,
@@ -471,6 +541,37 @@ async function aggregateTokenPopularity(
 		}
 	}
 
+	// Price aggregation (NL-310 commit #8.5 — docs §10). Single pass over
+	// the scan pools the listing's effective price into every matched-token
+	// bucket; medians per bucket drive the per-listing `priceMult` sigmoid in
+	// the scoring loop below. Untokenized listings contribute to the overall
+	// median fallback so the sigmoid is still meaningful for them.
+	const pricesByKey = new Map<string, number[]>();
+	const allPrices: number[] = [];
+	for (const r of scan) {
+		const priceUSD = effectivePriceUSD(r);
+		if (priceUSD === null) continue;
+		allPrices.push(priceUSD);
+		const matches = matchedByListing.get(r.id);
+		if (!matches || matches.length === 0) continue;
+		for (const m of matches) {
+			const k = tokenKey(m.tokenKind, m.tokenValue);
+			let arr = pricesByKey.get(k);
+			if (!arr) {
+				arr = [];
+				pricesByKey.set(k, arr);
+			}
+			arr.push(priceUSD);
+		}
+	}
+	const overallMedianPrice = allPrices.length > 0 ? median(allPrices) : null;
+	const medianPriceByKey = new Map<string, number>();
+	for (const [k, prices] of pricesByKey) {
+		if (prices.length >= PRICE_MEDIAN_MIN_BUCKET) {
+			medianPriceByKey.set(k, median(prices));
+		}
+	}
+
 	// Build pHat for EVERY dictionary token (NL-310 commit #8.5 — Bayesian
 	// dict-weight prior). Per-token prior derived from the curator's
 	// `weight` field; observed events update the posterior smoothly as
@@ -481,10 +582,17 @@ async function aggregateTokenPopularity(
 	// Iterating ALL_DICTIONARY_TOKENS (not just accByKey) means we write a
 	// row for every dictionary entry on every tick — ~115 rows, fine at
 	// this scale. The previous per-kind method-of-moments fit is gone; the
-	// curator's weight encodes the prior we want directly.
+	// curator's weight encodes the prior we want directly. The per-token
+	// `medianPrice` is co-persisted (null when the bucket is below
+	// PRICE_MEDIAN_MIN_BUCKET — caller falls back to the overall median).
 	const pHatByKey = new Map<string, number>();
 	const upsertRows: Array<
-		TokenAcc & { pHat: number; alpha: number; beta: number }
+		TokenAcc & {
+			pHat: number;
+			alpha: number;
+			beta: number;
+			medianPrice: number | null;
+		}
 	> = [];
 	for (const t of ALL_DICTIONARY_TOKENS) {
 		const k = tokenKey(t.kind, t.value);
@@ -508,6 +616,7 @@ async function aggregateTokenPopularity(
 			pHat,
 			alpha: prior.alpha,
 			beta: prior.beta,
+			medianPrice: medianPriceByKey.get(k) ?? null,
 		});
 	}
 
@@ -517,21 +626,22 @@ async function aggregateTokenPopularity(
 		const values = Prisma.join(
 			chunk.map(
 				(u) =>
-					Prisma.sql`(${u.kind}, ${u.value}, ${Math.round(u.successes)}::int, ${Math.round(u.trials)}::int, ${u.pHat}::double precision, ${u.alpha}::double precision, ${u.beta}::double precision, now())`,
+					Prisma.sql`(${u.kind}, ${u.value}, ${Math.round(u.successes)}::int, ${Math.round(u.trials)}::int, ${u.pHat}::double precision, ${u.alpha}::double precision, ${u.beta}::double precision, ${u.medianPrice}::double precision, now())`,
 			),
 		);
 		tokensRefreshed += await ctx.prisma.$executeRaw`
 			INSERT INTO token_popularity (
 				"tokenKind", "tokenValue", successes, trials,
-				"pHat", "priorAlpha", "priorBeta", "computedAt"
+				"pHat", "priorAlpha", "priorBeta", "medianPrice", "computedAt"
 			) VALUES ${values}
 			ON CONFLICT ("tokenKind", "tokenValue") DO UPDATE SET
-				successes    = EXCLUDED.successes,
-				trials       = EXCLUDED.trials,
-				"pHat"       = EXCLUDED."pHat",
-				"priorAlpha" = EXCLUDED."priorAlpha",
-				"priorBeta"  = EXCLUDED."priorBeta",
-				"computedAt" = EXCLUDED."computedAt"
+				successes     = EXCLUDED.successes,
+				trials        = EXCLUDED.trials,
+				"pHat"        = EXCLUDED."pHat",
+				"priorAlpha"  = EXCLUDED."priorAlpha",
+				"priorBeta"   = EXCLUDED."priorBeta",
+				"medianPrice" = EXCLUDED."medianPrice",
+				"computedAt"  = EXCLUDED."computedAt"
 		`;
 	}
 
@@ -549,6 +659,8 @@ async function aggregateTokenPopularity(
 	return {
 		matchedByListing,
 		pHatByKey,
+		medianPriceByKey,
+		overallMedianPrice,
 		mu,
 		sigma,
 		tokensRefreshed,
@@ -638,12 +750,15 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 	const now = new Date();
 	const tokenBoostEnabled = process.env.ENABLE_TOKEN_BOOST !== "false";
 	const cartAddSignalEnabled = process.env.ENABLE_CART_ADD_SIGNAL !== "false";
+	const priceMultEnabled = process.env.ENABLE_PRICE_MULT !== "false";
 
 	let scoreMin = Number.POSITIVE_INFINITY;
 	let scoreMax = Number.NEGATIVE_INFINITY;
 	let sellerTrustMax = 0;
 	let addToCartMax = 0;
 	let tokenBoostMax = TOKEN_BOOST_MIN;
+	let priceMultMax = 1.0;
+	let priceMultMin = 1.0;
 
 	const pending = scanRows.map((r) => {
 		const sellerTrust = trustMap.get(r.sellerProfileId) ?? 0;
@@ -654,12 +769,13 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			: 0;
 		if (addToCartCount > addToCartMax) addToCartMax = addToCartCount;
 
+		const matches = tokenPop.matchedByListing.get(r.id);
+
 		// Map matched tokens → known pHats. Tokens with no row in
 		// token_popularity yet (cold-start) drop out — `computeTokenBoost`
 		// treats an empty array as "no signal" and returns TOKEN_BOOST_MIN.
 		let tokenBoost = TOKEN_BOOST_MIN;
 		if (tokenBoostEnabled) {
-			const matches = tokenPop.matchedByListing.get(r.id);
 			const pHats: number[] = [];
 			if (matches) {
 				for (const m of matches) {
@@ -679,11 +795,44 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 		}
 		if (tokenBoost > tokenBoostMax) tokenBoostMax = tokenBoost;
 
-		// v2 (commit #6/#8): recompute the base score on every tick.
-		// sellerTrust + addToCartCount change continuously between ticks
-		// (reviews land, carts fill); the rankBaseVersion gate alone can't
-		// detect those. The IS DISTINCT FROM write guard below absorbs the
-		// cost when nothing actually moved.
+		// Price-vs-median: use the HIGHEST median across this listing's
+		// matched tokens (premium tokens like psa_10 pull the reference up,
+		// so a cheap-PSA-10 is suspicious vs PSA 10 median, not vs character
+		// median). Fall back to the catalog-wide median for listings whose
+		// matched tokens don't have enough listings to anchor their own
+		// median — keeps untokenized cheap junk from escaping the sigmoid.
+		let priceMult = 1.0;
+		if (priceMultEnabled) {
+			const priceUSD = effectivePriceUSD(r);
+			let refMedianUSD: number | null = null;
+			if (matches) {
+				for (const m of matches) {
+					const med = tokenPop.medianPriceByKey.get(
+						tokenKey(m.tokenKind, m.tokenValue),
+					);
+					if (
+						med !== undefined &&
+						(refMedianUSD === null || med > refMedianUSD)
+					) {
+						refMedianUSD = med;
+					}
+				}
+			}
+			if (refMedianUSD === null) refMedianUSD = tokenPop.overallMedianPrice;
+			priceMult = computePriceMult(
+				{ priceUSD, refMedianUSD },
+				DEFAULT_RANKING_CONFIG,
+			);
+		}
+		if (priceMult > priceMultMax) priceMultMax = priceMult;
+		if (priceMult < priceMultMin) priceMultMin = priceMult;
+
+		// v2 (commit #6/#8/#8.5): recompute the base score on every tick.
+		// sellerTrust + addToCartCount + (negative keyword scan in core)
+		// change continuously between ticks (reviews land, carts fill,
+		// descriptions edit); the rankBaseVersion gate alone can't detect
+		// those. The IS DISTINCT FROM write guard below absorbs the cost
+		// when nothing actually moved.
 		const rankBaseScore = computeRankBaseScore(
 			{
 				title: r.title,
@@ -694,7 +843,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			DEFAULT_RANKING_CONFIG,
 		);
 		const rankScore = computeRankScore(
-			{ rankBaseScore, createdAt: r.createdAt, now, tokenBoost },
+			{ rankBaseScore, createdAt: r.createdAt, now, tokenBoost, priceMult },
 			DEFAULT_RANKING_CONFIG,
 		);
 		if (rankScore < scoreMin) scoreMin = rankScore;
@@ -762,6 +911,9 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			sellerTrustMax,
 			addToCartMax,
 			tokenBoostMax,
+			priceMultMax,
+			priceMultMin,
+			overallMedianPrice: tokenPop.overallMedianPrice,
 			tokenizeMs: tokenPop.tokenizeMs,
 			dictSize:
 				TOKEN_DICTIONARY.characters.length +
@@ -769,6 +921,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 				TOKEN_DICTIONARY.rarity.length,
 			tokenBoostEnabled,
 			cartAddSignalEnabled,
+			priceMultEnabled,
 			durationMs: Date.now() - start,
 			scoreMin: Number.isFinite(scoreMin) ? scoreMin : null,
 			scoreMax: Number.isFinite(scoreMax) ? scoreMax : null,

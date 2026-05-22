@@ -82,6 +82,27 @@ export interface RankingConfig {
 	 * same pattern from observed CTR.
 	 */
 	negativeKeywordPenalty: number;
+	/**
+	 * Sensitivity of the price-vs-median sigmoid (`k` in
+	 * `mult = 1 + k · tanh(log2(price/median))`). At `k = 0.10` a listing
+	 * priced at half its token's median lands at ~0.92x multiplier; double
+	 * the median lands at ~1.08x. Tuned conservatively because we don't yet
+	 * have engagement data to calibrate aggressive moves against; raise
+	 * post-deploy if premium isn't surfacing enough.
+	 */
+	priceMultSensitivity: number;
+	/**
+	 * Floor on the price-vs-median sigmoid's multiplicative output. Below
+	 * this the sigmoid clamps — protects against extreme demerits on
+	 * legitimate low-priced listings (e.g. a $0.50 cold-start gateway buy).
+	 */
+	priceMultMin: number;
+	/**
+	 * Cap on the price-vs-median sigmoid's multiplicative output. Above this
+	 * the sigmoid clamps — premium pricing should lift, but not dominate the
+	 * other signals.
+	 */
+	priceMultMax: number;
 }
 
 /**
@@ -112,6 +133,9 @@ export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 	longTitlePenalty: 0.04,
 	tokenBoostSensitivity: 0.2,
 	negativeKeywordPenalty: 0.08,
+	priceMultSensitivity: 0.1,
+	priceMultMin: 0.85,
+	priceMultMax: 1.1,
 };
 
 /**
@@ -294,13 +318,93 @@ export interface RankScoreInput {
 	 * form. The v2 refresh worker writes this column on every listing.
 	 */
 	tokenBoost?: number;
+	/**
+	 * Per-listing multiplicative price-vs-median modifier from
+	 * `computePriceMult`. Defaults to 1.0 (neutral) so callers that don't
+	 * yet supply it (no price on listing, no median for matched tokens) get
+	 * the unmodified token-boosted score.
+	 */
+	priceMult?: number;
+}
+
+export interface ComputePriceMultInput {
+	/**
+	 * Listing's effective price in USD. For fixed-price listings, the
+	 * decimal `price`. For auctions, `startingBid` (cents) divided by 100.
+	 * Null when the listing has no price (rare); collapses to neutral.
+	 */
+	priceUSD: number | null;
+	/**
+	 * Reference median price (USD) for the listing's best-matched dictionary
+	 * token. "Best" = highest median across matched tokens — premium tokens
+	 * (psa_10, alt_art) typically pull the reference up, which is the right
+	 * behavior: a cheap PSA 10 is suspicious vs PSA 10 median, not vs
+	 * character median. Null when no matched token has enough listings to
+	 * compute a median; collapses to neutral.
+	 */
+	refMedianUSD: number | null;
 }
 
 /**
- * Full score = (stored base + weighted recency decay) · tokenBoost.
- * Multiplicative on tokenBoost only — additive composition would let a hot
- * token dominate and there'd be no clean kill switch. tokenBoost = 1.0
- * collapses to the v1 additive form algebraically (docs §2, §8).
+ * Per-listing price-vs-median multiplicative modifier (NL-310 commit #8.5 —
+ * docs/explore-ranking-v2.md §10). Pure function over (listing price,
+ * reference median, config).
+ *
+ *   ratio   = priceUSD / refMedianUSD
+ *   sigmoid = tanh(log2(max(ratio, 0.01)))
+ *   mult    = clamp(min, max, 1 + k · sigmoid)
+ *
+ * `log2(ratio)` puts the ratio on a symmetric log scale: 0.5x = -1,
+ * 1x = 0, 2x = +1. `tanh` bounds the response so extreme ratios saturate
+ * smoothly (no hard cliff at the clamp). Final clamp to `[priceMultMin,
+ * priceMultMax]` keeps any single signal from dominating the rest.
+ *
+ * Edge cases:
+ *   - `priceUSD ≤ 0` or null: neutral (1.0). Auctions before listing,
+ *     listings with no price set.
+ *   - `refMedianUSD ≤ 0` or null: neutral. Token bucket has no priced
+ *     listings yet (cold-start), or no token matched.
+ *   - `ratio < 0.01`: floored before log2 to avoid `-Infinity`. A listing
+ *     priced at 1% of median or less hits the same demerit as 1% of median
+ *     exactly — saturated.
+ *
+ * v2 rationale (docs §10):
+ *   - Cheap-and-below-median listings ($1 commons with the right token,
+ *     wooden curios priced like graded cards) get a small demerit so
+ *     premium-tier inventory surfaces above them.
+ *   - Above-median listings get a small lift so PSA 10s and graded
+ *     premiums rise above raw versions of the same character.
+ *   - Bounded range so price isn't a dominant lever: it complements
+ *     engagement signals, doesn't compete with them.
+ */
+export function computePriceMult(
+	input: ComputePriceMultInput,
+	config: RankingConfig,
+): number {
+	if (input.priceUSD === null || input.priceUSD <= 0) return 1.0;
+	if (input.refMedianUSD === null || input.refMedianUSD <= 0) return 1.0;
+	const ratio = input.priceUSD / input.refMedianUSD;
+	const sigmoid = Math.tanh(Math.log2(Math.max(ratio, 0.01)));
+	return Math.max(
+		config.priceMultMin,
+		Math.min(config.priceMultMax, 1.0 + config.priceMultSensitivity * sigmoid),
+	);
+}
+
+/**
+ * Full score = (stored base + weighted recency decay) · tokenBoost · priceMult.
+ * Both multiplicative modifiers default to 1.0 (neutral), so a caller that
+ * supplies neither collapses cleanly to the v1 additive form. Kill-switch
+ * paths write 1.0 to either column to neutralize that signal without
+ * touching the others (docs §2, §8, §10).
+ *
+ * Composition order is irrelevant for the math (both are scalar
+ * multipliers) but the ranking-design intent is:
+ *   - tokenBoost amplifies the catalog-wide popularity of the listing's
+ *     subject (charizard > generic);
+ *   - priceMult differentiates listings within the same token bucket by
+ *     how their price compares to that bucket's median (PSA 10 above raw,
+ *     bulk-cheap below).
  */
 export function computeRankScore(
 	{
@@ -308,6 +412,7 @@ export function computeRankScore(
 		createdAt,
 		now,
 		tokenBoost = TOKEN_BOOST_MIN,
+		priceMult = 1.0,
 	}: RankScoreInput,
 	config: RankingConfig,
 ): number {
@@ -316,7 +421,9 @@ export function computeRankScore(
 		(now.getTime() - createdAt.getTime()) / 3_600_000,
 	);
 	const recency = 0.5 ** (ageHours / config.recencyHalfLifeHours);
-	return (rankBaseScore + config.weights.recency * recency) * tokenBoost;
+	return (
+		(rankBaseScore + config.weights.recency * recency) * tokenBoost * priceMult
+	);
 }
 
 export interface ComputeTokenBoostInput {
