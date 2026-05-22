@@ -81,10 +81,16 @@ export interface RankingConfig {
  * (docs/explore-ranking-v2.md §9 step 8) — doubles as the
  * retune-without-migration path.
  *   v1 → 2: photoCount/priceTier base replaced by low-effort demerit.
- *   v2 → 3: + cart-add log term, + long-title penalty term, + populated
- *           sellerTrust at weight 0.05 (was 0).
+ *   v2 → 3: scorer accepts cart-add log term, long-title penalty term,
+ *           and sellerTrust weight 0.05 (inputs still unwired at the
+ *           refresh job — defaulted to 0).
+ *   v3 → 4: refresh job now actually populates the sellerTrust input
+ *           (commit #6: Bayesian-shrunk reviews + 1st Edition badge).
+ *           Bump forces a one-time recompute of every existing row so the
+ *           on-disk base score reflects real trust instead of the
+ *           silently-zero default.
  */
-export const RANK_BASE_VERSION = 3;
+export const RANK_BASE_VERSION = 4;
 
 export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 	weights: { recency: 0.3, sellerTrust: 0.05, cartAdd: 0.1 },
