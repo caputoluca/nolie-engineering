@@ -20,9 +20,23 @@ import { exploreListingSelect } from "./select.js";
 import { loadSortedExploreListings } from "./sort.js";
 import { toExploreListingSummary } from "./transform.js";
 
+/**
+ * One impression row per listing returned to the request — `rankPosition` is
+ * 1-indexed against the snapshot (`offset + i + 1` so page 2 starts at 13,
+ * not 1). Emitted by the dispatcher via the optional `onImpressions` callback
+ * on `GetExploreListingsInput`. Legacy / kill-switch path skips impressions
+ * entirely (no meaningful rank position for an id-cursor sort).
+ */
+export interface ExploreImpression {
+	listingId: string;
+	sellerId: string;
+	rankPosition: number;
+}
+
 interface LoadExploreListingsResult {
 	listings: ExploreListingSummary[];
 	nextCursor: string | null;
+	impressions: ExploreImpression[];
 }
 
 /**
@@ -101,6 +115,10 @@ async function loadExploreListings(
 	return {
 		listings: listings.slice(0, limit).map(toExploreListingSummary),
 		nextCursor: getLegacyNextCursor(listings, limit),
+		// Legacy / kill-switch path: id-cursor sort has no meaningful rank
+		// position to record. Impressions are skipped entirely; the dispatcher
+		// will pass an empty array to the callback (effectively no emission).
+		impressions: [],
 	};
 }
 
@@ -123,9 +141,16 @@ async function legacyGetExploreListings(
 	const { limit, cursor } = query;
 
 	if (limit === DEFAULT_EXPLORE_LIMIT && !cursor) {
-		return exploreListingsCache.get("default", {
-			load: () => loadExploreListings(db, {}),
+		// Cache schema predates impressions and intentionally doesn't carry them
+		// — legacy path skips impression emission entirely (id-cursor sort, no
+		// meaningful rank position). Strip on store, re-add empty on read.
+		const cached = await exploreListingsCache.get("default", {
+			load: async () => {
+				const { listings, nextCursor } = await loadExploreListings(db, {});
+				return { listings, nextCursor };
+			},
 		});
+		return { ...cached, impressions: [] };
 	}
 
 	return loadExploreListings(db, { limit, cursor });
@@ -228,26 +253,37 @@ async function buildSnapshotIds(
 	return ids;
 }
 
+interface HydratedWindow {
+	listings: ExploreListingSummary[];
+	/** Per-listing seller profile id, parallel to `listings`. Internal only;
+	 *  consumed by the impression emit path, never surfaces to the API client. */
+	sellerProfileIds: string[];
+}
+
 /** Hydrate a sliced ID window into ordered summaries (`IN` loses order). */
 async function hydrateWindow(
 	db: DbClient,
 	window: string[],
-): Promise<ExploreListingSummary[]> {
-	if (window.length === 0) return [];
+): Promise<HydratedWindow> {
+	if (window.length === 0) return { listings: [], sellerProfileIds: [] };
 	const records = await queryListings(db, {
 		where: { id: { in: window } },
 		select: exploreListingSelect,
 		take: window.length,
 	});
 	const byId = new Map(records.map((r) => [r.id, r]));
-	const out: ExploreListingSummary[] = [];
+	const listings: ExploreListingSummary[] = [];
+	const sellerProfileIds: string[] = [];
 	for (const id of window) {
 		const record = byId.get(id);
 		// A row hidden/deleted between snapshot build and hydrate just drops
 		// from this page — accepted, documented tradeoff (don't backfill).
-		if (record) out.push(toExploreListingSummary(record));
+		if (record) {
+			listings.push(toExploreListingSummary(record));
+			sellerProfileIds.push(record.sellerProfileId);
+		}
 	}
-	return out;
+	return { listings, sellerProfileIds };
 }
 
 async function loadRankedExploreListings(
@@ -281,14 +317,22 @@ async function loadRankedExploreListings(
 	const snap = frozen ?? (await loadSnapshot(currentEpoch));
 
 	const window = snap.ids.slice(offset, offset + limit);
-	const listings = await hydrateWindow(db, window);
+	const { listings, sellerProfileIds } = await hydrateWindow(db, window);
 	const nextOffset = offset + limit;
 	const nextCursor =
 		nextOffset < snap.ids.length
 			? encodeCursor({ e: effectiveEpoch, o: nextOffset })
 			: null;
 
-	return { listings, nextCursor };
+	// rankPosition = offset + i + 1 (1-indexed, doesn't reset on page 2+).
+	// IPS-correct: an action event from this user joins back to this exact slot.
+	const impressions: ExploreImpression[] = listings.map((listing, i) => ({
+		listingId: listing.id,
+		sellerId: sellerProfileIds[i] ?? "",
+		rankPosition: offset + i + 1,
+	}));
+
+	return { listings, nextCursor, impressions };
 }
 
 // ---------------------------------------------------------------------------
@@ -308,17 +352,28 @@ interface GetExploreListingsInput {
 		exploreSnapshot: CacheOf<"exploreSnapshot">;
 	};
 	redis: ExploreRedis;
+	/**
+	 * Per-request impression emit hook. Invoked once after the page slice is
+	 * built, with one entry per returned listing. Callback owns the surface
+	 * and rank epoch, the lib owns the rank position. Skipped on legacy /
+	 * kill-switch / sort-mode paths (no meaningful rank position to record).
+	 */
+	onImpressions?: (impressions: ExploreImpression[]) => void;
 }
 
 export async function getExploreListings(
 	input: GetExploreListingsInput,
 ): Promise<LoadExploreListingsResult> {
-	const { db, query, caches, redis } = input;
+	const { db, query, caches, redis, onImpressions } = input;
 
 	// Sort modes bypass the ranking + caching system entirely. Opt-in feature,
 	// low traffic; forking the snapshot cache per sort would blow memory.
 	if (query.sort && query.sort !== "featured") {
-		return loadSortedExploreListings(db, query);
+		const result = await loadSortedExploreListings(db, query);
+		if (onImpressions && result.impressions.length > 0) {
+			onImpressions(result.impressions);
+		}
+		return result;
 	}
 
 	// Kill switch + rank epoch in one round trip, not two. Fail-safe (§10):
@@ -346,12 +401,16 @@ export async function getExploreListings(
 	// here serves exactly today's feed and pages us, instead of breaking the
 	// page until a human with prod-network Redis access can set "0" (§10).
 	try {
-		return await loadRankedExploreListings(
+		const result = await loadRankedExploreListings(
 			db,
 			query,
 			caches.exploreSnapshot,
 			parseEpoch(epochRaw),
 		);
+		if (onImpressions && result.impressions.length > 0) {
+			onImpressions(result.impressions);
+		}
+		return result;
 	} catch (err) {
 		reportError(err, { operation: "getExploreListings.ranked" });
 		logger.error(
