@@ -8,10 +8,9 @@ import {
 	DEFAULT_RANKING_CONFIG,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
-	fitBetaPrior,
 	type MatchedToken,
 	matchTokens,
-	PRIOR_STRENGTH_FALLBACK,
+	priorFromDictWeight,
 	RANK_BASE_VERSION,
 	TOKEN_BOOST_MIN,
 	TOKEN_BOOST_VERSION,
@@ -248,6 +247,39 @@ function tokenKey(kind: string, value: string): string {
 }
 
 /**
+ * Lookup table: `${kind}:${value}` → curator-set `weight` from the
+ * dictionary. Built once at module load — the dictionary is large enough
+ * that scanning per-token at refresh time would burn a few ms per tick we
+ * don't need to spend.
+ */
+const DICT_WEIGHT_BY_KEY = (() => {
+	const m = new Map<string, number>();
+	for (const e of TOKEN_DICTIONARY.characters)
+		m.set(tokenKey("character", e.token), e.weight);
+	for (const e of TOKEN_DICTIONARY.sets)
+		m.set(tokenKey("set", e.token), e.weight);
+	for (const e of TOKEN_DICTIONARY.rarity)
+		m.set(tokenKey("rarity", e.token), e.weight);
+	return m;
+})();
+
+/**
+ * Every `(kind, value)` pair from the dictionary, in scan order. Used by the
+ * refresh job to write a `token_popularity` row per dictionary entry on
+ * every tick — even tokens with zero observed events get a row whose pHat
+ * reflects the curator's `weight` prior. Listings matching a "cold" token
+ * still get a meaningful tokenBoost from the prior alone.
+ */
+const ALL_DICTIONARY_TOKENS: ReadonlyArray<{ kind: string; value: string }> = [
+	...TOKEN_DICTIONARY.characters.map((e) => ({
+		kind: "character",
+		value: e.token,
+	})),
+	...TOKEN_DICTIONARY.sets.map((e) => ({ kind: "set", value: e.token })),
+	...TOKEN_DICTIONARY.rarity.map((e) => ({ kind: "rarity", value: e.token })),
+];
+
+/**
  * Bounded scan over rankable listings (§7 step 1): live-ish statuses
  * unconditionally, plus any row written within the sold-visibility cutoff.
  * Provable superset of every explore-visible row; old terminal rows drop out
@@ -385,10 +417,6 @@ async function aggregateTokenPopularity(
 		GROUP BY listing_id, event_name
 	`;
 
-	if (eventAgg.length === 0) {
-		return { matchedByListing, tokenizeMs, ...empty };
-	}
-
 	interface ListingCounts {
 		impressions: number;
 		viewed: number;
@@ -443,38 +471,44 @@ async function aggregateTokenPopularity(
 		}
 	}
 
-	if (accByKey.size === 0) {
-		return { matchedByListing, tokenizeMs, ...empty };
-	}
-
-	// Per-bucket prior fit.
-	const tokensByKind = new Map<string, TokenAcc[]>();
-	for (const a of accByKey.values()) {
-		const arr = tokensByKind.get(a.kind) ?? [];
-		arr.push(a);
-		tokensByKind.set(a.kind, arr);
-	}
-	const half = PRIOR_STRENGTH_FALLBACK / 2;
-	const priorByKind = new Map<string, { alpha: number; beta: number }>();
-	for (const [kind, tokens] of tokensByKind) {
-		priorByKind.set(kind, fitBetaPrior(tokens));
-	}
-
-	// pHat per token + upsert payload.
+	// Build pHat for EVERY dictionary token (NL-310 commit #8.5 — Bayesian
+	// dict-weight prior). Per-token prior derived from the curator's
+	// `weight` field; observed events update the posterior smoothly as
+	// trials grow. Listings matching a "cold" (zero-event) token still
+	// get a meaningful tokenBoost from the prior alone — gives day-1
+	// differentiation without waiting for engagement events.
+	//
+	// Iterating ALL_DICTIONARY_TOKENS (not just accByKey) means we write a
+	// row for every dictionary entry on every tick — ~115 rows, fine at
+	// this scale. The previous per-kind method-of-moments fit is gone; the
+	// curator's weight encodes the prior we want directly.
 	const pHatByKey = new Map<string, number>();
 	const upsertRows: Array<
 		TokenAcc & { pHat: number; alpha: number; beta: number }
 	> = [];
-	for (const a of accByKey.values()) {
-		const prior = priorByKind.get(a.kind) ?? { alpha: half, beta: half };
+	for (const t of ALL_DICTIONARY_TOKENS) {
+		const k = tokenKey(t.kind, t.value);
+		const weight = DICT_WEIGHT_BY_KEY.get(k) ?? 1.0;
+		const prior = priorFromDictWeight(weight);
+		const obs = accByKey.get(k);
+		const successes = obs?.successes ?? 0;
+		const trials = obs?.trials ?? 0;
 		const pHat = computePHat({
-			successes: a.successes,
-			trials: a.trials,
+			successes,
+			trials,
 			alpha: prior.alpha,
 			beta: prior.beta,
 		});
-		pHatByKey.set(tokenKey(a.kind, a.value), pHat);
-		upsertRows.push({ ...a, pHat, alpha: prior.alpha, beta: prior.beta });
+		pHatByKey.set(k, pHat);
+		upsertRows.push({
+			kind: t.kind,
+			value: t.value,
+			successes,
+			trials,
+			pHat,
+			alpha: prior.alpha,
+			beta: prior.beta,
+		});
 	}
 
 	let tokensRefreshed = 0;
