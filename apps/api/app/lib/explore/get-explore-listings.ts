@@ -132,7 +132,11 @@ async function loadExploreListings(
 	});
 
 	return {
-		listings: listings.slice(0, limit).map(toExploreListingSummary),
+		// Legacy/kill-switch path has no ranker, so rankPosition is the slot
+		// index in the id-cursor sort. 1-indexed.
+		listings: listings
+			.slice(0, limit)
+			.map((record, i) => toExploreListingSummary(record, i + 1)),
 		nextCursor: getLegacyNextCursor(listings, limit),
 		// Legacy / kill-switch path: id-cursor sort has no meaningful rank
 		// position to record. Impressions are skipped entirely; the dispatcher
@@ -306,7 +310,7 @@ async function hydrateWindow(
 		const record = byId.get(id);
 		if (record) {
 			position += 1;
-			listings.push(toExploreListingSummary(record));
+			listings.push(toExploreListingSummary(record, position));
 			impressions.push({
 				listingId: record.id,
 				sellerId: record.sellerProfileId,

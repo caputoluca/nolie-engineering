@@ -215,6 +215,12 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 				applicationFeeCents: totals.applicationFeeCents,
 				processingFeeCents: totals.processingFeeCents,
 				sellerEarningCents: lineSellerEarning,
+				// §19 — forward the cart-item's referrer triad (null on the
+				// direct-quote path that bypasses cart). Settle worker reads
+				// these to stamp the `purchase_completed` event envelope.
+				referrerQueryId: listing.referrerQueryId,
+				referrerRankPosition: listing.referrerRankPosition,
+				referrerSurface: listing.referrerSurface,
 			});
 		}
 

@@ -107,6 +107,8 @@ async function bulkInsertEvents(
 				${e.rankPosition}::smallint,
 				${e.rankEpoch},
 				${e.referrerSurface},
+				${e.referrerQueryId}::uuid,
+				${e.referrerRankPosition}::smallint,
 				${e.client},
 				${e.appVersion},
 				${e.userAgent},
@@ -122,7 +124,8 @@ async function bulkInsertEvents(
 			user_id, anonymous_id, session_id,
 			listing_id, seller_id, order_id,
 			surface, query_id, rank_position, rank_epoch,
-			referrer_surface, client, app_version, user_agent, ip_country,
+			referrer_surface, referrer_query_id, referrer_rank_position,
+			client, app_version, user_agent, ip_country,
 			payload
 		) VALUES ${values}
 		ON CONFLICT (event_id, occurred_at) DO NOTHING

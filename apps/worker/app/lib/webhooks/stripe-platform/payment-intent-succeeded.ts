@@ -353,7 +353,13 @@ export async function paymentIntentSucceeded(
 				queryId: null,
 				rankPosition: null,
 				rankEpoch: null,
-				referrerSurface: null,
+				// §19 — copied from OrderLineItem (which was copied from
+				// CartItem at materialization). Null when the order came
+				// from a non-cart path (direct quote / offer accept) OR
+				// when the buyer added to cart before referrer wiring shipped.
+				referrerSurface: li.referrerSurface,
+				referrerQueryId: li.referrerQueryId,
+				referrerRankPosition: li.referrerRankPosition,
 				client: null,
 				appVersion: null,
 				userAgent: null,
