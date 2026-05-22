@@ -38,7 +38,19 @@ export function useExploreListings(options?: UseExploreListingsOptions) {
 		},
 		initialPageParam: undefined as string | undefined,
 		getNextPageParam: (lastPage) => lastPage.nextCursor,
-		staleTime: 60 * 1000 * 2, // 2 minutes
+		// Align with server rank_epoch rotation (10 min). Inside one epoch the
+		// snapshot is frozen, so refetching just gives us the same data with a
+		// fresh query_id — duplicates impressions and skews IPS propensities.
+		staleTime: 10 * 60 * 1000,
+		// A tab refocus is NOT a new exposure. Without this, useInfiniteQuery
+		// refetches EVERY loaded page on focus → 24×N fresh impressions for an
+		// N-page scroll (TanStack discussion #3576). The server-side worker's
+		// event_id dedup only catches BullMQ retries — each client refetch
+		// generates fresh event_ids server-side, so this guard has to live on
+		// the client.
+		refetchOnWindowFocus: false,
+		// SSR-seeded for cold-load; don't invalidate the seed on client mount.
+		refetchOnMount: false,
 		initialData: seedInitialData
 			? {
 					pages: [seedInitialData],
@@ -59,9 +71,19 @@ export function useExploreListings(options?: UseExploreListingsOptions) {
 
 	const listings = res.data?.pages.flatMap((p) => p.listings) ?? [];
 
+	// §19 referrer carry-back. All pages of one infinite-query session share
+	// the same queryId/rankEpoch (the snapshot is frozen per epoch; new
+	// pages are slices of the same ranked query). Read from page 0 so the
+	// values stay stable across pagination and back-nav even if a future
+	// page rolled into a new epoch — we always attribute to the originating
+	// query the user first saw.
+	const firstPage = res.data?.pages[0];
+
 	return {
 		listings,
 		serverOffset,
+		queryId: firstPage?.queryId,
+		rankEpoch: firstPage?.rankEpoch,
 		...res,
 	};
 }

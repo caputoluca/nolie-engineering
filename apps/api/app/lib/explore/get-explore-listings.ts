@@ -20,9 +20,23 @@ import { exploreListingSelect } from "./select.js";
 import { loadSortedExploreListings } from "./sort.js";
 import { toExploreListingSummary } from "./transform.js";
 
+/**
+ * One impression row per listing returned to the request — `rankPosition` is
+ * 1-indexed against the snapshot (`offset + i + 1` so page 2 starts at 13,
+ * not 1). Emitted by the dispatcher via the optional `onImpressions` callback
+ * on `GetExploreListingsInput`. Legacy / kill-switch path skips impressions
+ * entirely (no meaningful rank position for an id-cursor sort).
+ */
+export interface ExploreImpression {
+	listingId: string;
+	sellerId: string;
+	rankPosition: number;
+}
+
 interface LoadExploreListingsResult {
 	listings: ExploreListingSummary[];
 	nextCursor: string | null;
+	impressions: ExploreImpression[];
 }
 
 /**
@@ -36,11 +50,30 @@ interface ExploreRedis {
 
 /**
  * How deep the frozen snapshot goes. Scale-prep — at current volume the
- * eligible set is far smaller, so this is effectively "all of it". The
- * SQL-LIMIT pushdown of this bound is the documented scale escape hatch
- * (docs/explore-ranking.md §8/§9 [DEFER]); applied here as a post-sort slice.
+ * eligible set is far smaller, so this is effectively "all of it". Applied
+ * as a post-sort slice over the diversity-capped, JS-sorted candidate set.
  */
 const EXPLORE_SNAPSHOT_DEPTH = 2000;
+
+/**
+ * Upper bound on the candidate set the snapshot is built from. SQL-LIMIT
+ * pushdown via the existing `(sortPriority, rankScore DESC, id)` covering
+ * index — index-only scan, sub-linear with catalog size.
+ *
+ * Sized comfortably above `EXPLORE_SNAPSHOT_DEPTH` so the per-seller
+ * diversity demotion (rows pushed to a tail, not dropped — see
+ * `applyDiversity`) has headroom before the snapshot runs short: a single
+ * seller owning >60% of the candidate set still leaves enough diverse rows
+ * to fill the 2000-row snapshot.
+ *
+ * The SQL ordering is a candidate filter, not the final order. The JS-side
+ * `compareForSnapshot` re-orders the bounded set because ACTIVE_AUCTION rows
+ * sort by `sortTimeMs` (ending soonest), which Prisma's `orderBy` can't
+ * express conditionally on `sortPriority`. Holds as long as the count of
+ * simultaneous live auctions stays below this limit (well under 1k even at
+ * the 50k-catalog projection).
+ */
+const EXPLORE_CANDIDATE_LIMIT = 5000;
 
 /**
  * The eligible-rows filter for /explore. Single source of truth shared by the
@@ -99,8 +132,16 @@ async function loadExploreListings(
 	});
 
 	return {
-		listings: listings.slice(0, limit).map(toExploreListingSummary),
+		// Legacy/kill-switch path has no ranker, so rankPosition is the slot
+		// index in the id-cursor sort. 1-indexed.
+		listings: listings
+			.slice(0, limit)
+			.map((record, i) => toExploreListingSummary(record, i + 1)),
 		nextCursor: getLegacyNextCursor(listings, limit),
+		// Legacy / kill-switch path: id-cursor sort has no meaningful rank
+		// position to record. Impressions are skipped entirely; the dispatcher
+		// will pass an empty array to the callback (effectively no emission).
+		impressions: [],
 	};
 }
 
@@ -123,9 +164,16 @@ async function legacyGetExploreListings(
 	const { limit, cursor } = query;
 
 	if (limit === DEFAULT_EXPLORE_LIMIT && !cursor) {
-		return exploreListingsCache.get("default", {
-			load: () => loadExploreListings(db, {}),
+		// Cache schema predates impressions and intentionally doesn't carry them
+		// — legacy path skips impression emission entirely (id-cursor sort, no
+		// meaningful rank position). Strip on store, re-add empty on read.
+		const cached = await exploreListingsCache.get("default", {
+			load: async () => {
+				const { listings, nextCursor } = await loadExploreListings(db, {});
+				return { listings, nextCursor };
+			},
 		});
+		return { ...cached, impressions: [] };
 	}
 
 	return loadExploreListings(db, { limit, cursor });
@@ -209,6 +257,8 @@ async function buildSnapshotIds(
 			sortTimeMs: true,
 			rankScore: true,
 		},
+		orderBy: [{ sortPriority: "asc" }, { rankScore: "desc" }, { id: "asc" }],
+		take: EXPLORE_CANDIDATE_LIMIT,
 	});
 
 	rows.sort(compareForSnapshot);
@@ -228,26 +278,47 @@ async function buildSnapshotIds(
 	return ids;
 }
 
-/** Hydrate a sliced ID window into ordered summaries (`IN` loses order). */
+interface HydratedWindow {
+	listings: ExploreListingSummary[];
+	impressions: ExploreImpression[];
+}
+
+/**
+ * Hydrate a sliced ID window into ordered summaries (`IN` loses order) and
+ * the parallel impression envelopes. `rankPosition` is the position the user
+ * actually saw (post-drop): if a listing was hidden/deleted between snapshot
+ * build and hydrate it drops from the page entirely and the next surviving
+ * row inherits its slot. IPS-correct — an action joins back to the slot the
+ * user clicked.
+ */
 async function hydrateWindow(
 	db: DbClient,
 	window: string[],
-): Promise<ExploreListingSummary[]> {
-	if (window.length === 0) return [];
+	offset: number,
+): Promise<HydratedWindow> {
+	if (window.length === 0) return { listings: [], impressions: [] };
 	const records = await queryListings(db, {
 		where: { id: { in: window } },
 		select: exploreListingSelect,
 		take: window.length,
 	});
 	const byId = new Map(records.map((r) => [r.id, r]));
-	const out: ExploreListingSummary[] = [];
+	const listings: ExploreListingSummary[] = [];
+	const impressions: ExploreImpression[] = [];
+	let position = offset;
 	for (const id of window) {
 		const record = byId.get(id);
-		// A row hidden/deleted between snapshot build and hydrate just drops
-		// from this page — accepted, documented tradeoff (don't backfill).
-		if (record) out.push(toExploreListingSummary(record));
+		if (record) {
+			position += 1;
+			listings.push(toExploreListingSummary(record, position));
+			impressions.push({
+				listingId: record.id,
+				sellerId: record.sellerProfileId,
+				rankPosition: position,
+			});
+		}
 	}
-	return out;
+	return { listings, impressions };
 }
 
 async function loadRankedExploreListings(
@@ -281,14 +352,14 @@ async function loadRankedExploreListings(
 	const snap = frozen ?? (await loadSnapshot(currentEpoch));
 
 	const window = snap.ids.slice(offset, offset + limit);
-	const listings = await hydrateWindow(db, window);
+	const { listings, impressions } = await hydrateWindow(db, window, offset);
 	const nextOffset = offset + limit;
 	const nextCursor =
 		nextOffset < snap.ids.length
 			? encodeCursor({ e: effectiveEpoch, o: nextOffset })
 			: null;
 
-	return { listings, nextCursor };
+	return { listings, nextCursor, impressions };
 }
 
 // ---------------------------------------------------------------------------
@@ -308,17 +379,28 @@ interface GetExploreListingsInput {
 		exploreSnapshot: CacheOf<"exploreSnapshot">;
 	};
 	redis: ExploreRedis;
+	/**
+	 * Per-request impression emit hook. Invoked once after the page slice is
+	 * built, with one entry per returned listing. Callback owns the surface
+	 * and rank epoch, the lib owns the rank position. Skipped on legacy /
+	 * kill-switch / sort-mode paths (no meaningful rank position to record).
+	 */
+	onImpressions?: (impressions: ExploreImpression[]) => void;
 }
 
 export async function getExploreListings(
 	input: GetExploreListingsInput,
 ): Promise<LoadExploreListingsResult> {
-	const { db, query, caches, redis } = input;
+	const { db, query, caches, redis, onImpressions } = input;
 
 	// Sort modes bypass the ranking + caching system entirely. Opt-in feature,
 	// low traffic; forking the snapshot cache per sort would blow memory.
 	if (query.sort && query.sort !== "featured") {
-		return loadSortedExploreListings(db, query);
+		const result = await loadSortedExploreListings(db, query);
+		if (onImpressions && result.impressions.length > 0) {
+			onImpressions(result.impressions);
+		}
+		return result;
 	}
 
 	// Kill switch + rank epoch in one round trip, not two. Fail-safe (§10):
@@ -346,12 +428,16 @@ export async function getExploreListings(
 	// here serves exactly today's feed and pages us, instead of breaking the
 	// page until a human with prod-network Redis access can set "0" (§10).
 	try {
-		return await loadRankedExploreListings(
+		const result = await loadRankedExploreListings(
 			db,
 			query,
 			caches.exploreSnapshot,
 			parseEpoch(epochRaw),
 		);
+		if (onImpressions && result.impressions.length > 0) {
+			onImpressions(result.impressions);
+		}
+		return result;
 	} catch (err) {
 		reportError(err, { operation: "getExploreListings.ranked" });
 		logger.error(

@@ -1,37 +1,52 @@
 /**
- * /explore default-feed ranking — pure scorer + diversity pass (NL-284).
+ * /explore default-feed ranking — pure scorer + diversity pass (NL-284, NL-310).
  *
- * v1 calibration (locked after analysing the live catalog — see
- * docs/explore-ranking.md §5): a cold-start, tool-generated collectibles
- * catalog has NO usable positive quality variance. ~79% of listings have
- * exactly 2 photos, description length is a spike (median 81 / p90 101 chars,
- * bulk-lister templates), and every listing has a price — so `photoCount`,
- * `descLen` and `priceComplete` are all inert and a graded "quality" weight
- * would be fiction. Median time-to-sale is 1.4d (p90 6.6d), so recency IS the
- * right primary signal, not a compromise. The one real signal is the *bottom*:
- * title-echo / near-empty listings (~10%). So v1 = recency-dominant + a soft
- * low-effort demerit + the per-seller diversity cap. `sellerTrust` stays a
- * live seam (weight 0 in v1; the 1st Edition badge fast-follow NL-266 flips it
- * to 0.20 by populating the input — no formula rewrite). Graded quality and
- * price tiers were removed, not zeroed: re-deriving them would need a real,
- * varying signal this vertical doesn't have at cold-start.
+ * v1 (NL-284, locked 2026-05-17): recency-dominant additive scorer with a
+ * soft low-effort demerit and per-seller diversity cap. See
+ * docs/explore-ranking.md §5 for the cold-start catalog analysis that made
+ * graded "quality" a fiction at the time.
  *
- * No I/O, no clock access: `now` is injected into `computeRankScore` so the
- * worker refresh job is the sole owner of the time-varying term and the
- * function stays deterministically testable. Weights/cap/penalty live in an
- * immutable `RankingConfig` that is PASSED IN — never read from a module
- * global — so tests can override it and runtime-config/LTR slot in later
- * behind the same signatures (docs/explore-ranking.md §5, §11).
+ * v2 (NL-310, this commit): the catalog grew 7× and cart shipped. v2 layers
+ * three signals onto the v1 seam: (a) cart-adds (log-scaled engagement),
+ * (b) populated `sellerTrust` (Bayesian-shrunk reviews + 1st Edition badge,
+ * weight ramped 0 → 0.05 — sparse, but the seam is now live), and
+ * (c) `tokenBoost` (Empirical-Bayes title-token popularity, max-of-tokens,
+ * length-penalized). Composition turns multiplicative on `tokenBoost` so the
+ * boost amplifies the additive signals without crowding them; everything else
+ * stays additive (a cart-add is worth the same whether the listing is fresh
+ * or stale). Recency comes down (0.45 → 0.30) now that other signals are
+ * carrying weight. Kill-switch path: write `tokenBoost = 1.0` to every row →
+ * multiplicative collapses cleanly to the additive form. See
+ * docs/explore-ranking-v2.md §2 for the locked decisions.
+ *
+ * No I/O, no clock: `now` is injected into `computeRankScore` so the worker
+ * refresh job is the sole owner of the time-varying term. Weights, sensitivity,
+ * cap and penalties live in an immutable `RankingConfig` that is PASSED IN —
+ * never read from a module global — so tests can override it and a future
+ * LTR ranker slots in behind the same `(features, config) → score` signature
+ * (docs/explore-ranking-v2.md §12).
  */
+
+import type { MatchedToken } from "./token-dictionary";
 
 export interface RankingConfig {
 	weights: {
 		recency: number;
 		/**
-		 * Seller-trust weight. 0 in v1 (`sellerTrust` input is inert); the
-		 * 1st Edition badge fast-follow (NL-266) flips this to 0.20.
+		 * Seller-trust weight. v1 was 0; v2 ramps to 0.05 — sparse signal
+		 * (only a handful of sellers have any reviews), the weight ramps to
+		 * 0.15–0.20 as density grows. Honest framing: today this is mostly a
+		 * placeholder so the seam is wired end-to-end (docs §7.4).
 		 */
 		sellerTrust: number;
+		/**
+		 * Cart-add weight applied to `log10(1 + addToCartCount)`. Log-scaled
+		 * because the marginal value of the 51st cart-add is far less than
+		 * the 5th. Starts at 0.10 — a listing with 5 cart-adds gets ≈ 0.078
+		 * of boost, roughly a sixth of a day of fresh-recency at the new
+		 * 0.30 recency weight (docs §8).
+		 */
+		cartAdd: number;
 	};
 	recencyHalfLifeHours: number;
 	perSellerCap: number;
@@ -40,28 +55,148 @@ export interface RankingConfig {
 	 * listings. Never a WHERE filter — fully reversible by setting it to 0.
 	 */
 	lowEffortPenalty: number;
+	/**
+	 * Additive demerit subtracted from the base when the title exceeds
+	 * `LONG_TITLE_MAX_CHARS`. Pairs with the multiplicative length damper
+	 * in `computeTokenBoost`. Smaller than the low-effort penalty because a
+	 * long title is sometimes legitimate (TCG titles can carry set + rarity
+	 * + grade); this deters obvious stuffing without burying real detail.
+	 */
+	longTitlePenalty: number;
+	/**
+	 * Sensitivity of `tokenBoost` to a token's z-score above the global pHat
+	 * mean. The boost form is `1 + k · z`, clamped to `[TOKEN_BOOST_MIN,
+	 * TOKEN_BOOST_MAX]`. At `k = 0.20`, a +1σ token (~top quartile) lands at
+	 * 1.20; a top-decile token (~1.28σ) lands at ~1.256 — aligning with the
+	 * doc's "top-decile hits ~1.25" target (docs §6.1, an "expected k ≈ 3"
+	 * is the doc's published guess; the calibration math actually wants
+	 * k ≈ 0.2 — tunable post-deploy from real distribution).
+	 */
+	tokenBoostSensitivity: number;
+	/**
+	 * Subtractive penalty applied to `rankBaseScore` when the listing's title
+	 * or description matches any term in `NEGATIVE_KEYWORDS` (e.g. "wooden",
+	 * "replica", "custom carved"). Catches non-TCG-card novelty listings that
+	 * tokens + price-vs-median can't distinguish from real cards. Static list
+	 * is a stopgap until per-listing engagement (LTR / Phase 4) can learn the
+	 * same pattern from observed CTR.
+	 */
+	negativeKeywordPenalty: number;
+	/**
+	 * Sensitivity of the price-vs-median sigmoid (`k` in
+	 * `mult = 1 + k · tanh(log2(price/median))`). At `k = 0.10` a listing
+	 * priced at half its token's median lands at ~0.92x multiplier; double
+	 * the median lands at ~1.08x. Tuned conservatively because we don't yet
+	 * have engagement data to calibrate aggressive moves against; raise
+	 * post-deploy if premium isn't surfacing enough.
+	 */
+	priceMultSensitivity: number;
+	/**
+	 * Floor on the price-vs-median sigmoid's multiplicative output. Below
+	 * this the sigmoid clamps — protects against extreme demerits on
+	 * legitimate low-priced listings (e.g. a $0.50 cold-start gateway buy).
+	 */
+	priceMultMin: number;
+	/**
+	 * Cap on the price-vs-median sigmoid's multiplicative output. Above this
+	 * the sigmoid clamps — premium pricing should lift, but not dominate the
+	 * other signals.
+	 */
+	priceMultMax: number;
 }
 
 /**
  * Bumped when the inputs or weights feeding `rankBaseScore` change. The
  * refresh job recomputes any row whose stored `rankBaseVersion` is lower
- * (docs/explore-ranking.md §7 step 2) — this doubles as the
- * retune-without-migration path. v1→2: photoCount/priceTier base replaced by
- * the low-effort demerit after the cold-start catalog analysis.
+ * (docs/explore-ranking-v2.md §9 step 8) — doubles as the
+ * retune-without-migration path.
+ *   v1 → 2: photoCount/priceTier base replaced by low-effort demerit.
+ *   v2 → 3: scorer accepts cart-add log term, long-title penalty term,
+ *           and sellerTrust weight 0.05 (inputs still unwired at the
+ *           refresh job — defaulted to 0).
+ *   v3 → 4: refresh job now actually populates the sellerTrust input
+ *           (commit #6: Bayesian-shrunk reviews + 1st Edition badge).
+ *           Bump forces a one-time recompute of every existing row so the
+ *           on-disk base score reflects real trust instead of the
+ *           silently-zero default.
+ *   v4 → 5: negative-keyword demerit added to the base. Pre-deploy data
+ *           pass surfaced novelty items (wooden cards, replicas) tokens +
+ *           price-vs-median couldn't catch.
  */
-export const RANK_BASE_VERSION = 2;
+export const RANK_BASE_VERSION = 5;
 
 export const DEFAULT_RANKING_CONFIG: RankingConfig = {
-	weights: { recency: 0.45, sellerTrust: 0 },
-	recencyHalfLifeHours: 72, // validated: 1.4d median / 6.6d p90 sell-through
+	weights: { recency: 0.3, sellerTrust: 0.05, cartAdd: 0.1 },
+	recencyHalfLifeHours: 72,
 	perSellerCap: 3,
-	lowEffortPenalty: 0.12, // ≈1.3 days of recency: a visible demote, not burial
+	lowEffortPenalty: 0.12,
+	longTitlePenalty: 0.04,
+	tokenBoostSensitivity: 0.2,
+	negativeKeywordPenalty: 0.08,
+	priceMultSensitivity: 0.1,
+	priceMultMin: 0.85,
+	priceMultMax: 1.1,
 };
+
+/**
+ * Title/description matches against this list subtract
+ * `RankingConfig.negativeKeywordPenalty` from the base score. Targets the
+ * specific class of listing tokens + price-vs-median can't catch — novelty
+ * items priced like real cards (wooden carvings, custom proxies, replicas,
+ * etc.). Each entry is matched as a whole-word substring on a normalized
+ * (lowercase, punctuation-collapsed) join of title + description.
+ *
+ * Curated narrowly to avoid false positives. "Promo" is NOT here — legitimate
+ * cards are tagged promos. Sellers can rename listings to bypass, but a
+ * seller paying our fees to list a $20 wooden Eevee is unlikely to bother.
+ *
+ * Final removal trigger: when per-listing engagement (LTR / Phase 4) ships
+ * and learns this pattern from observed CTR (months out per docs §16). Until
+ * then this is the cheapest way to catch the failure mode.
+ */
+export const NEGATIVE_KEYWORDS: ReadonlyArray<string> = [
+	"wooden",
+	"hand carved",
+	"hand-carved",
+	"handmade",
+	"hand made",
+	"hand-made",
+	"homemade",
+	"home made",
+	"home-made",
+	"custom carved",
+	"custom made",
+	"replica",
+	"fanmade",
+	"fan made",
+	"fan-made",
+	"proxy",
+	"proxies",
+];
+
+/**
+ * Token-boost clamp range. 1.0 = neutral (no boost AND kill-switch value
+ * the refresh job writes when ENABLE_TOKEN_BOOST is off). 1.30 = max — the
+ * top of the curated dictionary's weight ladder. Out-of-range values from the
+ * EB z-score formula clamp to this range BEFORE the length damper applies
+ * (docs §6.1).
+ */
+export const TOKEN_BOOST_MIN = 1.0;
+export const TOKEN_BOOST_MAX = 1.3;
+
+/**
+ * Above this length the multiplicative token-boost damper kicks in
+ * (`min(1, LONG_TITLE_MAX_CHARS / titleLen)`) AND the additive
+ * `longTitlePenalty` fires at the base-score level. Picked at 60 — Etsy
+ * uses 70, eBay 60-70; TCG titles are naturally short, so we cap tight
+ * (docs §2).
+ */
+export const LONG_TITLE_MAX_CHARS = 60;
 
 /**
  * A trimmed description at or under this many characters is low-effort:
  * catches "NM", "Mint condition", "Promo - NM", "HP CONDITION" and the like
- * (the ≤20-char tail measured at ~8% of the live catalog).
+ * (the ≤20-char tail measured at ~8% of the v1 catalog).
  */
 const LOW_EFFORT_DESC_MAX_CHARS = 20;
 
@@ -69,10 +204,16 @@ export interface RankBaseInput {
 	title: string;
 	description: string | null;
 	/**
-	 * Seller-trust signal in [0,1]. v1 weight is 0 so the value is inert;
-	 * the seam exists so the badge fast-follow only has to populate it.
+	 * Seller-trust signal in [0,1]. Populated in v2 (commit #6) from the
+	 * Bayesian-shrunk review average + 1st Edition badge composite.
 	 */
 	sellerTrust?: number;
+	/**
+	 * Current cart-add count (live cart members, not historical). Refreshed
+	 * by the worker from `cart_added − cart_removed` over the active cart
+	 * state (docs §9 step 3). Log-scaled in the score.
+	 */
+	addToCartCount?: number;
 }
 
 function clamp01(v: number): number {
@@ -94,10 +235,10 @@ function normalizeTitle(title: string): string {
 }
 
 /**
- * The only signal with real variance in a cold-start tool-generated catalog:
- * a near-empty description, or one that just echoes the title. Everything
- * else (photo count, description length, price-complete) is structurally
- * constant here, so v1 demotes the bottom rather than grading a fictional top.
+ * The cold-start signal with real variance: a near-empty description, or one
+ * that just echoes the title. v2 keeps this exactly as in v1 — the new
+ * `addToCartCount` and `tokenBoost` signals are about *promoting* the top,
+ * not changing what the bottom looks like.
  */
 function isLowEffortListing(
 	title: string,
@@ -108,35 +249,171 @@ function isLowEffortListing(
 	return normalizeTitle(d) === normalizeTitle(title);
 }
 
+function isLongTitle(title: string): boolean {
+	return title.length > LONG_TITLE_MAX_CHARS;
+}
+
 /**
- * Time-independent part of the score: weighted sellerTrust (0 in v1) minus a
- * soft low-effort demerit. Written at listing create/update; rarely changes.
- * Range in v1: [-lowEffortPenalty, 0].
+ * Pre-compiled word-boundary regexes for the negative-keyword scan. One
+ * combined alternation per call to `matchesNegativeKeyword` would mean
+ * recompiling on every score; instead compile once at module load and reuse.
+ * Word-boundary `\b…\b` keeps "proxy" from firing on "approximately" and
+ * "wooden" from firing on "woodenly" etc.
+ */
+const NEGATIVE_KEYWORD_REGEX = new RegExp(
+	`\\b(?:${NEGATIVE_KEYWORDS.map((k) =>
+		k.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&"),
+	).join("|")})\\b`,
+	"i",
+);
+
+/**
+ * True when the listing's title or description matches any
+ * `NEGATIVE_KEYWORDS` entry. Joins title + description with a space so a
+ * keyword in either field fires the match. Case-insensitive,
+ * whole-word — see `NEGATIVE_KEYWORD_REGEX` for the false-positive guards.
+ */
+export function matchesNegativeKeyword(
+	title: string,
+	description: string | null,
+): boolean {
+	const haystack = `${title} ${description ?? ""}`;
+	return NEGATIVE_KEYWORD_REGEX.test(haystack);
+}
+
+/**
+ * Time-independent part of the score. v2 form:
+ *   sellerTrust·w − lowEffort?·penalty − longTitle?·penalty + log10(1+atc)·w
+ *
+ * Range with default config: roughly `[-0.16, 0.05 + cartAdd]`. The cart-add
+ * term is unbounded in principle but log10-capped in practice; a listing with
+ * 100 cart-adds (the historical max we'd expect in v2) contributes
+ * `0.10·log10(101) ≈ 0.20`.
  */
 export function computeRankBaseScore(
 	input: RankBaseInput,
 	config: RankingConfig,
 ): number {
 	const trust = config.weights.sellerTrust * clamp01(input.sellerTrust ?? 0);
-	const penalty = isLowEffortListing(input.title, input.description)
+	const cartAddCount = Math.max(0, input.addToCartCount ?? 0);
+	const cartAdd = config.weights.cartAdd * Math.log10(1 + cartAddCount);
+	const lowEffort = isLowEffortListing(input.title, input.description)
 		? config.lowEffortPenalty
 		: 0;
-	return trust - penalty;
+	const longTitle = isLongTitle(input.title) ? config.longTitlePenalty : 0;
+	const negativeKeyword = matchesNegativeKeyword(input.title, input.description)
+		? config.negativeKeywordPenalty
+		: 0;
+	return trust + cartAdd - lowEffort - longTitle - negativeKeyword;
 }
 
 export interface RankScoreInput {
 	rankBaseScore: number;
 	createdAt: Date;
 	now: Date;
+	/**
+	 * Per-listing multiplicative boost from `computeTokenBoost`. Defaults to
+	 * `TOKEN_BOOST_MIN` (1.0 = neutral) so callers that don't yet supply it
+	 * (legacy code paths, kill-switch state) get the additive v1-equivalent
+	 * form. The v2 refresh worker writes this column on every listing.
+	 */
+	tokenBoost?: number;
+	/**
+	 * Per-listing multiplicative price-vs-median modifier from
+	 * `computePriceMult`. Defaults to 1.0 (neutral) so callers that don't
+	 * yet supply it (no price on listing, no median for matched tokens) get
+	 * the unmodified token-boosted score.
+	 */
+	priceMult?: number;
+}
+
+export interface ComputePriceMultInput {
+	/**
+	 * Listing's effective price in USD. For fixed-price listings, the
+	 * decimal `price`. For auctions, `startingBid` (cents) divided by 100.
+	 * Null when the listing has no price (rare); collapses to neutral.
+	 */
+	priceUSD: number | null;
+	/**
+	 * Reference median price (USD) for the listing's best-matched dictionary
+	 * token. "Best" = highest median across matched tokens — premium tokens
+	 * (psa_10, alt_art) typically pull the reference up, which is the right
+	 * behavior: a cheap PSA 10 is suspicious vs PSA 10 median, not vs
+	 * character median. Null when no matched token has enough listings to
+	 * compute a median; collapses to neutral.
+	 */
+	refMedianUSD: number | null;
 }
 
 /**
- * Full score = stored base + weighted recency decay. recency =
- * 0.5 ^ (ageHours / halfLife) ∈ (0,1] — the only time-varying input.
- * Age is floored at 0 so a clock-skewed future `createdAt` can't exceed 1.
+ * Per-listing price-vs-median multiplicative modifier (NL-310 commit #8.5 —
+ * docs/explore-ranking-v2.md §10). Pure function over (listing price,
+ * reference median, config).
+ *
+ *   ratio   = priceUSD / refMedianUSD
+ *   sigmoid = tanh(log2(max(ratio, 0.01)))
+ *   mult    = clamp(min, max, 1 + k · sigmoid)
+ *
+ * `log2(ratio)` puts the ratio on a symmetric log scale: 0.5x = -1,
+ * 1x = 0, 2x = +1. `tanh` bounds the response so extreme ratios saturate
+ * smoothly (no hard cliff at the clamp). Final clamp to `[priceMultMin,
+ * priceMultMax]` keeps any single signal from dominating the rest.
+ *
+ * Edge cases:
+ *   - `priceUSD ≤ 0` or null: neutral (1.0). Auctions before listing,
+ *     listings with no price set.
+ *   - `refMedianUSD ≤ 0` or null: neutral. Token bucket has no priced
+ *     listings yet (cold-start), or no token matched.
+ *   - `ratio < 0.01`: floored before log2 to avoid `-Infinity`. A listing
+ *     priced at 1% of median or less hits the same demerit as 1% of median
+ *     exactly — saturated.
+ *
+ * v2 rationale (docs §10):
+ *   - Cheap-and-below-median listings ($1 commons with the right token,
+ *     wooden curios priced like graded cards) get a small demerit so
+ *     premium-tier inventory surfaces above them.
+ *   - Above-median listings get a small lift so PSA 10s and graded
+ *     premiums rise above raw versions of the same character.
+ *   - Bounded range so price isn't a dominant lever: it complements
+ *     engagement signals, doesn't compete with them.
+ */
+export function computePriceMult(
+	input: ComputePriceMultInput,
+	config: RankingConfig,
+): number {
+	if (input.priceUSD === null || input.priceUSD <= 0) return 1.0;
+	if (input.refMedianUSD === null || input.refMedianUSD <= 0) return 1.0;
+	const ratio = input.priceUSD / input.refMedianUSD;
+	const sigmoid = Math.tanh(Math.log2(Math.max(ratio, 0.01)));
+	return Math.max(
+		config.priceMultMin,
+		Math.min(config.priceMultMax, 1.0 + config.priceMultSensitivity * sigmoid),
+	);
+}
+
+/**
+ * Full score = (stored base + weighted recency decay) · tokenBoost · priceMult.
+ * Both multiplicative modifiers default to 1.0 (neutral), so a caller that
+ * supplies neither collapses cleanly to the v1 additive form. Kill-switch
+ * paths write 1.0 to either column to neutralize that signal without
+ * touching the others (docs §2, §8, §10).
+ *
+ * Composition order is irrelevant for the math (both are scalar
+ * multipliers) but the ranking-design intent is:
+ *   - tokenBoost amplifies the catalog-wide popularity of the listing's
+ *     subject (charizard > generic);
+ *   - priceMult differentiates listings within the same token bucket by
+ *     how their price compares to that bucket's median (PSA 10 above raw,
+ *     bulk-cheap below).
  */
 export function computeRankScore(
-	{ rankBaseScore, createdAt, now }: RankScoreInput,
+	{
+		rankBaseScore,
+		createdAt,
+		now,
+		tokenBoost = TOKEN_BOOST_MIN,
+		priceMult = 1.0,
+	}: RankScoreInput,
 	config: RankingConfig,
 ): number {
 	const ageHours = Math.max(
@@ -144,8 +421,77 @@ export function computeRankScore(
 		(now.getTime() - createdAt.getTime()) / 3_600_000,
 	);
 	const recency = 0.5 ** (ageHours / config.recencyHalfLifeHours);
-	return rankBaseScore + config.weights.recency * recency;
+	return (
+		(rankBaseScore + config.weights.recency * recency) * tokenBoost * priceMult
+	);
 }
+
+export interface ComputeTokenBoostInput {
+	/**
+	 * EB posterior means (`pHat`) of every token matched in the listing's
+	 * title. Empty = no matches → `tokenBoost = TOKEN_BOOST_MIN`. The caller
+	 * (refresh worker) resolves `MatchedToken[] → number[]` from the
+	 * `token_popularity` table; tokens with no row yet (cold-start) are
+	 * filtered out by the caller before getting here.
+	 */
+	tokenPHats: ReadonlyArray<number>;
+	/**
+	 * Mean of pHat across all known tokens at this refresh tick — the
+	 * z-score baseline. Recomputed by the refresh worker each tick from the
+	 * full `token_popularity` table.
+	 */
+	mu: number;
+	/**
+	 * Stdev of pHat across all known tokens at this refresh tick. ≤ 0
+	 * collapses the boost to neutral (no signal to amplify).
+	 */
+	sigma: number;
+	titleLen: number;
+}
+
+/**
+ * Per-listing token-popularity boost. Pure function over (matched tokens'
+ * pHats, population stats, title length).
+ *
+ *   raw       = 1 + k · (max(tokenPHats) − μ) / σ
+ *   clamped   = clamp(raw, [TOKEN_BOOST_MIN, TOKEN_BOOST_MAX])
+ *   damped    = clamped · min(1, LONG_TITLE_MAX_CHARS / titleLen)   if matched
+ *             = TOKEN_BOOST_MIN                                      if not
+ *
+ * MAX of tokens (never sum, never mean) is the anti-keyword-stuffing guard —
+ * Etsy and eBay converged on this independently (docs §2). The length damper
+ * pairs with the additive `longTitlePenalty` on the base score so anyone
+ * stuffing 5 hot tokens in a 120-char title pays both penalties; a listing
+ * with no matched tokens skips the damper (it's a token-side correction, not
+ * a universal long-title penalty — that's what `longTitlePenalty` is for).
+ */
+export function computeTokenBoost(
+	input: ComputeTokenBoostInput,
+	config: RankingConfig,
+): number {
+	if (input.tokenPHats.length === 0) return TOKEN_BOOST_MIN;
+	if (input.sigma <= 0) return TOKEN_BOOST_MIN;
+
+	let maxPHat = -Infinity;
+	for (const p of input.tokenPHats) {
+		if (p > maxPHat) maxPHat = p;
+	}
+	if (!Number.isFinite(maxPHat)) return TOKEN_BOOST_MIN;
+
+	const z = (maxPHat - input.mu) / input.sigma;
+	const raw = 1 + config.tokenBoostSensitivity * z;
+	const clamped = Math.max(TOKEN_BOOST_MIN, Math.min(TOKEN_BOOST_MAX, raw));
+
+	if (input.titleLen <= 0) return clamped;
+	const lengthMult = Math.min(1, LONG_TITLE_MAX_CHARS / input.titleLen);
+	return clamped * lengthMult;
+}
+
+/**
+ * Re-exported so callers wiring the refresh worker don't have to import from
+ * two different modules to assemble a `computeTokenBoost` call.
+ */
+export type { MatchedToken };
 
 export interface DiversityCandidate {
 	id: string;
@@ -160,6 +506,8 @@ export interface DiversityCandidate {
  * count is preserved and a small-catalog seller is never erased. Because
  * pagination is then a pure slice of this array, the global cap is exactly
  * correct across every page by construction (docs/explore-ranking.md §9).
+ *
+ * Unchanged from v1.
  */
 export function applyDiversity(
 	ordered: DiversityCandidate[],

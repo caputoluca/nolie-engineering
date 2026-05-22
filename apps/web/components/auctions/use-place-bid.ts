@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { correctCardStoreBid } from "@/components/auction-card/store";
 import { BID_ERROR_MESSAGES, placeBid } from "@/lib/mutations/bids";
 import { reportErrorMessage } from "@/lib/observability/sentry/report-error-message";
+import { usePdpReferrer } from "@/lib/referrer";
 import { useAuctionData } from "./auction-provider";
 import { useBidResultSubscription } from "./bid-result-subscription-provider";
 import { useNextBidAmount } from "./use-next-bid-amount";
@@ -36,6 +37,11 @@ export function usePlaceBid(
 	const { id, startingBid } = useAuctionData();
 	const storeAmount = useNextBidAmount();
 	const { waitForResult } = useBidResultSubscription();
+	// §19 — originating-feed triad captured from URL params at PDP load.
+	// Null for direct-PDP visits. Threaded onto X-NL-Referrer-* headers
+	// inside placeBid so the bid_placed engagement event attributes back
+	// to the surface/slot the user came from.
+	const referrer = usePdpReferrer();
 	const [submittedAmount, setSubmittedAmount] = useState<number | null>(null);
 	const [correctedHighestBidAmount, setCorrectedHighestBidAmount] = useState<
 		number | null
@@ -98,7 +104,11 @@ export function usePlaceBid(
 				setSubmittedAmount(amount);
 
 				// Step 1: Call API to queue the bid
-				const apiResponse = await placeBid({ amount, auctionId: id });
+				const apiResponse = await placeBid({
+					amount,
+					auctionId: id,
+					referrer,
+				});
 
 				// If API-level failure (validation, auth, etc.), return immediately
 				if (!apiResponse.success) {
@@ -188,7 +198,7 @@ export function usePlaceBid(
 				}
 			};
 		},
-		[amount, id, waitForResult],
+		[amount, id, waitForResult, referrer],
 	);
 
 	const result = usePlaceBidShared({
