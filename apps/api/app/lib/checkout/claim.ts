@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { SellerVacationPeriod } from "@nolie/core/orders";
 import type { PrismaClient } from "@nolie/db";
 import { errors, HttpError } from "@nolie/errors/http";
 import { joinName } from "@nolie/lib/name";
@@ -311,6 +312,16 @@ export async function claimCheckout(
 		Array.from(sellerProfileIdsWithShipGroup),
 	);
 
+	// Vacation rides along on each listing row via `checkoutListingSelect`
+	// (one JOIN, no extra roundtrip). Dedupe to one entry per seller — the
+	// rows for the same seller carry the same period.
+	const vacationBySellerProfileId = new Map<string, SellerVacationPeriod>();
+	for (const l of listings) {
+		if (l.sellerVacation) {
+			vacationBySellerProfileId.set(l.sellerProfileId, l.sellerVacation);
+		}
+	}
+
 	const shipTo: ShipToSnapshot | null = shipAddress
 		? {
 				name: shipAddress.fullName,
@@ -396,6 +407,7 @@ export async function claimCheckout(
 			pickupSnapshotByLocationId,
 			paymentMethodBrand: paymentMethod.brand,
 			paymentMethodLast4: paymentMethod.last4,
+			vacationBySellerProfileId,
 		});
 
 		return materialized;
