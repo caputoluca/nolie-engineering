@@ -73,6 +73,15 @@ export interface RankingConfig {
 	 * k ≈ 0.2 — tunable post-deploy from real distribution).
 	 */
 	tokenBoostSensitivity: number;
+	/**
+	 * Subtractive penalty applied to `rankBaseScore` when the listing's title
+	 * or description matches any term in `NEGATIVE_KEYWORDS` (e.g. "wooden",
+	 * "replica", "custom carved"). Catches non-TCG-card novelty listings that
+	 * tokens + price-vs-median can't distinguish from real cards. Static list
+	 * is a stopgap until per-listing engagement (LTR / Phase 4) can learn the
+	 * same pattern from observed CTR.
+	 */
+	negativeKeywordPenalty: number;
 }
 
 /**
@@ -89,8 +98,11 @@ export interface RankingConfig {
  *           Bump forces a one-time recompute of every existing row so the
  *           on-disk base score reflects real trust instead of the
  *           silently-zero default.
+ *   v4 → 5: negative-keyword demerit added to the base. Pre-deploy data
+ *           pass surfaced novelty items (wooden cards, replicas) tokens +
+ *           price-vs-median couldn't catch.
  */
-export const RANK_BASE_VERSION = 4;
+export const RANK_BASE_VERSION = 5;
 
 export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 	weights: { recency: 0.3, sellerTrust: 0.05, cartAdd: 0.1 },
@@ -99,7 +111,44 @@ export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 	lowEffortPenalty: 0.12,
 	longTitlePenalty: 0.04,
 	tokenBoostSensitivity: 0.2,
+	negativeKeywordPenalty: 0.08,
 };
+
+/**
+ * Title/description matches against this list subtract
+ * `RankingConfig.negativeKeywordPenalty` from the base score. Targets the
+ * specific class of listing tokens + price-vs-median can't catch — novelty
+ * items priced like real cards (wooden carvings, custom proxies, replicas,
+ * etc.). Each entry is matched as a whole-word substring on a normalized
+ * (lowercase, punctuation-collapsed) join of title + description.
+ *
+ * Curated narrowly to avoid false positives. "Promo" is NOT here — legitimate
+ * cards are tagged promos. Sellers can rename listings to bypass, but a
+ * seller paying our fees to list a $20 wooden Eevee is unlikely to bother.
+ *
+ * Final removal trigger: when per-listing engagement (LTR / Phase 4) ships
+ * and learns this pattern from observed CTR (months out per docs §16). Until
+ * then this is the cheapest way to catch the failure mode.
+ */
+export const NEGATIVE_KEYWORDS: ReadonlyArray<string> = [
+	"wooden",
+	"hand carved",
+	"hand-carved",
+	"handmade",
+	"hand made",
+	"hand-made",
+	"homemade",
+	"home made",
+	"home-made",
+	"custom carved",
+	"custom made",
+	"replica",
+	"fanmade",
+	"fan made",
+	"fan-made",
+	"proxy",
+	"proxies",
+];
 
 /**
  * Token-boost clamp range. 1.0 = neutral (no boost AND kill-switch value
@@ -181,6 +230,34 @@ function isLongTitle(title: string): boolean {
 }
 
 /**
+ * Pre-compiled word-boundary regexes for the negative-keyword scan. One
+ * combined alternation per call to `matchesNegativeKeyword` would mean
+ * recompiling on every score; instead compile once at module load and reuse.
+ * Word-boundary `\b…\b` keeps "proxy" from firing on "approximately" and
+ * "wooden" from firing on "woodenly" etc.
+ */
+const NEGATIVE_KEYWORD_REGEX = new RegExp(
+	`\\b(?:${NEGATIVE_KEYWORDS.map((k) =>
+		k.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&"),
+	).join("|")})\\b`,
+	"i",
+);
+
+/**
+ * True when the listing's title or description matches any
+ * `NEGATIVE_KEYWORDS` entry. Joins title + description with a space so a
+ * keyword in either field fires the match. Case-insensitive,
+ * whole-word — see `NEGATIVE_KEYWORD_REGEX` for the false-positive guards.
+ */
+export function matchesNegativeKeyword(
+	title: string,
+	description: string | null,
+): boolean {
+	const haystack = `${title} ${description ?? ""}`;
+	return NEGATIVE_KEYWORD_REGEX.test(haystack);
+}
+
+/**
  * Time-independent part of the score. v2 form:
  *   sellerTrust·w − lowEffort?·penalty − longTitle?·penalty + log10(1+atc)·w
  *
@@ -200,7 +277,10 @@ export function computeRankBaseScore(
 		? config.lowEffortPenalty
 		: 0;
 	const longTitle = isLongTitle(input.title) ? config.longTitlePenalty : 0;
-	return trust + cartAdd - lowEffort - longTitle;
+	const negativeKeyword = matchesNegativeKeyword(input.title, input.description)
+		? config.negativeKeywordPenalty
+		: 0;
+	return trust + cartAdd - lowEffort - longTitle - negativeKeyword;
 }
 
 export interface RankScoreInput {

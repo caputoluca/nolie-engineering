@@ -179,6 +179,119 @@ describe("computeRankBaseScore", () => {
 		expect(penalized).toBe(-LONG_PENALTY);
 		expect(off).toBe(0);
 	});
+
+	it("subtracts negativeKeywordPenalty when title contains a negative keyword", () => {
+		// Wooden Eevee — the canonical case from the May 2026 preview.
+		// Score should be exactly `-negativeKeywordPenalty` since title alone
+		// triggers it and the description is a normal-length template.
+		const wooden = computeRankBaseScore(
+			{ title: "Wooden Eevee Card", description: TEMPLATE_DESC },
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(wooden).toBeCloseTo(
+			-DEFAULT_RANKING_CONFIG.negativeKeywordPenalty,
+			10,
+		);
+	});
+
+	it("fires the negative-keyword demerit from description as well as title", () => {
+		// Title clean, description gives it away. Should still trigger.
+		const fromDesc = computeRankBaseScore(
+			{
+				title: "Charizard Card",
+				description:
+					"This is a hand-carved wooden replica of the original card.",
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(fromDesc).toBeCloseTo(
+			-DEFAULT_RANKING_CONFIG.negativeKeywordPenalty,
+			10,
+		);
+	});
+
+	it("does NOT false-positive on legitimate words containing keyword substrings", () => {
+		// Word-boundary matching prevents "proxy" from matching
+		// "approximately", "wooden" from matching "broadened", etc.
+		const fine = computeRankBaseScore(
+			{
+				title: "Approximately Mint Charizard",
+				description: "Card in approximately near-mint condition.",
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(fine).toBe(0);
+	});
+
+	it("the negativeKeywordPenalty knob is fully reversible (0 ⇒ no demerit)", () => {
+		const input = { title: "Wooden Eevee Card", description: TEMPLATE_DESC };
+		const penalized = computeRankBaseScore(input, DEFAULT_RANKING_CONFIG);
+		const off = computeRankBaseScore(input, {
+			...DEFAULT_RANKING_CONFIG,
+			negativeKeywordPenalty: 0,
+		});
+		expect(penalized).toBe(-DEFAULT_RANKING_CONFIG.negativeKeywordPenalty);
+		expect(off).toBe(0);
+	});
+
+	it("stacks negative-keyword with low-effort and long-title penalties", () => {
+		// Worst-case listing: wooden + long title + no description.
+		// All three penalties fire additively.
+		const stacked = computeRankBaseScore(
+			{
+				title: `Hand carved wooden replica Charizard ${"x".repeat(40)}`,
+				description: null,
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		const expected =
+			-DEFAULT_RANKING_CONFIG.negativeKeywordPenalty -
+			DEFAULT_RANKING_CONFIG.longTitlePenalty -
+			DEFAULT_RANKING_CONFIG.lowEffortPenalty;
+		expect(stacked).toBeCloseTo(expected, 10);
+	});
+});
+
+describe("matchesNegativeKeyword", () => {
+	it("matches case-insensitively in title", async () => {
+		const { matchesNegativeKeyword } = await import(
+			"../../src/explore/ranking"
+		);
+		expect(matchesNegativeKeyword("WOODEN Eevee Card", null)).toBe(true);
+		expect(matchesNegativeKeyword("Wooden Eevee Card", null)).toBe(true);
+		expect(matchesNegativeKeyword("Real PSA 10 Eevee", null)).toBe(false);
+	});
+
+	it("respects word boundaries to avoid false positives", async () => {
+		const { matchesNegativeKeyword } = await import(
+			"../../src/explore/ranking"
+		);
+		// "approximately" contains "proxy" as substring but not as whole word.
+		expect(matchesNegativeKeyword("Approximately NM Card", null)).toBe(false);
+		// Direct "proxy" should still fire.
+		expect(matchesNegativeKeyword("Proxy Charizard Card", null)).toBe(true);
+	});
+
+	it("handles hyphenated variants", async () => {
+		const { matchesNegativeKeyword } = await import(
+			"../../src/explore/ranking"
+		);
+		expect(matchesNegativeKeyword("Hand-Carved Eevee", null)).toBe(true);
+		expect(matchesNegativeKeyword("Hand Carved Eevee", null)).toBe(true);
+		expect(matchesNegativeKeyword("Hand-made Pikachu", null)).toBe(true);
+	});
+
+	it("returns false for a clean listing", async () => {
+		const { matchesNegativeKeyword } = await import(
+			"../../src/explore/ranking"
+		);
+		expect(
+			matchesNegativeKeyword(
+				"Charizard ex Holo PSA 10",
+				"Pristine condition, near mint, see photos.",
+			),
+		).toBe(false);
+	});
 });
 
 describe("computeRankScore", () => {
