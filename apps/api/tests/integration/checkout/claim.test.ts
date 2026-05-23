@@ -1415,11 +1415,11 @@ describe("POST /checkout/claim", () => {
 		// listing's own dims). The decision is frozen on Order.shippingPresetKey
 		// so PI-succeeded + label-purchase don't re-derive it.
 
-		it("single letter listing produces an Order on the letter rail charged at the flat $1.49", async () => {
+		it("single letter listing produces an Order on the letter rail charged at the flat $2.50", async () => {
 			const seller = await setupSellerWithListing({
 				price: 10,
 				itemType: "physical",
-				shippingCostCents: 149,
+				shippingCostCents: 250,
 			});
 			await prisma.listing.update({
 				where: { id: seller.listing.id },
@@ -1439,7 +1439,7 @@ describe("POST /checkout/claim", () => {
 				where: { id: body.orderIds[0] },
 			});
 			expect(order.shippingPresetKey).toBe("raw_single_pwe");
-			expect(order.shippingCents).toBe(149);
+			expect(order.shippingCents).toBe(250);
 		});
 
 		it("six-card all-letter bundle auto-upgrades to a standard_card parcel at the fallback rate", async () => {
@@ -1452,7 +1452,7 @@ describe("POST /checkout/claim", () => {
 			const seller = await setupSellerWithListing({
 				price: 8,
 				itemType: "physical",
-				shippingCostCents: 149,
+				shippingCostCents: 250,
 			});
 			await prisma.listing.update({
 				where: { id: seller.listing.id },
@@ -1468,7 +1468,7 @@ describe("POST /checkout/claim", () => {
 					where: { id: extra.id },
 					data: {
 						shippingPresetKey: "raw_single_pwe",
-						shippingCostCents: 149,
+						shippingCostCents: 250,
 					},
 				});
 				extraIds.push(extra.id);
@@ -1504,7 +1504,7 @@ describe("POST /checkout/claim", () => {
 			const seller = await setupSellerWithListing({
 				price: 10,
 				itemType: "physical",
-				shippingCostCents: 149,
+				shippingCostCents: 250,
 			});
 			await prisma.listing.update({
 				where: { id: seller.listing.id },
@@ -1539,7 +1539,7 @@ describe("POST /checkout/claim", () => {
 				where: { id: body.orderIds[0] },
 			});
 			expect(order.shippingPresetKey).toBeNull();
-			// max(149, 500) — parcel item dictates the bundle rate.
+			// max(250, 500) — parcel item dictates the bundle rate.
 			expect(order.shippingCents).toBe(500);
 		});
 	});
