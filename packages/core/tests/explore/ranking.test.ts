@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
 	applyDiversity,
-	CHEAP_FLOOR_PENALTY,
 	computeRankBaseScore,
 	computeRankScore,
 	computeTokenBoost,
 	DEFAULT_RANKING_CONFIG,
 	type DiversityCandidate,
 	LONG_TITLE_MAX_CHARS,
-	PREMIUM_PRICE_CEILING_USD,
+	PLATEAU_HI_USD,
+	PLATEAU_LO_USD,
 	type RankingConfig,
 	TOKEN_BOOST_MAX,
 	TOKEN_BOOST_MIN,
@@ -21,7 +21,9 @@ const LONG_PENALTY = DEFAULT_RANKING_CONFIG.longTitlePenalty; // 0.04
 const RECENCY_W = DEFAULT_RANKING_CONFIG.weights.recency; // 0.30
 const CART_W = DEFAULT_RANKING_CONFIG.weights.cartAdd; // 0.10
 const TRUST_W = DEFAULT_RANKING_CONFIG.weights.sellerTrust; // 0.05
-const PREMIUM_W = DEFAULT_RANKING_CONFIG.weights.premium; // 0.30
+// v8: weight is now "max contribution when in the [LO, HI] band" — the plateau
+// shape multiplies it by [0, 1], not log10(1 + price).
+const PREMIUM_W = DEFAULT_RANKING_CONFIG.weights.premium; // 0.35
 
 // A normal description: ~80-char bulk-lister template (v1 catalog median 81).
 // Must NOT be treated as low-effort (cold-start data analysis — docs §5).
@@ -109,9 +111,9 @@ describe("computeRankBaseScore", () => {
 		expect(out).toBe(0);
 	});
 
-	it("applies the price-tier shape: cheap floor, log boost up to ceiling, then flat", () => {
+	it("applies the v8 price-band plateau: full credit in band, decay both sides", () => {
 		// Null / undefined / zero / negative all collapse to neutral — listings
-		// with no price (rare edge) aren't punished by either branch.
+		// with no price (rare edge) get 0 premium contribution.
 		const noPrice = computeRankBaseScore(
 			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: null },
 			DEFAULT_RANKING_CONFIG,
@@ -121,7 +123,32 @@ describe("computeRankBaseScore", () => {
 			DEFAULT_RANKING_CONFIG,
 		);
 
-		// Below the floor → flat −CHEAP_FLOOR_PENALTY regardless of value.
+		// Inside the band [LO, HI] every price gets identical full credit. This
+		// is the v7 → v8 change: v7 still preferred $300 over $35 via the log,
+		// v8 says they're equally good within the cofounder-defined sweet spot.
+		const atLo = computeRankBaseScore(
+			{
+				title: SHORT_TITLE,
+				description: TEMPLATE_DESC,
+				priceUSD: PLATEAU_LO_USD,
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		const center = computeRankBaseScore(
+			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 100 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const atHi = computeRankBaseScore(
+			{
+				title: SHORT_TITLE,
+				description: TEMPLATE_DESC,
+				priceUSD: PLATEAU_HI_USD,
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+
+		// Below the band: quadratic decay clamps to 0 fast. $1, $5 contribute
+		// nothing (no separate "cheap floor" anymore — the shape does it).
 		const buck = computeRankBaseScore(
 			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 1 },
 			DEFAULT_RANKING_CONFIG,
@@ -131,43 +158,36 @@ describe("computeRankBaseScore", () => {
 			DEFAULT_RANKING_CONFIG,
 		);
 
-		// Above the floor → log10 boost in proportion to price.
-		const fifty = computeRankBaseScore(
-			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 50 },
+		// Above the band: linear decay. $1k is still positive but less than the
+		// band — this is the v8 "sprinkle outliers through the long tail"
+		// design (vs v7 ceiling which scored $1k and $3k identically).
+		const overBand = computeRankBaseScore(
+			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 1000 },
 			DEFAULT_RANKING_CONFIG,
 		);
-
-		// At and above the ceiling → flat (saturated). The whole point of the
-		// ceiling is that $300 and $3000 produce the same base score, so the
-		// remaining ranking signals (tokens / recency / trust) differentiate
-		// within the premium band rather than letting absolute price dominate.
-		const atCeiling = computeRankBaseScore(
-			{
-				title: SHORT_TITLE,
-				description: TEMPLATE_DESC,
-				priceUSD: PREMIUM_PRICE_CEILING_USD,
-			},
-			DEFAULT_RANKING_CONFIG,
-		);
-		const wayAboveCeiling = computeRankBaseScore(
-			{
-				title: SHORT_TITLE,
-				description: TEMPLATE_DESC,
-				priceUSD: PREMIUM_PRICE_CEILING_USD * 100,
-			},
+		const wayOverBand = computeRankBaseScore(
+			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 30_000 },
 			DEFAULT_RANKING_CONFIG,
 		);
 
 		expect(noPrice).toBe(0);
 		expect(zeroPrice).toBe(0);
-		expect(buck).toBeCloseTo(-CHEAP_FLOOR_PENALTY, 10);
-		expect(fiveBucks).toBeCloseTo(-CHEAP_FLOOR_PENALTY, 10);
-		expect(fifty).toBeCloseTo(PREMIUM_W * Math.log10(51), 10);
-		expect(atCeiling).toBeCloseTo(
-			PREMIUM_W * Math.log10(1 + PREMIUM_PRICE_CEILING_USD),
-			10,
-		);
-		expect(wayAboveCeiling).toBeCloseTo(atCeiling, 10);
+
+		// Full credit, identical across the band.
+		expect(atLo).toBeCloseTo(PREMIUM_W, 10);
+		expect(center).toBeCloseTo(PREMIUM_W, 10);
+		expect(atHi).toBeCloseTo(PREMIUM_W, 10);
+
+		// Cheap clamps to exactly zero — no contribution, no penalty.
+		expect(buck).toBe(0);
+		expect(fiveBucks).toBe(0);
+
+		// Above-band is positive but strictly less than the band, and
+		// monotonically decaying.
+		expect(overBand).toBeGreaterThan(0);
+		expect(overBand).toBeLessThan(PREMIUM_W);
+		expect(wayOverBand).toBeGreaterThanOrEqual(0);
+		expect(wayOverBand).toBeLessThan(overBand);
 	});
 
 	it("subtracts the long-title penalty above LONG_TITLE_MAX_CHARS", () => {
