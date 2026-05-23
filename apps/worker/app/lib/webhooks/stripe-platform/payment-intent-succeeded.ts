@@ -6,6 +6,7 @@ import {
 	EngagementEventName,
 	EngagementSystemSessionId,
 } from "@nolie/core/engagement/catalog";
+import { generatePickupCode } from "@nolie/core/orders";
 import {
 	FulfillmentMode,
 	ListingStatus,
@@ -97,24 +98,53 @@ export async function paymentIntentSucceeded(
 
 	try {
 		await workerTx(ctx.prisma, async (tx) => {
-			await tx.order.updateMany({
-				where: {
-					id: { in: orderIds },
-					originationType: {
-						in: [
-							OrderOriginationType.checkout,
-							OrderOriginationType.offer_accepted,
-						],
+			const paidAt = new Date();
+			const eligibleOriginationTypes = [
+				OrderOriginationType.checkout,
+				OrderOriginationType.offer_accepted,
+			];
+			const shippingOrderIds = orders
+				.filter((o) => o.fulfillmentMode === FulfillmentMode.shipping)
+				.map((o) => o.id);
+			const pickupOrders = orders.filter(
+				(o) => o.fulfillmentMode === FulfillmentMode.pickup,
+			);
+
+			if (shippingOrderIds.length > 0) {
+				await tx.order.updateMany({
+					where: {
+						id: { in: shippingOrderIds },
+						originationType: { in: eligibleOriginationTypes },
+						paymentStatus: PaymentStatus.pending,
 					},
-					paymentStatus: PaymentStatus.pending,
-				},
-				data: {
-					paymentStatus: PaymentStatus.succeeded,
-					paymentChargeId: chargeId,
-					paidAt: new Date(),
-					fulfillmentStatus: OrderStatus.awaiting_shipment,
-				},
-			});
+					data: {
+						paymentStatus: PaymentStatus.succeeded,
+						paymentChargeId: chargeId,
+						paidAt,
+						fulfillmentStatus: OrderStatus.awaiting_shipment,
+					},
+				});
+			}
+
+			// Pickup orders need a unique 6-digit handoff code per row, so we
+			// can't do a single updateMany — loop with updateMany-per-id to
+			// keep the paymentStatus=pending idempotency predicate.
+			for (const order of pickupOrders) {
+				await tx.order.updateMany({
+					where: {
+						id: order.id,
+						originationType: { in: eligibleOriginationTypes },
+						paymentStatus: PaymentStatus.pending,
+					},
+					data: {
+						paymentStatus: PaymentStatus.succeeded,
+						paymentChargeId: chargeId,
+						paidAt,
+						fulfillmentStatus: OrderStatus.awaiting_pickup,
+						pickupCode: generatePickupCode(),
+					},
+				});
+			}
 
 			const buyerIdForCart = orders[0]?.buyerId;
 			if (buyerIdForCart) {
