@@ -48,17 +48,25 @@ export interface RankingConfig {
 		 */
 		cartAdd: number;
 		/**
-		 * Absolute-price premium weight applied to `log10(1 + priceUSD)`.
-		 * Sub-linear so a single $5,000 listing doesn't dominate; log10 puts
-		 * the $1–$5,000 range in a ~0–3.7 span. Starts COLD-START AGGRESSIVE
-		 * at 0.30 — we have no engagement signal yet, so price does all the
-		 * work of differentiating premium from $1 commons floating up on
-		 * recency. Plan: drop to ~0.15–0.20 once cart-adds and purchases
-		 * accrue meaningfully (~3-6 months) so engagement can override price
-		 * when the data says a cheap card is actually wanted. Booking.com
-		 * runs an analogous term permanently at scale as their
-		 * revenue-per-impression objective — the term stays, the weight
-		 * retunes.
+		 * Absolute-price premium weight applied to
+		 * `log10(1 + min(priceUSD, PREMIUM_PRICE_CEILING_USD))`. Sub-linear
+		 * AND capped at the ceiling: $300, $1000, $3000 all get the same
+		 * premium contribution. Sits alongside a hard `CHEAP_FLOOR_PENALTY`
+		 * for sub-$10 listings.
+		 *
+		 * Cold-start history:
+		 *   v6 (RANK_BASE_VERSION 6, weight 0.30, NO ceiling, NO floor) —
+		 *     shipped, broke. Unbounded log of price gave a $3,500 PSA card
+		 *     ~$1.07 of pure premium boost (vs ~$0.30 max recency budget),
+		 *     and any high-priced bad-photo listing dominated the top of the
+		 *     feed regardless of quality. Spearman price-vs-rank correlation
+		 *     measured at ~0.85 — pure price-sorting at the top.
+		 *   v7 (this — weight 0.08, ceiling $300, floor $10/−0.15) — capped
+		 *     so $300+ all tie on the premium term, and the bottom is
+		 *     explicitly demoted. Within the premium band, tokens / recency /
+		 *     trust take over the differentiation — the same job pCTR/pCVR
+		 *     would do at Booking's scale, just with the signals we actually
+		 *     have today.
 		 */
 		premium: number;
 	};
@@ -144,11 +152,47 @@ export interface RankingConfig {
  *           (current) to $375 with the cranked weight, $1 cards sinking
  *           from rank ~58 to rank ~307. Forces a one-time recompute of
  *           every row at the new shape.
+ *   v6 → 7: corrective tuning after v6 went live. Unbounded log @ 0.30
+ *           surfaced bad-photo overpriced listings (price-vs-rank ρ ~0.85);
+ *           no quality signal pushed back because we have no engagement
+ *           signal yet. v7 keeps the same additive shape but (a) drops
+ *           the weight 0.30 → 0.08, (b) caps the log at
+ *           `PREMIUM_PRICE_CEILING_USD` so $300+ all get the same lift,
+ *           (c) replaces the implicit-no-floor with a hard
+ *           `CHEAP_FLOOR_PENALTY` for sub-`CHEAP_FLOOR_THRESHOLD_USD`
+ *           listings. Within the premium band, tokens / recency / trust
+ *           differentiate — the pCTR/pCVR substitute we have today. Vibes-
+ *           check predicted top-25 median $375 → $172, $1 cards stay at
+ *           rank ~240+, $1k+ listings sprinkle through ranks 30-120
+ *           instead of dominating top-10.
  */
-export const RANK_BASE_VERSION = 6;
+export const RANK_BASE_VERSION = 7;
+
+/**
+ * Saturation point for the absolute-price premium term. Above this dollar
+ * value the `log10(1 + min(priceUSD, ceiling))` contribution is flat —
+ * $300, $1000, $3000 all add the same number to `rankBaseScore`. Within the
+ * premium band, ordering falls to tokens / recency / trust, which is the
+ * pCTR/pCVR substitute we have today (Booking's `price × pCTR × pCVR`
+ * pattern, without the engagement halves we'll add later).
+ *
+ * Picked $300 because it's the natural top of the "$35-$300 sweet spot" the
+ * cofounder framed after the v6 deploy. Tunable post-deploy; raise when
+ * engagement signal arrives and can carry the differentiation above the cap.
+ */
+export const PREMIUM_PRICE_CEILING_USD = 300;
+
+/**
+ * Listings priced below this get a flat `CHEAP_FLOOR_PENALTY` instead of
+ * the (small) premium contribution. The "we don't want to show $1 cards
+ * right now" lever — brute force but exactly addresses the failure mode
+ * where fresh $1-5 commons float to the top of `/explore` on recency alone.
+ */
+export const CHEAP_FLOOR_THRESHOLD_USD = 10;
+export const CHEAP_FLOOR_PENALTY = 0.15;
 
 export const DEFAULT_RANKING_CONFIG: RankingConfig = {
-	weights: { recency: 0.3, sellerTrust: 0.05, cartAdd: 0.1, premium: 0.3 },
+	weights: { recency: 0.3, sellerTrust: 0.05, cartAdd: 0.1, premium: 0.08 },
 	recencyHalfLifeHours: 72,
 	perSellerCap: 3,
 	lowEffortPenalty: 0.12,
@@ -331,10 +375,15 @@ export function computeRankBaseScore(
 	const cartAddCount = Math.max(0, input.addToCartCount ?? 0);
 	const cartAdd = config.weights.cartAdd * Math.log10(1 + cartAddCount);
 	const priceUSD = input.priceUSD;
-	const premium =
-		priceUSD !== null && priceUSD !== undefined && priceUSD > 0
-			? config.weights.premium * Math.log10(1 + priceUSD)
-			: 0;
+	let premium = 0;
+	if (priceUSD !== null && priceUSD !== undefined && priceUSD > 0) {
+		if (priceUSD < CHEAP_FLOOR_THRESHOLD_USD) {
+			premium = -CHEAP_FLOOR_PENALTY;
+		} else {
+			const cappedPrice = Math.min(priceUSD, PREMIUM_PRICE_CEILING_USD);
+			premium = config.weights.premium * Math.log10(1 + cappedPrice);
+		}
+	}
 	const lowEffort = isLowEffortListing(input.title, input.description)
 		? config.lowEffortPenalty
 		: 0;
