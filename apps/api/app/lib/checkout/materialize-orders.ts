@@ -1,4 +1,8 @@
-import { generateDisplayId } from "@nolie/core/orders";
+import {
+	generateDisplayId,
+	type SellerVacationPeriod,
+	snapshotSellerVacation,
+} from "@nolie/core/orders";
 import { OrderOriginationType, PaymentStatus, type Prisma } from "@nolie/db";
 import { errors } from "@nolie/errors/http";
 import { calculateNetAmount } from "@nolie/payments/utils";
@@ -76,6 +80,10 @@ interface MaterializeInput {
 	/** Card brand/last4 snapshot from the buyer's PaymentMethod row at claim time. */
 	paymentMethodBrand: string | null;
 	paymentMethodLast4: string | null;
+	/** Active vacation period for any seller that was on vacation when the
+	 *  buyer claimed. Sellers not on vacation are absent — the snapshot
+	 *  helper handles `null` and writes null fields for those orders. */
+	vacationBySellerProfileId: Map<string, SellerVacationPeriod>;
 }
 
 /**
@@ -224,12 +232,17 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			});
 		}
 
+		const vacationSnapshot = snapshotSellerVacation(
+			input.vacationBySellerProfileId.get(group.sellerProfileId) ?? null,
+		);
+
 		orderRows.push({
 			id: group.orderId,
 			displayId: generateDisplayId(),
 			buyerId: input.buyerId,
 			buyerEmailSnapshot: input.buyerEmailSnapshot,
 			sellerProfileId: group.sellerProfileId,
+			...vacationSnapshot,
 			originationType: OrderOriginationType.checkout,
 			originationRef: null,
 			paymentIntentId: null,

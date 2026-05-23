@@ -1703,4 +1703,80 @@ describe("POST /checkout/claim", () => {
 			expect(order.shippingServiceKey).toBeNull();
 		});
 	});
+
+	describe("seller vacation snapshot", () => {
+		it("freezes the active vacation period onto the materialized Order", async () => {
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 500,
+			});
+			const startsAt = new Date(Date.now() - 60_000);
+			const endsAt = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+			const period = await prisma.sellerVacationPeriod.create({
+				data: {
+					sellerProfileId: seller.sellerProfileId,
+					startsAt,
+					endsAt,
+				},
+			});
+			await prisma.sellerProfile.update({
+				where: { id: seller.sellerProfileId },
+				data: { currentVacationPeriodId: period.id, vacationUntil: endsAt },
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("vacation-on"),
+			});
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				select: {
+					sellerVacationPeriodId: true,
+					sellerVacationStartsAt: true,
+					sellerVacationEndsAt: true,
+					sellerVacationBannerCopy: true,
+				},
+			});
+			expect(order.sellerVacationPeriodId).toBe(period.id);
+			expect(order.sellerVacationStartsAt?.getTime()).toBe(startsAt.getTime());
+			expect(order.sellerVacationEndsAt?.getTime()).toBe(endsAt.getTime());
+			// v1 leaves the rendered-copy column null; the frontend rerenders
+			// the banner from endsAt + the line-item handle snapshot at display.
+			expect(order.sellerVacationBannerCopy).toBeNull();
+		});
+
+		it("leaves snapshot fields null when the seller is not on vacation", async () => {
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 500,
+			});
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("vacation-off"),
+			});
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				select: {
+					sellerVacationPeriodId: true,
+					sellerVacationStartsAt: true,
+					sellerVacationEndsAt: true,
+				},
+			});
+			expect(order.sellerVacationPeriodId).toBeNull();
+			expect(order.sellerVacationStartsAt).toBeNull();
+			expect(order.sellerVacationEndsAt).toBeNull();
+		});
+	});
 });
