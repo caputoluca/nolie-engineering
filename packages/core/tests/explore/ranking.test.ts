@@ -19,6 +19,7 @@ const LONG_PENALTY = DEFAULT_RANKING_CONFIG.longTitlePenalty; // 0.04
 const RECENCY_W = DEFAULT_RANKING_CONFIG.weights.recency; // 0.30
 const CART_W = DEFAULT_RANKING_CONFIG.weights.cartAdd; // 0.10
 const TRUST_W = DEFAULT_RANKING_CONFIG.weights.sellerTrust; // 0.05
+const PREMIUM_W = DEFAULT_RANKING_CONFIG.weights.premium; // 0.30
 
 // A normal description: ~80-char bulk-lister template (v1 catalog median 81).
 // Must NOT be treated as low-effort (cold-start data analysis — docs §5).
@@ -104,6 +105,37 @@ describe("computeRankBaseScore", () => {
 			DEFAULT_RANKING_CONFIG,
 		);
 		expect(out).toBe(0);
+	});
+
+	it("adds the absolute-price premium term log-scaled in priceUSD", () => {
+		// Null / undefined / zero / negative all collapse to no contribution —
+		// listings with no price (rare edge) get neutral, not punished.
+		const noPrice = computeRankBaseScore(
+			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: null },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const zeroPrice = computeRankBaseScore(
+			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 0 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const cheap = computeRankBaseScore(
+			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 1 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const premium = computeRankBaseScore(
+			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 500 },
+			DEFAULT_RANKING_CONFIG,
+		);
+
+		expect(noPrice).toBe(0);
+		expect(zeroPrice).toBe(0);
+		expect(cheap).toBeCloseTo(PREMIUM_W * Math.log10(2), 10);
+		expect(premium).toBeCloseTo(PREMIUM_W * Math.log10(501), 10);
+		// The whole point of the cold-start lever: a $500 listing's premium
+		// contribution outweighs the entire recency budget. If this stops
+		// being true the weight needs to come down (engagement signal
+		// arriving, dropping below the recency ceiling defeats the design).
+		expect(premium).toBeGreaterThan(RECENCY_W);
 	});
 
 	it("subtracts the long-title penalty above LONG_TITLE_MAX_CHARS", () => {

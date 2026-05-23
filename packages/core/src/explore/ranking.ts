@@ -47,6 +47,20 @@ export interface RankingConfig {
 		 * 0.30 recency weight (docs §8).
 		 */
 		cartAdd: number;
+		/**
+		 * Absolute-price premium weight applied to `log10(1 + priceUSD)`.
+		 * Sub-linear so a single $5,000 listing doesn't dominate; log10 puts
+		 * the $1–$5,000 range in a ~0–3.7 span. Starts COLD-START AGGRESSIVE
+		 * at 0.30 — we have no engagement signal yet, so price does all the
+		 * work of differentiating premium from $1 commons floating up on
+		 * recency. Plan: drop to ~0.15–0.20 once cart-adds and purchases
+		 * accrue meaningfully (~3-6 months) so engagement can override price
+		 * when the data says a cheap card is actually wanted. Booking.com
+		 * runs an analogous term permanently at scale as their
+		 * revenue-per-impression objective — the term stays, the weight
+		 * retunes.
+		 */
+		premium: number;
 	};
 	recencyHalfLifeHours: number;
 	perSellerCap: number;
@@ -122,11 +136,19 @@ export interface RankingConfig {
  *   v4 → 5: negative-keyword demerit added to the base. Pre-deploy data
  *           pass surfaced novelty items (wooden cards, replicas) tokens +
  *           price-vs-median couldn't catch.
+ *   v5 → 6: absolute-price premium term added to the base
+ *           (weights.premium · log10(1 + priceUSD)). Cold-start lever —
+ *           catalog had no signal to differentiate premium from $1 commons
+ *           that were floating to the top on recency alone. Vibes-check on
+ *           the May 2026 prod export showed top-25 median going from $15
+ *           (current) to $375 with the cranked weight, $1 cards sinking
+ *           from rank ~58 to rank ~307. Forces a one-time recompute of
+ *           every row at the new shape.
  */
-export const RANK_BASE_VERSION = 5;
+export const RANK_BASE_VERSION = 6;
 
 export const DEFAULT_RANKING_CONFIG: RankingConfig = {
-	weights: { recency: 0.3, sellerTrust: 0.05, cartAdd: 0.1 },
+	weights: { recency: 0.3, sellerTrust: 0.05, cartAdd: 0.1, premium: 0.3 },
 	recencyHalfLifeHours: 72,
 	perSellerCap: 3,
 	lowEffortPenalty: 0.12,
@@ -214,6 +236,14 @@ export interface RankBaseInput {
 	 * state (docs §9 step 3). Log-scaled in the score.
 	 */
 	addToCartCount?: number;
+	/**
+	 * Listing's effective price in USD (fixed-price `price` or auction
+	 * `startingBid`, both stored as `Decimal(10,2)` dollars). Null when
+	 * neither is set (rare) → premium term collapses to 0 for that listing.
+	 * Refresh-worker kill switch path also writes null to neutralize the term
+	 * without touching other signals.
+	 */
+	priceUSD?: number | null;
 }
 
 function clamp01(v: number): number {
@@ -282,13 +312,16 @@ export function matchesNegativeKeyword(
 }
 
 /**
- * Time-independent part of the score. v2 form:
- *   sellerTrust·w − lowEffort?·penalty − longTitle?·penalty + log10(1+atc)·w
+ * Time-independent part of the score:
+ *   sellerTrust·w + cartAdd·w + premium·w
+ *     − lowEffort?·penalty − longTitle?·penalty − negKeyword?·penalty
  *
- * Range with default config: roughly `[-0.16, 0.05 + cartAdd]`. The cart-add
- * term is unbounded in principle but log10-capped in practice; a listing with
- * 100 cart-adds (the historical max we'd expect in v2) contributes
- * `0.10·log10(101) ≈ 0.20`.
+ * The premium term dominates the additive terms by design — at weight 0.30,
+ * a $1,000 listing contributes ~0.90 to the base, more than 4× the max
+ * cart-add contribution at realistic counts (`0.10·log10(101) ≈ 0.20`). This
+ * is intentional cold-start positioning: no engagement signal exists yet,
+ * so price is doing the differentiation work. The weight ramps DOWN as
+ * engagement accrues; see `RankingConfig.weights.premium` for the trigger.
  */
 export function computeRankBaseScore(
 	input: RankBaseInput,
@@ -297,6 +330,11 @@ export function computeRankBaseScore(
 	const trust = config.weights.sellerTrust * clamp01(input.sellerTrust ?? 0);
 	const cartAddCount = Math.max(0, input.addToCartCount ?? 0);
 	const cartAdd = config.weights.cartAdd * Math.log10(1 + cartAddCount);
+	const priceUSD = input.priceUSD;
+	const premium =
+		priceUSD !== null && priceUSD !== undefined && priceUSD > 0
+			? config.weights.premium * Math.log10(1 + priceUSD)
+			: 0;
 	const lowEffort = isLowEffortListing(input.title, input.description)
 		? config.lowEffortPenalty
 		: 0;
@@ -304,7 +342,7 @@ export function computeRankBaseScore(
 	const negativeKeyword = matchesNegativeKeyword(input.title, input.description)
 		? config.negativeKeywordPenalty
 		: 0;
-	return trust + cartAdd - lowEffort - longTitle - negativeKeyword;
+	return trust + cartAdd + premium - lowEffort - longTitle - negativeKeyword;
 }
 
 export interface RankScoreInput {

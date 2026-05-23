@@ -751,6 +751,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 	const tokenBoostEnabled = process.env.ENABLE_TOKEN_BOOST !== "false";
 	const cartAddSignalEnabled = process.env.ENABLE_CART_ADD_SIGNAL !== "false";
 	const priceMultEnabled = process.env.ENABLE_PRICE_MULT !== "false";
+	const premiumPriceEnabled = process.env.ENABLE_PREMIUM_PRICE !== "false";
 
 	let scoreMin = Number.POSITIVE_INFINITY;
 	let scoreMax = Number.NEGATIVE_INFINITY;
@@ -795,6 +796,11 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 		}
 		if (tokenBoost > tokenBoostMax) tokenBoostMax = tokenBoost;
 
+		// Effective price for this listing, computed once and reused by both
+		// the multiplicative priceMult (vs-category sigmoid) and the additive
+		// premium term in the base score (absolute-dollar log).
+		const priceUSD = effectivePriceUSD(r);
+
 		// Price-vs-median: use the HIGHEST median across this listing's
 		// matched tokens (premium tokens like psa_10 pull the reference up,
 		// so a cheap-PSA-10 is suspicious vs PSA 10 median, not vs character
@@ -803,7 +809,6 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 		// median — keeps untokenized cheap junk from escaping the sigmoid.
 		let priceMult = 1.0;
 		if (priceMultEnabled) {
-			const priceUSD = effectivePriceUSD(r);
 			let refMedianUSD: number | null = null;
 			if (matches) {
 				for (const m of matches) {
@@ -839,6 +844,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 				description: r.description,
 				sellerTrust,
 				addToCartCount,
+				priceUSD: premiumPriceEnabled ? priceUSD : null,
 			},
 			DEFAULT_RANKING_CONFIG,
 		);
@@ -922,6 +928,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			tokenBoostEnabled,
 			cartAddSignalEnabled,
 			priceMultEnabled,
+			premiumPriceEnabled,
 			durationMs: Date.now() - start,
 			scoreMin: Number.isFinite(scoreMin) ? scoreMin : null,
 			scoreMax: Number.isFinite(scoreMax) ? scoreMax : null,
