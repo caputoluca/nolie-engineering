@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
 	applyDiversity,
+	CHEAP_FLOOR_PENALTY,
 	computeRankBaseScore,
 	computeRankScore,
 	computeTokenBoost,
 	DEFAULT_RANKING_CONFIG,
 	type DiversityCandidate,
 	LONG_TITLE_MAX_CHARS,
+	PREMIUM_PRICE_CEILING_USD,
 	type RankingConfig,
 	TOKEN_BOOST_MAX,
 	TOKEN_BOOST_MIN,
@@ -107,9 +109,9 @@ describe("computeRankBaseScore", () => {
 		expect(out).toBe(0);
 	});
 
-	it("adds the absolute-price premium term log-scaled in priceUSD", () => {
-		// Null / undefined / zero / negative all collapse to no contribution —
-		// listings with no price (rare edge) get neutral, not punished.
+	it("applies the price-tier shape: cheap floor, log boost up to ceiling, then flat", () => {
+		// Null / undefined / zero / negative all collapse to neutral — listings
+		// with no price (rare edge) aren't punished by either branch.
 		const noPrice = computeRankBaseScore(
 			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: null },
 			DEFAULT_RANKING_CONFIG,
@@ -118,24 +120,54 @@ describe("computeRankBaseScore", () => {
 			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 0 },
 			DEFAULT_RANKING_CONFIG,
 		);
-		const cheap = computeRankBaseScore(
+
+		// Below the floor → flat −CHEAP_FLOOR_PENALTY regardless of value.
+		const buck = computeRankBaseScore(
 			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 1 },
 			DEFAULT_RANKING_CONFIG,
 		);
-		const premium = computeRankBaseScore(
-			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 500 },
+		const fiveBucks = computeRankBaseScore(
+			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 5 },
+			DEFAULT_RANKING_CONFIG,
+		);
+
+		// Above the floor → log10 boost in proportion to price.
+		const fifty = computeRankBaseScore(
+			{ title: SHORT_TITLE, description: TEMPLATE_DESC, priceUSD: 50 },
+			DEFAULT_RANKING_CONFIG,
+		);
+
+		// At and above the ceiling → flat (saturated). The whole point of the
+		// ceiling is that $300 and $3000 produce the same base score, so the
+		// remaining ranking signals (tokens / recency / trust) differentiate
+		// within the premium band rather than letting absolute price dominate.
+		const atCeiling = computeRankBaseScore(
+			{
+				title: SHORT_TITLE,
+				description: TEMPLATE_DESC,
+				priceUSD: PREMIUM_PRICE_CEILING_USD,
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		const wayAboveCeiling = computeRankBaseScore(
+			{
+				title: SHORT_TITLE,
+				description: TEMPLATE_DESC,
+				priceUSD: PREMIUM_PRICE_CEILING_USD * 100,
+			},
 			DEFAULT_RANKING_CONFIG,
 		);
 
 		expect(noPrice).toBe(0);
 		expect(zeroPrice).toBe(0);
-		expect(cheap).toBeCloseTo(PREMIUM_W * Math.log10(2), 10);
-		expect(premium).toBeCloseTo(PREMIUM_W * Math.log10(501), 10);
-		// The whole point of the cold-start lever: a $500 listing's premium
-		// contribution outweighs the entire recency budget. If this stops
-		// being true the weight needs to come down (engagement signal
-		// arriving, dropping below the recency ceiling defeats the design).
-		expect(premium).toBeGreaterThan(RECENCY_W);
+		expect(buck).toBeCloseTo(-CHEAP_FLOOR_PENALTY, 10);
+		expect(fiveBucks).toBeCloseTo(-CHEAP_FLOOR_PENALTY, 10);
+		expect(fifty).toBeCloseTo(PREMIUM_W * Math.log10(51), 10);
+		expect(atCeiling).toBeCloseTo(
+			PREMIUM_W * Math.log10(1 + PREMIUM_PRICE_CEILING_USD),
+			10,
+		);
+		expect(wayAboveCeiling).toBeCloseTo(atCeiling, 10);
 	});
 
 	it("subtracts the long-title penalty above LONG_TITLE_MAX_CHARS", () => {
