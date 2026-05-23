@@ -48,25 +48,30 @@ export interface RankingConfig {
 		 */
 		cartAdd: number;
 		/**
-		 * Absolute-price premium weight applied to
-		 * `log10(1 + min(priceUSD, PREMIUM_PRICE_CEILING_USD))`. Sub-linear
-		 * AND capped at the ceiling: $300, $1000, $3000 all get the same
-		 * premium contribution. Sits alongside a hard `CHEAP_FLOOR_PENALTY`
-		 * for sub-$10 listings.
+		 * Maximum price-band contribution. The shape is an asymmetric plateau
+		 * in log10(price) space (`sweetSpotPlateauShape`): full credit
+		 * (`weight × 1.0`) across `[PLATEAU_LO_USD, PLATEAU_HI_USD]`,
+		 * quadratic decay below (sub-$10 → 0, no separate floor needed),
+		 * linear decay above ($1k → ~0.74 × weight, $3k → 0.5 × weight) so
+		 * expensive outliers sprinkle through the long tail rather than
+		 * collapse at the bottom.
 		 *
 		 * Cold-start history:
-		 *   v6 (RANK_BASE_VERSION 6, weight 0.30, NO ceiling, NO floor) —
-		 *     shipped, broke. Unbounded log of price gave a $3,500 PSA card
-		 *     ~$1.07 of pure premium boost (vs ~$0.30 max recency budget),
-		 *     and any high-priced bad-photo listing dominated the top of the
-		 *     feed regardless of quality. Spearman price-vs-rank correlation
-		 *     measured at ~0.85 — pure price-sorting at the top.
-		 *   v7 (this — weight 0.08, ceiling $300, floor $10/−0.15) — capped
-		 *     so $300+ all tie on the premium term, and the bottom is
-		 *     explicitly demoted. Within the premium band, tokens / recency /
-		 *     trust take over the differentiation — the same job pCTR/pCVR
-		 *     would do at Booking's scale, just with the signals we actually
-		 *     have today.
+		 *   v6 (weight 0.30, log10(price), NO ceiling, NO floor) — shipped,
+		 *     broke. Unbounded log gave a $3,500 PSA card ~$1.07 of premium
+		 *     boost (vs ~$0.30 max recency budget); high-priced bad-photo
+		 *     listings dominated the top regardless of quality (Spearman
+		 *     price-vs-rank ρ ~0.85 — pure price-sorting).
+		 *   v7 (weight 0.08, log10, ceiling $300, floor $10/−0.15) —
+		 *     bounded the log and demoted the bottom. Top-25 median landed
+		 *     at $172 (top of the band, not the middle); above the ceiling
+		 *     all prices collapsed to the same score ($300 = $3k), which
+		 *     buried real $1k+ graded outliers entirely.
+		 *   v8 (this — weight 0.35, plateau $35-$300) — the BAND is the
+		 *     peak (not a single point). Vibes-check on the May 23 prod
+		 *     CSV (356 listings) put top-25 median at $99 (band center)
+		 *     and surfaced $1k+ graded cards at ranks ~90-220 instead of
+		 *     ranks 28-90 (v7-M tuning) or rank 1 (v6 failure mode).
 		 */
 		premium: number;
 	};
@@ -165,34 +170,69 @@ export interface RankingConfig {
  *           check predicted top-25 median $375 → $172, $1 cards stay at
  *           rank ~240+, $1k+ listings sprinkle through ranks 30-120
  *           instead of dominating top-10.
+ *   v7 → 8: replaced the v7 additive log10 + ceiling + cheap-floor with
+ *           a single asymmetric plateau shape (`sweetSpotPlateauShape`):
+ *           full credit across `[PLATEAU_LO_USD, PLATEAU_HI_USD]`,
+ *           quadratic decay below (sub-$10 → 0 boost — no separate floor
+ *           needed), linear decay above so $1k+ outliers sprinkle through
+ *           the long tail instead of collapsing to the v7 ceiling. Weight
+ *           bumped 0.08 → 0.35 (the plateau output is bounded [0,1], not
+ *           log-scaled, so the weight is now literally "max contribution
+ *           when in the band"). Vibes-check on May 23 prod CSV (356
+ *           listings) moved top-25 median $172 → $99 and dispersed $1k+
+ *           cards from ranks 28-90 → 90-220. Forces a one-time recompute
+ *           of every row at the new shape.
  */
-export const RANK_BASE_VERSION = 7;
+export const RANK_BASE_VERSION = 8;
 
 /**
- * Saturation point for the absolute-price premium term. Above this dollar
- * value the `log10(1 + min(priceUSD, ceiling))` contribution is flat —
- * $300, $1000, $3000 all add the same number to `rankBaseScore`. Within the
- * premium band, ordering falls to tokens / recency / trust, which is the
- * pCTR/pCVR substitute we have today (Booking's `price × pCTR × pCVR`
- * pattern, without the engagement halves we'll add later).
+ * Lower edge of the price sweet-spot band. Inside `[LO, HI]` the plateau
+ * shape returns 1.0 (full credit × `weights.premium`); below LO it decays
+ * quadratically and clamps to 0 fast — sub-$10 listings end up with zero
+ * premium contribution, so they don't float to the top on recency alone.
+ * Picked at $35 from cofounder's framing of the sweet spot.
+ */
+export const PLATEAU_LO_USD = 35;
+
+/**
+ * Upper edge of the price sweet-spot band. Above HI the plateau shape
+ * decays linearly (gentle), so expensive outliers — $1k+ graded cards,
+ * sealed booster boxes — sprinkle through the middle/late pages rather
+ * than collapse at the bottom. This is the pCTR/pCVR substitute we have
+ * today (Booking's `price × pCTR × pCVR` without the engagement halves):
+ * tokens / recency / trust differentiate above the band.
  *
- * Picked $300 because it's the natural top of the "$35-$300 sweet spot" the
- * cofounder framed after the v6 deploy. Tunable post-deploy; raise when
- * engagement signal arrives and can carry the differentiation above the cap.
+ * Picked $300 because it's the natural top of the "$35-$300 sweet spot."
+ * Tunable post-deploy; raise when engagement signal arrives and can carry
+ * differentiation deeper into the premium tier.
  */
-export const PREMIUM_PRICE_CEILING_USD = 300;
+export const PLATEAU_HI_USD = 300;
 
 /**
- * Listings priced below this get a flat `CHEAP_FLOOR_PENALTY` instead of
- * the (small) premium contribution. The "we don't want to show $1 cards
- * right now" lever — brute force but exactly addresses the failure mode
- * where fresh $1-5 commons float to the top of `/explore` on recency alone.
+ * Curvature of the below-band quadratic decay
+ * (`shape = 1 − k · (logLO − logP)²`). At 2.0:
+ *   $20  → ~0.88  (small demerit relative to band)
+ *   $10  → ~0.41  (clearly demerited)
+ *   $5   →    0   (clamped — way down)
+ *   $1   →    0   (clamped)
+ * Higher values steepen the cliff; lower values soften it.
  */
-export const CHEAP_FLOOR_THRESHOLD_USD = 10;
-export const CHEAP_FLOOR_PENALTY = 0.15;
+export const PLATEAU_BELOW_CURVATURE = 2.0;
+
+/**
+ * Slope of the above-band linear decay
+ * (`shape = 1 − k · (logP − logHI)`). At 0.5:
+ *   $500    → ~0.89  (slight outlier lift)
+ *   $1,000  → ~0.74  (mid-tail sprinkle)
+ *   $3,000  →  0.5   (deep-tail sprinkle)
+ *   $10,000 → ~0.24  (rare cards still visible at depth)
+ * Lower values are gentler (more outlier visibility); higher values bite
+ * faster (closer to a hard ceiling).
+ */
+export const PLATEAU_ABOVE_SLOPE = 0.5;
 
 export const DEFAULT_RANKING_CONFIG: RankingConfig = {
-	weights: { recency: 0.3, sellerTrust: 0.05, cartAdd: 0.1, premium: 0.08 },
+	weights: { recency: 0.3, sellerTrust: 0.05, cartAdd: 0.1, premium: 0.35 },
 	recencyHalfLifeHours: 72,
 	perSellerCap: 3,
 	lowEffortPenalty: 0.12,
@@ -356,16 +396,44 @@ export function matchesNegativeKeyword(
 }
 
 /**
+ * Asymmetric plateau in log10(price) space. Full credit (1.0) across
+ * `[PLATEAU_LO_USD, PLATEAU_HI_USD]`, quadratic decay below (sub-$10
+ * clamps to 0), linear decay above (the long tail). Clamped to `[0, 1]`.
+ *
+ * The asymmetry is the load-bearing design choice: cheap stuff should sink
+ * fast (we don't want $1 cards visible on /explore) but expensive stuff
+ * should sprinkle through the long tail rather than collapse at the bottom
+ * (we DO want $1k+ outliers visible, just not at the top). See the v8
+ * entry on `RANK_BASE_VERSION` for the failure mode this replaces.
+ *
+ * Caller filters `priceUSD ≤ 0` and null before invoking — premium term
+ * collapses to 0 for those at the call site.
+ */
+function sweetSpotPlateauShape(priceUSD: number): number {
+	const logP = Math.log10(priceUSD);
+	const logLo = Math.log10(PLATEAU_LO_USD);
+	const logHi = Math.log10(PLATEAU_HI_USD);
+	if (logP >= logLo && logP <= logHi) return 1.0;
+	if (logP < logLo) {
+		const dist = logLo - logP;
+		return Math.max(0, 1 - PLATEAU_BELOW_CURVATURE * dist * dist);
+	}
+	const dist = logP - logHi;
+	return Math.max(0, 1 - PLATEAU_ABOVE_SLOPE * dist);
+}
+
+/**
  * Time-independent part of the score:
- *   sellerTrust·w + cartAdd·w + premium·w
+ *   sellerTrust·w + cartAdd·w + premium·w·plateauShape(price)
  *     − lowEffort?·penalty − longTitle?·penalty − negKeyword?·penalty
  *
- * The premium term dominates the additive terms by design — at weight 0.30,
- * a $1,000 listing contributes ~0.90 to the base, more than 4× the max
- * cart-add contribution at realistic counts (`0.10·log10(101) ≈ 0.20`). This
- * is intentional cold-start positioning: no engagement signal exists yet,
- * so price is doing the differentiation work. The weight ramps DOWN as
- * engagement accrues; see `RankingConfig.weights.premium` for the trigger.
+ * The premium term dominates the additive terms by design — at weight 0.35,
+ * a sweet-spot listing ($35-$300) contributes the full 0.35 to the base,
+ * more than the entire recency budget (0.30) and ~3× the realistic
+ * cart-add contribution (`0.10·log10(11) ≈ 0.10`). Intentional cold-start
+ * positioning: no engagement signal exists yet, so the price band is
+ * carrying the differentiation work. The weight ramps DOWN as engagement
+ * accrues; see `RankingConfig.weights.premium` for the trigger.
  */
 export function computeRankBaseScore(
 	input: RankBaseInput,
@@ -375,15 +443,10 @@ export function computeRankBaseScore(
 	const cartAddCount = Math.max(0, input.addToCartCount ?? 0);
 	const cartAdd = config.weights.cartAdd * Math.log10(1 + cartAddCount);
 	const priceUSD = input.priceUSD;
-	let premium = 0;
-	if (priceUSD !== null && priceUSD !== undefined && priceUSD > 0) {
-		if (priceUSD < CHEAP_FLOOR_THRESHOLD_USD) {
-			premium = -CHEAP_FLOOR_PENALTY;
-		} else {
-			const cappedPrice = Math.min(priceUSD, PREMIUM_PRICE_CEILING_USD);
-			premium = config.weights.premium * Math.log10(1 + cappedPrice);
-		}
-	}
+	const premium =
+		priceUSD !== null && priceUSD !== undefined && priceUSD > 0
+			? config.weights.premium * sweetSpotPlateauShape(priceUSD)
+			: 0;
 	const lowEffort = isLowEffortListing(input.title, input.description)
 		? config.lowEffortPenalty
 		: 0;
