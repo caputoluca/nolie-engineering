@@ -20,7 +20,7 @@ import type {
 } from "@nolie/schemas/checkout/claim";
 import { CheckoutClaimErrorCode } from "@nolie/schemas/checkout/claim";
 import type { FulfillmentMethodType } from "@nolie/schemas/fulfillment";
-import { holdCredits } from "@nolie/wallet";
+import { getSpendableBalance, holdCredits } from "@nolie/wallet";
 import { COUNTRY_CODE_US } from "../../constants/country.js";
 import { logger } from "../../logger.js";
 import { apiTx } from "../db/tx.js";
@@ -144,7 +144,7 @@ export async function claimCheckout(
 		quote.lines.map((l) => [l.listingId, asResolvedMethod(l.fulfillmentMode)]),
 	);
 
-	const [listings, buyer] = await Promise.all([
+	const [listings, buyer, spendable] = await Promise.all([
 		loadCheckoutListings(db, listingIds),
 		db.user.findUnique({
 			where: { id: buyerId },
@@ -152,9 +152,6 @@ export async function claimCheckout(
 				email: true,
 				phone: true,
 				taxExemptStatus: true,
-				// Wallet balance piggybacks on the buyer fetch — credit recompute
-				// at claim time needs it, mirrors the quote-side pattern.
-				wallet: { select: { availableCents: true } },
 				billing: {
 					select: {
 						customerId: true,
@@ -188,6 +185,12 @@ export async function claimCheckout(
 					: false,
 			},
 		}),
+		// Spendable balance (`availableCents` minus past-TTL grants pending
+		// expire) — drives the credit drift check below. Reading spendable
+		// here matches what the quote was computed against; the hold writer
+		// in Tx A then materialises the expiry so the actual CAS is backed
+		// by the same number the drift check approved.
+		getSpendableBalance({ db, userId: buyerId }),
 	]);
 
 	const customerId = buyer?.billing?.customerId;
@@ -281,10 +284,9 @@ export async function claimCheckout(
 	// snapshot so the next quote call returns fresh credit).
 	const useCredit = body.useCredit !== false;
 	const expectedCreditCents = body.expectedCreditCents ?? 0;
-	const walletAvailableCents = buyer.wallet?.availableCents ?? 0;
 	const credit = applyCreditToCheckout({
 		useCredit,
-		walletAvailableCents,
+		walletSpendableCents: spendable.spendableCents,
 		groupTotalsCents: fresh.groups.map((g) => g.totalCents),
 	});
 	if (credit.totalCreditCents !== expectedCreditCents) {
