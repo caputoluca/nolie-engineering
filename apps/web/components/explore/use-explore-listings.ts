@@ -5,9 +5,9 @@ import type {
 	ExploreSort,
 } from "@nolie/schemas/explore";
 import { useInfiniteQuery } from "@tanstack/react-query";
+import { useListingsSort } from "@/hooks/listings/use-sort";
 import { browser } from "@/lib/http/browser";
 import { EXPLORE_LISTINGS_QUERY_KEY } from "./queries";
-import { useExploreSort } from "./use-explore-sort";
 
 interface UseExploreListingsOptions {
 	// SSR-fetched first page. Used only when the React Query cache is empty
@@ -22,7 +22,7 @@ interface UseExploreListingsOptions {
 }
 
 export function useExploreListings(options?: UseExploreListingsOptions) {
-	const sort: ExploreSort = useExploreSort();
+	const sort: ExploreSort = useListingsSort();
 	const seedInitialData =
 		options?.initialData && options.initialSort === sort
 			? options.initialData
