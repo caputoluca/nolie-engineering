@@ -39,6 +39,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				listingIds: request.body.listingIds,
 				requestedShippingAddressId: request.body.shippingAddressId,
 				fulfillmentChoiceByListing: request.body.fulfillment,
+				useCredit: request.body.useCredit,
 			});
 			return reply.status(200).send(quote);
 		},
@@ -66,6 +67,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				listingIds: request.body.listingIds,
 				requestedShippingAddressId: request.body.shippingAddressId,
 				fulfillmentChoiceByListing: request.body.fulfillment,
+				useCredit: request.body.useCredit,
 			});
 			return reply.status(200).send({
 				quoteId: full.quoteId,
