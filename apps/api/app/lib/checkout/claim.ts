@@ -1,10 +1,18 @@
 import { randomUUID } from "node:crypto";
+import {
+	finalizeCheckoutTx,
+	loadFinalizableOrdersByIds,
+	runCheckoutSideEffects,
+} from "@nolie/checkout";
 import type { SellerVacationPeriod } from "@nolie/core/orders";
 import type { PrismaClient } from "@nolie/db";
+import { PaymentStatus } from "@nolie/db";
 import { errors, HttpError } from "@nolie/errors/http";
 import { joinName } from "@nolie/lib/name";
 import { PaymentErrorCode, type PaymentsClient } from "@nolie/payments";
 import { isStripeRateLimitError } from "@nolie/payments/utils";
+import type { QueueOf } from "@nolie/queues";
+import type { RestClient } from "@nolie/realtime/server";
 import type {
 	CheckoutClaimSuccess,
 	CheckoutCreditChangedData,
@@ -16,7 +24,11 @@ import { holdCredits } from "@nolie/wallet";
 import { COUNTRY_CODE_US } from "../../constants/country.js";
 import { logger } from "../../logger.js";
 import { apiTx } from "../db/tx.js";
-import { setReportingContext } from "../observability/sentry/report.js";
+import {
+	reportError,
+	setReportingContext,
+} from "../observability/sentry/report.js";
+import { fanOutCanceledSiblings } from "../offers/cancel-fanout.js";
 import { BUNDLE_SHIPPING_FORMULA } from "./bundle-shipping.js";
 import {
 	buildAndValidateGroups,
@@ -46,6 +58,15 @@ const RESERVATION_TTL_MS = 10 * 60 * 1000;
 interface ClaimInput {
 	db: PrismaClient;
 	payments: PaymentsClient;
+	/** Queue handles for the credit-only ($0) finalize side-effects. The
+	 *  Stripe path triggers the same fan-out via the worker's PI.succeeded
+	 *  handler, so these are only used when the buyer's credit covers
+	 *  everything and we skip Stripe entirely. */
+	queues: {
+		engagementEvents: QueueOf<"engagementEvents">;
+		notifications: QueueOf<"notifications">;
+	};
+	realtime: RestClient;
 	buyerId: string;
 	body: {
 		quoteId: string;
@@ -380,8 +401,15 @@ export async function claimCheckout(
 	}
 	const reservedUntil = new Date(Date.now() + RESERVATION_TTL_MS);
 
+	// The floor rule in `applyCreditToCheckout` guarantees this is either 0
+	// (credit covers everything → bypass Stripe, finalize inline) or ≥ $0.50
+	// (normal Stripe path). No values in between can land here.
+	const chargedAmountCents = fresh.totalCents - credit.totalCreditCents;
+	const isCreditOnlyCheckout = chargedAmountCents === 0;
+	const paidAt = new Date();
+
 	// 8) Tx A — atomic DB writes only. Fast (no external calls).
-	const { orderIds } = await apiTx(db, async (tx) => {
+	const txResult = await apiTx(db, async (tx) => {
 		const consumed = await tx.checkoutQuote.updateMany({
 			where: {
 				id: quote.id,
@@ -487,19 +515,81 @@ export async function claimCheckout(
 			});
 		}
 
-		return materialized;
+		// Credit-only ($0) path: finalize inside the same Tx A so orders,
+		// holds, captures, listing→sold, sibling-offer cancellation, and
+		// Earning/Label rows all commit atomically. No Stripe call, no Tx B.
+		// The shared `finalizeCheckoutTx` lives in `@nolie/checkout` and is
+		// the same function the worker's PI.succeeded handler calls — the
+		// only difference is `chargeId: null`.
+		if (isCreditOnlyCheckout) {
+			const orders = await loadFinalizableOrdersByIds(
+				tx,
+				materialized.orderIds,
+			);
+			const finalize = await finalizeCheckoutTx({
+				tx,
+				orders,
+				chargeId: null,
+				paidAt,
+				onAnomalousFallback: ({ orderId }) => {
+					reportError(
+						new Error(
+							"checkout.claim ($0): ShippingLabel sized from fallback dims — non-letter listing reached payment with no package dims",
+						),
+						{
+							operation: "claim_zero_charge_label_fallback_dims",
+							extra: { orderId },
+						},
+					);
+				},
+			});
+			return { ...materialized, finalize, orders };
+		}
+
+		return { ...materialized, finalize: null, orders: null };
 	});
+	const orderIds = txResult.orderIds;
+
+	if (isCreditOnlyCheckout && txResult.finalize && txResult.orders) {
+		// Side-effects + sibling fan-out happen post-tx. Mirrors the worker's
+		// PI.succeeded flow exactly except no paymentIntentId.
+		runCheckoutSideEffects({
+			orders: txResult.orders,
+			paymentIntentId: null,
+			paidAt,
+			queues: input.queues,
+			logger,
+			reportError,
+		});
+		fanOutCanceledSiblings({
+			realtime: input.realtime,
+			notificationsQueue: input.queues.notifications,
+			siblings: txResult.finalize.cancelledSiblings,
+			state: txResult.finalize.cancelledSiblingState,
+			resolvedAt: txResult.finalize.cancelledSiblingsResolvedAt,
+			resolvedBy: null,
+			context: "claim_zero_charge",
+		});
+		logger.info(
+			{ buyerId, quoteId: quote.id, orderIds },
+			"checkout.claim: success ($0 credit-only)",
+		);
+		return {
+			clientSecret: null,
+			paymentIntentId: null,
+			orderIds,
+		};
+	}
 
 	// 9) Stripe call (no tx). Idempotency-keyed on body.idempotencyKey — buyer
 	//    retries land on the same PI. Abandonment is handled by the periodic
 	//    checkout reservation reconciler (apps/worker/app/checkout/reconciler.ts),
 	//    not a per-claim BullMQ job — see Saleor / stripe-magento2 prior art.
 	const sellerProfileIds = uniqueSellerProfileIds(fresh.groups);
-	// PI amount is the net the buyer's card is actually charged. Order rows
-	// keep gross totals (item + shipping + tax) so receipts can render the
-	// gross-then-tender breakdown; AppliedCredit carries the credit slice
-	// per Order for refund-time proration.
-	const chargedAmountCents = fresh.totalCents - credit.totalCreditCents;
+	// `chargedAmountCents` declared above — Order rows still keep gross
+	// totals so receipts can render the gross-then-tender breakdown;
+	// AppliedCredit carries the credit slice per Order for refund-time
+	// proration.
 	const piResult = await payments.customer.createCheckoutPaymentIntent({
 		idempotencyKey: body.idempotencyKey,
 		buyerId,
@@ -645,6 +735,7 @@ async function replayIfExists({
 		select: {
 			id: true,
 			paymentIntentId: true,
+			paymentStatus: true,
 			subtotalCents: true,
 			shippingCents: true,
 			taxCents: true,
@@ -672,6 +763,21 @@ async function replayIfExists({
 
 	const orderIds = siblings.map((s) => s.id);
 	const linkedPI = siblings.find((s) => s.paymentIntentId);
+
+	// Replay path C — credit-only ($0) finalize already ran. No PI was ever
+	// linked AND every sibling is already succeeded → idempotent return of
+	// the same success envelope the first call produced. Has to come before
+	// path B (which would try to resume Stripe with a $0 amount).
+	if (
+		!linkedPI &&
+		siblings.every((s) => s.paymentStatus === PaymentStatus.succeeded)
+	) {
+		return {
+			clientSecret: null,
+			paymentIntentId: null,
+			orderIds,
+		};
+	}
 
 	// Replay path A — PI was already linked. Just refetch the clientSecret.
 	if (linkedPI?.paymentIntentId) {

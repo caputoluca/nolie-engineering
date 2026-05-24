@@ -1,6 +1,7 @@
 import { getSortFieldsForTransition } from "@nolie/core/auctions";
 import { generatePickupCode } from "@nolie/core/orders";
 import {
+	type DbClient,
 	FulfillmentMode,
 	ListingStatus,
 	type Offer,
@@ -10,7 +11,6 @@ import {
 	PaymentStatus,
 	PayoutStatus,
 	Prisma,
-	type PrismaClient,
 } from "@nolie/db";
 import {
 	getLetterPreset,
@@ -141,70 +141,63 @@ export function computeBundleDims(
 }
 
 /**
- * Loader for finalizable orders by PI. Kept here so the shared package
- * owns the full select shape; the credit-only path doesn't need it
- * (claim already has the orders in hand).
+ * Shared select shape for any finalize-the-order query — keeps the two
+ * loaders + any inline future call in lockstep so a column added here
+ * propagates everywhere `OrderForFinalization` is consumed.
  */
-export async function loadFinalizableOrdersForPI(
-	db: PrismaClient,
-	paymentIntentId: string,
-): Promise<OrderForFinalization[]> {
-	const rows = await db.order.findMany({
-		where: {
-			paymentIntentId,
-			originationType: {
-				in: [
-					OrderOriginationType.checkout,
-					OrderOriginationType.offer_accepted,
-				],
-			},
-		},
+const ORDER_FOR_FINALIZATION_SELECT = {
+	id: true,
+	buyerId: true,
+	sellerProfileId: true,
+	sellerProfile: { select: { userId: true } },
+	originationType: true,
+	originationRef: true,
+	fulfillmentMode: true,
+	subtotalCents: true,
+	applicationFeeCents: true,
+	processingFeeCents: true,
+	taxCents: true,
+	shippingPresetKey: true,
+	lineItems: {
 		select: {
 			id: true,
-			buyerId: true,
-			sellerProfileId: true,
-			sellerProfile: { select: { userId: true } },
-			originationType: true,
-			originationRef: true,
-			fulfillmentMode: true,
-			subtotalCents: true,
+			listingId: true,
+			priceCents: true,
 			applicationFeeCents: true,
 			processingFeeCents: true,
-			taxCents: true,
-			shippingPresetKey: true,
-			lineItems: {
+			sellerEarningCents: true,
+			referrerQueryId: true,
+			referrerRankPosition: true,
+			referrerSurface: true,
+			listing: {
 				select: {
-					id: true,
-					listingId: true,
-					priceCents: true,
-					applicationFeeCents: true,
-					processingFeeCents: true,
-					sellerEarningCents: true,
-					referrerQueryId: true,
-					referrerRankPosition: true,
-					referrerSurface: true,
-					listing: {
+					shippingPresetKey: true,
+					packageWeightLbs: true,
+					packageLengthIn: true,
+					packageWidthIn: true,
+					packageHeightIn: true,
+					shippingLabel: {
 						select: {
-							shippingPresetKey: true,
-							packageWeightLbs: true,
-							packageLengthIn: true,
-							packageWidthIn: true,
-							packageHeightIn: true,
-							shippingLabel: {
-								select: {
-									weightLbs: true,
-									lengthIn: true,
-									widthIn: true,
-									heightIn: true,
-								},
-							},
+							weightLbs: true,
+							lengthIn: true,
+							widthIn: true,
+							heightIn: true,
 						},
 					},
 				},
 			},
 		},
-	});
-	return rows.map((r) => ({
+	},
+} satisfies Prisma.OrderSelect;
+
+type OrderForFinalizationRow = Prisma.OrderGetPayload<{
+	select: typeof ORDER_FOR_FINALIZATION_SELECT;
+}>;
+
+function toOrderForFinalization(
+	r: OrderForFinalizationRow,
+): OrderForFinalization {
+	return {
 		id: r.id,
 		buyerId: r.buyerId,
 		sellerProfileId: r.sellerProfileId,
@@ -221,7 +214,57 @@ export async function loadFinalizableOrdersForPI(
 		taxCents: r.taxCents,
 		shippingPresetKey: r.shippingPresetKey,
 		lineItems: r.lineItems,
-	}));
+	};
+}
+
+/**
+ * Loader keyed on PaymentIntent ID — webhook path. Filtered to BIN /
+ * offer-accept origins (auction-won + non-checkout PIs share the table
+ * and must not be picked up here).
+ */
+export async function loadFinalizableOrdersForPI(
+	db: DbClient,
+	paymentIntentId: string,
+): Promise<OrderForFinalization[]> {
+	const rows = await db.order.findMany({
+		where: {
+			paymentIntentId,
+			originationType: {
+				in: [
+					OrderOriginationType.checkout,
+					OrderOriginationType.offer_accepted,
+				],
+			},
+		},
+		select: ORDER_FOR_FINALIZATION_SELECT,
+	});
+	return rows.map(toOrderForFinalization);
+}
+
+/**
+ * Loader keyed on order IDs — credit-only ($0) claim path. Claim has
+ * the IDs in hand after `materializeOrders`; this fetches the full
+ * select shape so `finalizeCheckoutTx` can run inside the same tx.
+ * Same origination filter as the PI loader.
+ */
+export async function loadFinalizableOrdersByIds(
+	db: DbClient,
+	orderIds: string[],
+): Promise<OrderForFinalization[]> {
+	if (orderIds.length === 0) return [];
+	const rows = await db.order.findMany({
+		where: {
+			id: { in: orderIds },
+			originationType: {
+				in: [
+					OrderOriginationType.checkout,
+					OrderOriginationType.offer_accepted,
+				],
+			},
+		},
+		select: ORDER_FOR_FINALIZATION_SELECT,
+	});
+	return rows.map(toOrderForFinalization);
 }
 
 /**
