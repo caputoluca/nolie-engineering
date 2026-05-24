@@ -7,10 +7,12 @@ import { PaymentErrorCode, type PaymentsClient } from "@nolie/payments";
 import { isStripeRateLimitError } from "@nolie/payments/utils";
 import type {
 	CheckoutClaimSuccess,
+	CheckoutCreditChangedData,
 	CheckoutLineTotals,
 } from "@nolie/schemas/checkout/claim";
 import { CheckoutClaimErrorCode } from "@nolie/schemas/checkout/claim";
 import type { FulfillmentMethodType } from "@nolie/schemas/fulfillment";
+import { holdCredit } from "@nolie/wallet";
 import { COUNTRY_CODE_US } from "../../constants/country.js";
 import { logger } from "../../logger.js";
 import { apiTx } from "../db/tx.js";
@@ -23,6 +25,7 @@ import {
 	type ComputedFulfillmentGroup,
 	computeCheckoutTotals,
 } from "./compute-totals.js";
+import { applyCreditToCheckout } from "./credit.js";
 import {
 	computeIdempotencyPayloadHash,
 	validateIdempotencyKeyFormat,
@@ -48,6 +51,8 @@ interface ClaimInput {
 		quoteId: string;
 		paymentMethodId: string;
 		idempotencyKey: string;
+		useCredit?: boolean;
+		expectedCreditCents?: number;
 	};
 }
 
@@ -126,6 +131,9 @@ export async function claimCheckout(
 				email: true,
 				phone: true,
 				taxExemptStatus: true,
+				// Wallet balance piggybacks on the buyer fetch — credit recompute
+				// at claim time needs it, mirrors the quote-side pattern.
+				wallet: { select: { availableCents: true } },
 				billing: {
 					select: {
 						customerId: true,
@@ -245,6 +253,32 @@ export async function claimCheckout(
 		taxExempt: buyer.taxExemptStatus === "approved",
 		payments,
 	});
+
+	// Credit drift check — recompute against current wallet + buyer's opt-in
+	// stance. Mismatch with what the buyer agreed to on the rendered quote
+	// throws CREDIT_CHANGED; FE re-quotes (cart-hash includes the wallet
+	// snapshot so the next quote call returns fresh credit).
+	const useCredit = body.useCredit !== false;
+	const expectedCreditCents = body.expectedCreditCents ?? 0;
+	const walletAvailableCents = buyer.wallet?.availableCents ?? 0;
+	const credit = applyCreditToCheckout({
+		useCredit,
+		walletAvailableCents,
+		groupTotalsCents: fresh.groups.map((g) => g.totalCents),
+	});
+	if (credit.totalCreditCents !== expectedCreditCents) {
+		throw new HttpError(
+			"Wallet credit changed since quote",
+			CheckoutClaimErrorCode.credit_changed,
+			{
+				statusCode: 409,
+				data: {
+					expectedCreditCents,
+					actualCreditCents: credit.totalCreditCents,
+				} satisfies CheckoutCreditChangedData,
+			},
+		);
+	}
 
 	const drift = computeDrift(quote.lines, fresh.perListing);
 	if (drift) {
@@ -410,6 +444,45 @@ export async function claimCheckout(
 			vacationBySellerProfileId,
 		});
 
+		// Credit holds — one per Order with non-zero allocation. Holds run
+		// sequentially because each is a CAS on the wallet row's `version`;
+		// concurrent calls would race themselves. AppliedCredit rows then
+		// batch into a single `createMany` once every hold has a WalletEntry
+		// id. Same tx, so hold + AppliedCredit + Order all commit atomically.
+		// `holdExpiresAt` aligns with the listing reservation TTL — the
+		// reservation reconciler's PI-cancel path naturally releases the hold
+		// alongside the order. PI ID isn't known yet (Stripe call follows
+		// Tx A); Tx B backfills `AppliedCredit.paymentIntentId`.
+		const appliedCreditRows: {
+			orderId: string;
+			walletId: string;
+			appliedCents: number;
+			holdEntryId: string;
+		}[] = [];
+		for (let i = 0; i < materializationGroups.length; i++) {
+			const groupCreditCents = credit.perGroupCreditCents[i] ?? 0;
+			if (groupCreditCents === 0) continue;
+			const groupOrderId = materializationGroups[i]?.orderId;
+			if (!groupOrderId) continue;
+			const hold = await holdCredit({
+				db: tx,
+				userId: buyerId,
+				amountCents: groupCreditCents,
+				orderId: groupOrderId,
+				holdExpiresAt: reservedUntil,
+				idempotencyKey: `${groupOrderId}:hold`,
+			});
+			appliedCreditRows.push({
+				orderId: groupOrderId,
+				walletId: hold.walletId,
+				appliedCents: groupCreditCents,
+				holdEntryId: hold.id,
+			});
+		}
+		if (appliedCreditRows.length > 0) {
+			await tx.appliedCredit.createMany({ data: appliedCreditRows });
+		}
+
 		return materialized;
 	});
 
@@ -418,12 +491,17 @@ export async function claimCheckout(
 	//    checkout reservation reconciler (apps/worker/app/checkout/reconciler.ts),
 	//    not a per-claim BullMQ job — see Saleor / stripe-magento2 prior art.
 	const sellerProfileIds = uniqueSellerProfileIds(fresh.groups);
+	// PI amount is the net the buyer's card is actually charged. Order rows
+	// keep gross totals (item + shipping + tax) so receipts can render the
+	// gross-then-tender breakdown; AppliedCredit carries the credit slice
+	// per Order for refund-time proration.
+	const chargedAmountCents = fresh.totalCents - credit.totalCreditCents;
 	const piResult = await payments.customer.createCheckoutPaymentIntent({
 		idempotencyKey: body.idempotencyKey,
 		buyerId,
 		customerId,
 		paymentMethodId: paymentMethod.stripePaymentMethodId,
-		amountCents: fresh.totalCents,
+		amountCents: chargedAmountCents,
 		taxCalculationId: fresh.taxCalculationId ?? undefined,
 		metadata: buildPaymentIntentMetadata({
 			fresh,
@@ -432,6 +510,7 @@ export async function claimCheckout(
 			orderIds,
 			quoteId: quote.id,
 			idempotencyKey: body.idempotencyKey,
+			creditAppliedCents: credit.totalCreditCents,
 		}),
 	});
 	if (!piResult.success) {
@@ -459,7 +538,10 @@ export async function claimCheckout(
 	}
 
 	// 10) Tx B — link the PI to the Orders. Bounded WHERE clause guards against
-	//     a concurrent retry already linking them.
+	//     a concurrent retry already linking them. Same backfill happens on
+	//     `AppliedCredit.paymentIntentId` when this checkout consumed credit
+	//     so the webhook side (capture / release / refund) can pivot off the
+	//     PI ID without a join through Order.
 	await db.order.updateMany({
 		where: {
 			id: { in: orderIds },
@@ -469,6 +551,12 @@ export async function claimCheckout(
 		},
 		data: { paymentIntentId: piResult.paymentIntentId },
 	});
+	if (credit.totalCreditCents > 0) {
+		await db.appliedCredit.updateMany({
+			where: { orderId: { in: orderIds }, paymentIntentId: null },
+			data: { paymentIntentId: piResult.paymentIntentId },
+		});
+	}
 
 	logger.info(
 		{
@@ -712,12 +800,25 @@ async function resumeWithoutLinkedPI({
 		},
 	);
 
+	// Credit holds already landed in the original Tx A — replay must charge
+	// `gross − held credit`, mirroring the fresh path's `chargedAmountCents`.
+	// Reading from AppliedCredit (not re-computing from wallet) means a wallet
+	// change between attempts can't alter the amount we charge after the buyer
+	// agreed to it.
+	const appliedCreditAggregate = await db.appliedCredit.aggregate({
+		where: { orderId: { in: orderIds } },
+		_sum: { appliedCents: true },
+	});
+	const replayCreditAppliedCents =
+		appliedCreditAggregate._sum.appliedCents ?? 0;
+	const chargedAmountCents = aggregate.totalCents - replayCreditAppliedCents;
+
 	const piResult = await payments.customer.createCheckoutPaymentIntent({
 		idempotencyKey: body.idempotencyKey,
 		buyerId,
 		customerId,
 		paymentMethodId: stripePaymentMethodId,
-		amountCents: aggregate.totalCents,
+		amountCents: chargedAmountCents,
 		taxCalculationId: quote?.taxCalculationId ?? undefined,
 		metadata: {
 			subtotalCents: aggregate.subtotalCents,
@@ -725,6 +826,7 @@ async function resumeWithoutLinkedPI({
 			taxCents: aggregate.taxCents,
 			applicationFeeCents: aggregate.applicationFeeCents,
 			totalCents: aggregate.totalCents,
+			creditAppliedCents: replayCreditAppliedCents,
 			buyerId,
 			sellerProfileIds: sellerProfileIds.join(","),
 			orderIds: orderIds.join(","),
@@ -758,6 +860,12 @@ async function resumeWithoutLinkedPI({
 		},
 		data: { paymentIntentId: piResult.paymentIntentId },
 	});
+	if (replayCreditAppliedCents > 0) {
+		await db.appliedCredit.updateMany({
+			where: { orderId: { in: orderIds }, paymentIntentId: null },
+			data: { paymentIntentId: piResult.paymentIntentId },
+		});
+	}
 
 	logger.info(
 		{
@@ -948,6 +1056,7 @@ function buildPaymentIntentMetadata(input: {
 	orderIds: string[];
 	quoteId: string;
 	idempotencyKey: string;
+	creditAppliedCents: number;
 }): Record<string, string | number | boolean> {
 	return {
 		subtotalCents: input.fresh.subtotalCents,
@@ -955,6 +1064,7 @@ function buildPaymentIntentMetadata(input: {
 		taxCents: input.fresh.taxTotalCents,
 		applicationFeeCents: input.fresh.applicationFeeTotalCents,
 		totalCents: input.fresh.totalCents,
+		creditAppliedCents: input.creditAppliedCents,
 		buyerId: input.buyerId,
 		sellerProfileIds: input.sellerProfileIds.join(","),
 		orderIds: input.orderIds.join(","),
