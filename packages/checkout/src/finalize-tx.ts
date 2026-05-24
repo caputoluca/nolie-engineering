@@ -299,6 +299,16 @@ export interface FinalizeCheckoutTxResult {
 	listingIds: string[];
 	/** Buyer ID — every order in a checkout shares one. */
 	buyerId: string | null;
+	/**
+	 * True when this run was a no-op because a prior `finalizeCheckoutTx`
+	 * already finalized this set of orders — i.e. webhook redelivery (Stripe
+	 * retries `payment_intent.succeeded` on its own cadence). Caller should
+	 * skip side effects to avoid double-firing notifications / engagement
+	 * events. Distinguishes the redelivery case from a real mid-3DS race-loss
+	 * (where orders were still pending but listings were stolen by a different
+	 * PI — that still throws `MidPaymentRaceLossSignal`).
+	 */
+	alreadyFinalized?: boolean;
 }
 
 /**
@@ -335,8 +345,13 @@ export async function finalizeCheckoutTx(
 		(o) => o.fulfillmentMode === FulfillmentMode.pickup,
 	);
 
+	// Track how many of our orders flipped from `pending → succeeded`. Used
+	// below to distinguish a redelivery (zero flipped) from a real race-loss
+	// (some flipped, but listings didn't).
+	let totalOrdersFlipped = 0;
+
 	if (shippingOrderIds.length > 0) {
-		await tx.order.updateMany({
+		const result = await tx.order.updateMany({
 			where: {
 				id: { in: shippingOrderIds },
 				originationType: { in: eligibleOriginationTypes },
@@ -349,12 +364,13 @@ export async function finalizeCheckoutTx(
 				fulfillmentStatus: OrderStatus.awaiting_shipment,
 			},
 		});
+		totalOrdersFlipped += result.count;
 	}
 
 	// Pickup orders need a unique 6-digit handoff code per row — can't fold
 	// into a single updateMany.
 	for (const order of pickupOrders) {
-		await tx.order.updateMany({
+		const result = await tx.order.updateMany({
 			where: {
 				id: order.id,
 				originationType: { in: eligibleOriginationTypes },
@@ -368,6 +384,24 @@ export async function finalizeCheckoutTx(
 				pickupCode: generatePickupCode(),
 			},
 		});
+		totalOrdersFlipped += result.count;
+	}
+
+	// Redelivery short-circuit: every Order is already past `pending`, so a
+	// prior `finalizeCheckoutTx` did the work. Return early before the listing
+	// flip / earning creates / capture so we don't (a) trip the race-loss
+	// check below by finding no `reserved` listings — which previously caused
+	// a phantom Stripe refund on every Stripe webhook redelivery — or (b) try
+	// to re-INSERT rows (ShippingLabel.createMany has no `skipDuplicates`).
+	if (totalOrdersFlipped === 0) {
+		return {
+			cancelledSiblings: [],
+			cancelledSiblingState: OfferState.canceled_by_bin,
+			cancelledSiblingsResolvedAt: new Date(),
+			listingIds,
+			buyerId: orders[0]?.buyerId ?? null,
+			alreadyFinalized: true,
+		};
 	}
 
 	const buyerId = orders[0]?.buyerId ?? null;

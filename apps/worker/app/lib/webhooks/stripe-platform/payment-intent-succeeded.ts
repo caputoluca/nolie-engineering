@@ -97,6 +97,18 @@ export async function paymentIntentSucceeded(
 		throw err;
 	}
 
+	// Webhook redelivery — Stripe re-fires `payment_intent.succeeded` on its
+	// own cadence. `finalizeCheckoutTx` detected the prior finalize and no-op'd.
+	// Skip side effects so we don't double-fire notifications / engagement
+	// events; the first call already enqueued them.
+	if (finalizeResult.alreadyFinalized) {
+		ctx.logger.info(
+			{ eventId: event.id, paymentIntentId, orderIds },
+			"payment_intent.succeeded: redelivery — prior finalize already completed; skipping side effects",
+		);
+		return;
+	}
+
 	ctx.logger.info(
 		{ eventId: event.id, paymentIntentId, orderIds, chargeId },
 		"payment_intent.succeeded: orders finalized",
