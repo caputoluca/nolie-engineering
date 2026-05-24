@@ -662,11 +662,16 @@ async function handleMidThreeDsRaceLoss({
 				ac.holdEntryId !== null,
 		);
 		if (releaseSpecs.length > 0) {
+			// Unified release key across race-loss, PI-canceled, and PI-failed.
+			// A hold settles exactly once via release OR capture; if a follow-on
+			// webhook fires after another path already released, the batch
+			// idempotency check returns the existing entries as a replay no-op
+			// instead of tripping the "already settled" guard.
 			await releaseHolds({
 				db: tx,
 				holds: releaseSpecs.map((ac) => ({
 					holdEntryId: ac.holdEntryId,
-					idempotencyKey: `${ac.id}:release:race-loss`,
+					idempotencyKey: `${ac.id}:release`,
 				})),
 			});
 		}
