@@ -12,7 +12,7 @@ import type {
 } from "@nolie/schemas/checkout/claim";
 import { CheckoutClaimErrorCode } from "@nolie/schemas/checkout/claim";
 import type { FulfillmentMethodType } from "@nolie/schemas/fulfillment";
-import { holdCredit } from "@nolie/wallet";
+import { holdCredits } from "@nolie/wallet";
 import { COUNTRY_CODE_US } from "../../constants/country.js";
 import { logger } from "../../logger.js";
 import { apiTx } from "../db/tx.js";
@@ -444,43 +444,47 @@ export async function claimCheckout(
 			vacationBySellerProfileId,
 		});
 
-		// Credit holds — one per Order with non-zero allocation. Holds run
-		// sequentially because each is a CAS on the wallet row's `version`;
-		// concurrent calls would race themselves. AppliedCredit rows then
-		// batch into a single `createMany` once every hold has a WalletEntry
-		// id. Same tx, so hold + AppliedCredit + Order all commit atomically.
-		// `holdExpiresAt` aligns with the listing reservation TTL — the
+		// Credit holds — batched. One wallet CAS + one createManyAndReturn
+		// regardless of group count, then a single AppliedCredit createMany.
+		// `holdExpiresAt` aligns with the listing reservation TTL so the
 		// reservation reconciler's PI-cancel path naturally releases the hold
-		// alongside the order. PI ID isn't known yet (Stripe call follows
+		// alongside the orders. PI ID isn't known yet (Stripe call follows
 		// Tx A); Tx B backfills `AppliedCredit.paymentIntentId`.
-		const appliedCreditRows: {
-			orderId: string;
-			walletId: string;
-			appliedCents: number;
-			holdEntryId: string;
-		}[] = [];
-		for (let i = 0; i < materializationGroups.length; i++) {
-			const groupCreditCents = credit.perGroupCreditCents[i] ?? 0;
-			if (groupCreditCents === 0) continue;
-			const groupOrderId = materializationGroups[i]?.orderId;
-			if (!groupOrderId) continue;
-			const hold = await holdCredit({
+		const holdSpecs = materializationGroups
+			.map((g, i) => ({
+				orderId: g.orderId,
+				amountCents: credit.perGroupCreditCents[i] ?? 0,
+			}))
+			.filter((h) => h.amountCents > 0);
+		if (holdSpecs.length > 0) {
+			const holdEntries = await holdCredits({
 				db: tx,
 				userId: buyerId,
-				amountCents: groupCreditCents,
-				orderId: groupOrderId,
 				holdExpiresAt: reservedUntil,
-				idempotencyKey: `${groupOrderId}:hold`,
+				holds: holdSpecs.map((h) => ({
+					orderId: h.orderId,
+					amountCents: h.amountCents,
+					idempotencyKey: `${h.orderId}:hold`,
+				})),
 			});
-			appliedCreditRows.push({
-				orderId: groupOrderId,
-				walletId: hold.walletId,
-				appliedCents: groupCreditCents,
-				holdEntryId: hold.id,
+			await tx.appliedCredit.createMany({
+				data: holdEntries.map((e, i) => {
+					const spec = holdSpecs[i];
+					if (!spec) {
+						// Order-preservation invariant in holdCredits: entries[i] is
+						// the hold for specs[i]. If they ever diverge, fail loud.
+						throw errors.internal("Hold/applied-credit ordering mismatch", {
+							code: "WALLET_HOLD_ORDER_MISMATCH",
+						});
+					}
+					return {
+						orderId: spec.orderId,
+						walletId: e.walletId,
+						appliedCents: spec.amountCents,
+						holdEntryId: e.id,
+					};
+				}),
 			});
-		}
-		if (appliedCreditRows.length > 0) {
-			await tx.appliedCredit.createMany({ data: appliedCreditRows });
 		}
 
 		return materialized;
