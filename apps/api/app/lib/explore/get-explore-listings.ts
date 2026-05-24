@@ -1,9 +1,8 @@
 import type { CacheOf } from "@nolie/cache";
-import { SortPriority } from "@nolie/core/auctions";
 import {
 	applyDiversity,
+	compareForSnapshot,
 	DEFAULT_RANKING_CONFIG,
-	type DiversityCandidate,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
 } from "@nolie/core/explore";
@@ -205,34 +204,6 @@ function decodeCursor(raw: string): ExploreCursor | null {
 		// flip) ⇒ treat as a fresh first page rather than 500.
 	}
 	return null;
-}
-
-type SnapshotCandidate = DiversityCandidate & {
-	sortPriority: number;
-	sortTimeMs: bigint;
-	rankScore: number;
-};
-
-/**
- * §12 ordering: live auctions (ACTIVE_AUCTION bucket) stay ending-soonest on
- * `sortTimeMs` so a near-closing auction can't be buried; every other bucket
- * orders by stored `rankScore` desc. `sortPriority` is always primary.
- */
-function compareForSnapshot(
-	a: SnapshotCandidate,
-	b: SnapshotCandidate,
-): number {
-	if (a.sortPriority !== b.sortPriority) {
-		return a.sortPriority - b.sortPriority;
-	}
-	if (a.sortPriority === SortPriority.ACTIVE_AUCTION) {
-		if (a.sortTimeMs !== b.sortTimeMs) {
-			return a.sortTimeMs < b.sortTimeMs ? -1 : 1;
-		}
-	} else if (a.rankScore !== b.rankScore) {
-		return b.rankScore - a.rankScore;
-	}
-	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
 interface SnapshotBuildLog {
