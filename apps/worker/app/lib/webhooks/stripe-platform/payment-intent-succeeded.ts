@@ -26,6 +26,7 @@ import {
 	LETTER_PLACEHOLDER_PARCEL_DIMS,
 	LETTER_SERVICE_CODE,
 } from "@nolie/shipping/presets";
+import { captureHolds, releaseHolds } from "@nolie/wallet";
 import type Stripe from "stripe";
 import { workerTx } from "../../../db/tx.js";
 import {
@@ -333,6 +334,44 @@ export async function paymentIntentSucceeded(
 			if (labelRows.length > 0) {
 				await tx.shippingLabel.createMany({ data: labelRows });
 			}
+
+			// Capture any wallet credit held for this checkout. AppliedCredit
+			// rows landed in claim's Tx A; capture batches them into one
+			// wallet CAS + one createManyAndReturn. Per-row backfill of
+			// `captureEntryId` + `capturedCents` is N updates inside the same
+			// tx — N is small (one per Order with credit) and the previous
+			// captureMany-by-key SQL would be heavier than the loop saves.
+			const appliedCredits = await tx.appliedCredit.findMany({
+				where: { orderId: { in: orderIds }, captureEntryId: null },
+				select: { id: true, holdEntryId: true, appliedCents: true },
+			});
+			const captureSpecs = appliedCredits.filter(
+				(ac): ac is typeof ac & { holdEntryId: string } =>
+					ac.holdEntryId !== null,
+			);
+			if (captureSpecs.length > 0) {
+				const captureEntries = await captureHolds({
+					db: tx,
+					holds: captureSpecs.map((ac) => ({
+						holdEntryId: ac.holdEntryId,
+						idempotencyKey: `${ac.id}:capture`,
+					})),
+				});
+				for (let i = 0; i < captureSpecs.length; i++) {
+					const spec = captureSpecs[i];
+					const entry = captureEntries[i];
+					if (!spec || !entry) {
+						throw new Error("capture/applied-credit ordering mismatch");
+					}
+					await tx.appliedCredit.update({
+						where: { id: spec.id },
+						data: {
+							capturedCents: spec.appliedCents,
+							captureEntryId: entry.id,
+						},
+					});
+				}
+			}
 		});
 	} catch (err) {
 		if (err instanceof MidThreeDsRaceLossSignal) {
@@ -604,6 +643,31 @@ async function handleMidThreeDsRaceLoss({
 					state: OfferState.canceled_payment_failed,
 					resolvedAt: new Date(),
 				},
+			});
+		}
+		// Mid-3DS race-loss: the main tx rolled back so no captures ran, but
+		// claim's Tx A wrote the holds. Release them back to available so the
+		// buyer's wallet shows the refund in real time alongside the Stripe
+		// refund landing on their card.
+		const heldCredits = await tx.appliedCredit.findMany({
+			where: {
+				orderId: { in: orderIds },
+				holdEntryId: { not: null },
+				captureEntryId: null,
+			},
+			select: { id: true, holdEntryId: true },
+		});
+		const releaseSpecs = heldCredits.filter(
+			(ac): ac is typeof ac & { holdEntryId: string } =>
+				ac.holdEntryId !== null,
+		);
+		if (releaseSpecs.length > 0) {
+			await releaseHolds({
+				db: tx,
+				holds: releaseSpecs.map((ac) => ({
+					holdEntryId: ac.holdEntryId,
+					idempotencyKey: `${ac.id}:release:race-loss`,
+				})),
 			});
 		}
 	});
