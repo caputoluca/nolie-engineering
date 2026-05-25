@@ -27,6 +27,7 @@
  * (docs/explore-ranking-v2.md §12).
  */
 
+import { SortPriority } from "../auctions/sort";
 import type { MatchedToken } from "./token-dictionary";
 
 export interface RankingConfig {
@@ -647,6 +648,43 @@ export interface DiversityCandidate {
 	id: string;
 	sellerProfileId: string;
 	title: string;
+}
+
+export interface SnapshotOrderCandidate {
+	id: string;
+	sortPriority: number;
+	sortTimeMs: bigint;
+	rankScore: number;
+}
+
+/**
+ * §12 ordering used by every ranked listings surface (explore + profile
+ * `featured` sort): live auctions (`ACTIVE_AUCTION` bucket) stay
+ * ending-soonest on `sortTimeMs` so a near-closing auction can't be buried
+ * behind a higher-rankScore upcoming one; every other bucket orders by
+ * stored `rankScore` desc. `sortPriority` is always primary; `id` is the
+ * stable tiebreaker.
+ *
+ * Lives here (not at the explore call site) so the single-seller profile
+ * path can reuse the exact same ordering without re-deriving it — the two
+ * surfaces MUST agree byte-for-byte or "same listing, different position
+ * on explore vs profile" becomes a bug source.
+ */
+export function compareForSnapshot(
+	a: SnapshotOrderCandidate,
+	b: SnapshotOrderCandidate,
+): number {
+	if (a.sortPriority !== b.sortPriority) {
+		return a.sortPriority - b.sortPriority;
+	}
+	if (a.sortPriority === SortPriority.ACTIVE_AUCTION) {
+		if (a.sortTimeMs !== b.sortTimeMs) {
+			return a.sortTimeMs < b.sortTimeMs ? -1 : 1;
+		}
+	} else if (a.rankScore !== b.rankScore) {
+		return b.rankScore - a.rankScore;
+	}
+	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
 /**
