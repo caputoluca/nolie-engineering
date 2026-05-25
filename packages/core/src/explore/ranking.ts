@@ -48,6 +48,17 @@ export interface RankingConfig {
 		 */
 		cartAdd: number;
 		/**
+		 * Save weight applied to `log10(1 + saveCount)`. Same log shape as
+		 * cartAdd; weight starts at half the cartAdd value because a save is
+		 * a softer commitment signal than a cart-add (bookmark vs. immediate
+		 * buy intent). A listing with 10 saves gets ≈ 0.05 of boost at
+		 * weight 0.05 — small enough to leave the locked v1 weights
+		 * (recency / lowEffort) doing the load-bearing work, large enough to
+		 * differentiate inside otherwise-tied buckets. Re-tune from real
+		 * save-rate distribution once the events have a few weeks of data.
+		 */
+		save: number;
+		/**
 		 * Maximum price-band contribution. The shape is an asymmetric plateau
 		 * in log10(price) space (`sweetSpotPlateauShape`): full credit
 		 * (`weight × 1.0`) across `[PLATEAU_LO_USD, PLATEAU_HI_USD]`,
@@ -232,7 +243,13 @@ export const PLATEAU_BELOW_CURVATURE = 2.0;
 export const PLATEAU_ABOVE_SLOPE = 0.5;
 
 export const DEFAULT_RANKING_CONFIG: RankingConfig = {
-	weights: { recency: 0.3, sellerTrust: 0.05, cartAdd: 0.1, premium: 0.35 },
+	weights: {
+		recency: 0.3,
+		sellerTrust: 0.05,
+		cartAdd: 0.1,
+		save: 0.05,
+		premium: 0.35,
+	},
 	recencyHalfLifeHours: 72,
 	perSellerCap: 3,
 	lowEffortPenalty: 0.12,
@@ -320,6 +337,14 @@ export interface RankBaseInput {
 	 * state (docs §9 step 3). Log-scaled in the score.
 	 */
 	addToCartCount?: number;
+	/**
+	 * Current save count for this listing (live `SavedListing` rows; the
+	 * `Listing.saveCount` denormalization is maintained inline by the API on
+	 * each save/unsave, unlike the cart's worker-refreshed counter). Log-scaled
+	 * in the score with a softer weight than cartAdd — saves are bookmarks,
+	 * not buy intent.
+	 */
+	saveCount?: number;
 	/**
 	 * Listing's effective price in USD (fixed-price `price` or auction
 	 * `startingBid`, both stored as `Decimal(10,2)` dollars). Null when
@@ -424,7 +449,7 @@ function sweetSpotPlateauShape(priceUSD: number): number {
 
 /**
  * Time-independent part of the score:
- *   sellerTrust·w + cartAdd·w + premium·w·plateauShape(price)
+ *   sellerTrust·w + cartAdd·w + save·w + premium·w·plateauShape(price)
  *     − lowEffort?·penalty − longTitle?·penalty − negKeyword?·penalty
  *
  * The premium term dominates the additive terms by design — at weight 0.35,
@@ -434,6 +459,9 @@ function sweetSpotPlateauShape(priceUSD: number): number {
  * positioning: no engagement signal exists yet, so the price band is
  * carrying the differentiation work. The weight ramps DOWN as engagement
  * accrues; see `RankingConfig.weights.premium` for the trigger.
+ *
+ * `save` is half cartAdd's weight by default — soft signal, deliberately
+ * small until data lets us tune up.
  */
 export function computeRankBaseScore(
 	input: RankBaseInput,
@@ -442,6 +470,8 @@ export function computeRankBaseScore(
 	const trust = config.weights.sellerTrust * clamp01(input.sellerTrust ?? 0);
 	const cartAddCount = Math.max(0, input.addToCartCount ?? 0);
 	const cartAdd = config.weights.cartAdd * Math.log10(1 + cartAddCount);
+	const saveCount = Math.max(0, input.saveCount ?? 0);
+	const save = config.weights.save * Math.log10(1 + saveCount);
 	const priceUSD = input.priceUSD;
 	const premium =
 		priceUSD !== null && priceUSD !== undefined && priceUSD > 0
@@ -454,7 +484,9 @@ export function computeRankBaseScore(
 	const negativeKeyword = matchesNegativeKeyword(input.title, input.description)
 		? config.negativeKeywordPenalty
 		: 0;
-	return trust + cartAdd + premium - lowEffort - longTitle - negativeKeyword;
+	return (
+		trust + cartAdd + save + premium - lowEffort - longTitle - negativeKeyword
+	);
 }
 
 export interface RankScoreInput {
