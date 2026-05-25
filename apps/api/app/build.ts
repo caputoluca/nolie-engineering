@@ -46,6 +46,7 @@ import { meRoutes } from "./routes/me/index.js";
 import { moderationRoutes } from "./routes/moderations.js";
 import { offerRoutes } from "./routes/offers.js";
 import { realtimeRoutes } from "./routes/realtime.js";
+import { referralsRoutes } from "./routes/referrals.js";
 import { sellersRoutes } from "./routes/sellers.js";
 import { shippingRoutes } from "./routes/shipping.js";
 import { sitemapRoutes } from "./routes/sitemap.js";
@@ -194,6 +195,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(exploreRoutes, { prefix: "/explore" });
 	await fastify.register(sellersRoutes, { prefix: "/sellers" });
 	await fastify.register(usersRoutes, { prefix: "/users" });
+	await fastify.register(referralsRoutes, { prefix: "/referrals" });
 	/* ------------------- End Routes ------------------- */
 	fastify.log.info(
 		{
