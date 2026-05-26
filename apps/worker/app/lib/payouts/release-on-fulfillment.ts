@@ -1,6 +1,10 @@
+import { DISPUTE_WINDOW_DAYS_AFTER_FULFILLMENT } from "@nolie/core/disputes";
 import { PayoutStatus } from "@nolie/db";
 import type { WorkerContextBase } from "../context.js";
 import { reportError } from "../observability/sentry/report.js";
+
+const REFERRAL_QUALIFY_DELAY_MS =
+	DISPUTE_WINDOW_DAYS_AFTER_FULFILLMENT * 24 * 60 * 60 * 1000;
 
 export type ReleaseOnFulfillmentResult =
 	| "released"
@@ -97,6 +101,23 @@ export async function releaseEarningOnFulfillment(
 			{ earningId },
 			delayMs != null ? { delay: delayMs } : undefined,
 		);
+		// NL-270: kick off the referral qualify pipeline. Single hook here
+		// rather than per-rail so letter, parcel, pickup, and manual
+		// confirm all benefit. Fire-and-forget: a queue blip must never
+		// roll back the earning transition — the qualify job is
+		// idempotent and the next dispute-resolution re-fire of this
+		// helper would re-enqueue anyway. Held earnings never reach this
+		// branch (they short-circuit above with result=`held`), which is
+		// correct — a parked payout means a parked referral too.
+		void ctx.queues.referrals
+			.qualify({ orderId }, { delay: REFERRAL_QUALIFY_DELAY_MS })
+			.catch((err: unknown) => {
+				reportError(err, {
+					operation: "queue_referral_qualification",
+					level: "warning",
+					extra: { orderId, earningId },
+				});
+			});
 		return { result: "released" };
 	} catch (scheduleError) {
 		reportError(scheduleError, {
