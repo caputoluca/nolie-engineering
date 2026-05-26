@@ -72,8 +72,6 @@ interface ClaimInput {
 		quoteId: string;
 		paymentMethodId: string;
 		idempotencyKey: string;
-		useCredit?: boolean;
-		expectedCreditCents?: number;
 	};
 }
 
@@ -278,25 +276,24 @@ export async function claimCheckout(
 		payments,
 	});
 
-	// Credit drift check — recompute against current wallet + buyer's opt-in
-	// stance. Mismatch with what the buyer agreed to on the rendered quote
+	// Credit drift check — recompute against current wallet using the
+	// opt-in stance captured on the persisted quote (the buyer's source of
+	// truth). Mismatch with the credit number we rendered to the buyer
 	// throws CREDIT_CHANGED; FE re-quotes (cart-hash includes the wallet
 	// snapshot so the next quote call returns fresh credit).
-	const useCredit = body.useCredit !== false;
-	const expectedCreditCents = body.expectedCreditCents ?? 0;
 	const credit = applyCreditToCheckout({
-		useCredit,
+		useCredit: quote.useCredit,
 		walletSpendableCents: spendable.spendableCents,
 		groupTotalsCents: fresh.groups.map((g) => g.totalCents),
 	});
-	if (credit.totalCreditCents !== expectedCreditCents) {
+	if (credit.totalCreditCents !== quote.appliedCreditCents) {
 		throw new HttpError(
 			"Wallet credit changed since quote",
 			CheckoutClaimErrorCode.credit_changed,
 			{
 				statusCode: 409,
 				data: {
-					expectedCreditCents,
+					expectedCreditCents: quote.appliedCreditCents,
 					actualCreditCents: credit.totalCreditCents,
 				} satisfies CheckoutCreditChangedData,
 			},
@@ -689,6 +686,8 @@ interface PersistedQuote {
 	shippingAddressId: string | null;
 	cartHash: string | null;
 	totalCents: number;
+	appliedCreditCents: number;
+	useCredit: boolean;
 	lines: PersistedQuoteLine[];
 }
 
