@@ -47,6 +47,7 @@ import { moderationRoutes } from "./routes/moderations.js";
 import { offerRoutes } from "./routes/offers.js";
 import { realtimeRoutes } from "./routes/realtime.js";
 import { referralsRoutes } from "./routes/referrals.js";
+import { savedRoutes } from "./routes/saves.js";
 import { sellersRoutes } from "./routes/sellers.js";
 import { shippingRoutes } from "./routes/shipping.js";
 import { sitemapRoutes } from "./routes/sitemap.js";
@@ -185,6 +186,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(offerRoutes, { prefix: "/offers" });
 	await fastify.register(checkoutRoutes, { prefix: "/checkout" });
 	await fastify.register(cartRoutes, { prefix: "/cart" });
+	await fastify.register(savedRoutes, { prefix: "/saved" });
 	await fastify.register(stripeRoutes, { prefix: "/stripe" });
 	await fastify.register(shippingRoutes, { prefix: "/shipping" });
 	await fastify.register(easypostWebhookRoutes, {

@@ -215,6 +215,10 @@ interface RankableListing {
 	 * listings. */
 	startingBid: Prisma.Decimal | null;
 	listingType: string;
+	/** Denormalized save count, maintained inline by the API on save/unsave
+	 * (NL-239). Worker reads only — unlike `addToCartCount`, which the
+	 * worker is the sole writer of. */
+	saveCount: number;
 }
 
 /**
@@ -375,6 +379,7 @@ async function loadRankableListings(
 			price: true,
 			startingBid: true,
 			listingType: true,
+			saveCount: true,
 		},
 	});
 }
@@ -750,6 +755,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 	const now = new Date();
 	const tokenBoostEnabled = process.env.ENABLE_TOKEN_BOOST !== "false";
 	const cartAddSignalEnabled = process.env.ENABLE_CART_ADD_SIGNAL !== "false";
+	const saveSignalEnabled = process.env.ENABLE_SAVE_SIGNAL !== "false";
 	const priceMultEnabled = process.env.ENABLE_PRICE_MULT !== "false";
 	const premiumPriceEnabled = process.env.ENABLE_PREMIUM_PRICE !== "false";
 
@@ -757,6 +763,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 	let scoreMax = Number.NEGATIVE_INFINITY;
 	let sellerTrustMax = 0;
 	let addToCartMax = 0;
+	let saveCountMax = 0;
 	let tokenBoostMax = TOKEN_BOOST_MIN;
 	let priceMultMax = 1.0;
 	let priceMultMin = 1.0;
@@ -769,6 +776,9 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			? (cartAddCounts.get(r.id) ?? 0)
 			: 0;
 		if (addToCartCount > addToCartMax) addToCartMax = addToCartCount;
+
+		const saveCount = saveSignalEnabled ? r.saveCount : 0;
+		if (saveCount > saveCountMax) saveCountMax = saveCount;
 
 		const matches = tokenPop.matchedByListing.get(r.id);
 
@@ -844,6 +854,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 				description: r.description,
 				sellerTrust,
 				addToCartCount,
+				saveCount,
 				priceUSD: premiumPriceEnabled ? priceUSD : null,
 			},
 			DEFAULT_RANKING_CONFIG,
@@ -916,6 +927,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			tokensRefreshed: tokenPop.tokensRefreshed,
 			sellerTrustMax,
 			addToCartMax,
+			saveCountMax,
 			tokenBoostMax,
 			priceMultMax,
 			priceMultMin,
@@ -927,6 +939,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 				TOKEN_DICTIONARY.rarity.length,
 			tokenBoostEnabled,
 			cartAddSignalEnabled,
+			saveSignalEnabled,
 			priceMultEnabled,
 			premiumPriceEnabled,
 			durationMs: Date.now() - start,
