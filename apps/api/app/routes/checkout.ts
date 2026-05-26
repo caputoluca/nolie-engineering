@@ -39,6 +39,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				listingIds: request.body.listingIds,
 				requestedShippingAddressId: request.body.shippingAddressId,
 				fulfillmentChoiceByListing: request.body.fulfillment,
+				useCredit: request.body.useCredit,
 			});
 			return reply.status(200).send(quote);
 		},
@@ -66,6 +67,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				listingIds: request.body.listingIds,
 				requestedShippingAddressId: request.body.shippingAddressId,
 				fulfillmentChoiceByListing: request.body.fulfillment,
+				useCredit: request.body.useCredit,
 			});
 			return reply.status(200).send({
 				quoteId: full.quoteId,
@@ -98,6 +100,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				db: app.prisma,
 				buyerId: request.session.user.id,
 				paymentIntentId: request.query.paymentIntentId,
+				orderId: request.query.orderId,
 			});
 			return reply.status(200).send(result);
 		},
@@ -125,6 +128,8 @@ export const checkoutRoutes = createRoutes((create, app) => {
 			const result = await claimCheckout({
 				db: app.prisma,
 				payments: app.payments,
+				queues: app.queues,
+				realtime: app.realtime,
 				buyerId: request.session.user.id,
 				body: request.body,
 			});
