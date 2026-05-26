@@ -55,6 +55,11 @@ export interface OrderForFinalization {
 	processingFeeCents: number;
 	taxCents: number;
 	shippingPresetKey: string | null;
+	/** Checkout-group key — all orders sharing the same claim carry the same
+	 *  value. Threaded through to `orderConfirmed` so the handler can fan
+	 *  out to siblings without an anchor lookup. Null on legacy auction-won
+	 *  rows (which never enter this pipeline). */
+	idempotencyKey: string | null;
 	lineItems: {
 		id: string;
 		listingId: string;
@@ -158,6 +163,7 @@ const ORDER_FOR_FINALIZATION_SELECT = {
 	processingFeeCents: true,
 	taxCents: true,
 	shippingPresetKey: true,
+	idempotencyKey: true,
 	lineItems: {
 		select: {
 			id: true,
@@ -213,6 +219,7 @@ function toOrderForFinalization(
 		processingFeeCents: r.processingFeeCents,
 		taxCents: r.taxCents,
 		shippingPresetKey: r.shippingPresetKey,
+		idempotencyKey: r.idempotencyKey,
 		lineItems: r.lineItems,
 	};
 }
