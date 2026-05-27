@@ -168,7 +168,13 @@ export async function generateListingCopy(
 	// Raw cards without a TCGdex match have unverifiable set/number/rarity. We
 	// will not stitch half-known facts into prose — let the seller write their
 	// own. (Slabs use label OCR, which has independent verifiability via cert.)
-	const isRaw = record.kind === "raw_pokemon" || record.kind === "raw_sports";
+	// `raw_tcg_other` always falls into this bucket: no enrichment source is
+	// wired up for Magic/YGO/Lorcana/etc., so the writer short-circuits and
+	// the seller writes their own title + description.
+	const isRaw =
+		record.kind === "raw_pokemon" ||
+		record.kind === "raw_sports" ||
+		record.kind === "raw_tcg_other";
 	if (isRaw && source !== "tcgdex") {
 		logger.debug(
 			{ kind: record.kind, source },
