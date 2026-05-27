@@ -22,9 +22,12 @@ on the card or printed on the slab label.
 
 First, classify the card:
 - "slab" if the card is encapsulated in a graded plastic slab (PSA, BGS, CGC, TAG, SGC).
-- "raw_pokemon" if it is a raw (ungraded) Pokemon card (any language).
+- "raw_pokemon" if it is a raw (ungraded) Pokemon card (any language). Signals: HP value top-right, energy symbols, weakness/resistance bar, set symbol bottom-right.
 - "raw_sports" if it is a raw sports card (baseball, basketball, football, hockey, soccer).
-- "other" if it is anything else (sealed product, comic, unknown).
+- "raw_tcg_other" if it is a raw TCG single from Magic: The Gathering, Yu-Gi-Oh!, Lorcana, One Piece, Digimon, or Flesh & Blood. Signals: mana symbols, attribute icons (LIGHT/DARK), ink cost, life value.
+- "other" for anything else, including sealed product (booster boxes, ETBs, packs) of any game, accessories, comics, and non-cards.
+
+If any Pokemon signal is present (HP value, energy symbol, weakness/resistance bar), classify as "raw_pokemon", never "raw_tcg_other". Sealed product is always "other", never "raw_tcg_other".
 
 For each kind, extract the fields described in the schema. Set a string field
 to an empty string ("") if it is not clearly visible. Set the grader and

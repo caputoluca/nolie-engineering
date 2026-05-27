@@ -228,6 +228,30 @@ async function lookupCanonicalInner(
 		};
 	}
 
+	if (facts.kind === "raw_tcg_other") {
+		// Minimal passthrough. We have no enrichment DB hooked up for Magic /
+		// YGO / Lorcana / etc., so the record is essentially a signal to the
+		// wizard ("this is a raw TCG single — show the condition picker") and
+		// the copy writer ("don't generate, let the seller write it").
+		const f = facts.fields;
+		return {
+			record: {
+				kind: "raw_tcg_other",
+				year: nz(f.year),
+				setName: null,
+				subject: nz(f.name),
+				cardNumber: null,
+				grader: null,
+				grade: null,
+				certNumber: null,
+				rarity: null,
+				parallel: null,
+				language: nzEnum(f.language),
+			},
+			canonical: { imageUrl: null, source: "ai_guess" },
+		};
+	}
+
 	const f = facts.fields;
 	// Unverified path: TCGdex didn't confirm this card. Drop every field a buyer
 	// could be misled by — set, number, rarity. The writer short-circuits to
