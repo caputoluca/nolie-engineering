@@ -86,6 +86,12 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 					buyerId: true,
 					paymentIntentId: true,
 					paymentChargeId: true,
+					// NL-319: defensive gate against paths that still enqueue
+					// `payout.release` on a cancelled order (the dispute
+					// resolver — its always-queue contract — and any late
+					// webhook). `cancelOrder` itself deliberately does NOT
+					// enqueue release, but other paths can.
+					cancelledAt: true,
 					// Shim: orphan Earnings (no EarningLines) fall back to a
 					// per-Order any-line-disputed check.
 					lineItems: {
@@ -165,6 +171,27 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 				reason: "payout_on_hold",
 				payoutHoldAt: earning.payoutHoldAt,
 				payoutHoldReason: earning.payoutHoldReason,
+			},
+			"payout.release.skipped",
+		);
+		return;
+	}
+
+	// NL-319: cancelled orders never release payout. Defensive gate — most
+	// paths that cancel an order also short-circuit release (cancelOrder
+	// itself does not enqueue release), but `resolveAdminDispute` with
+	// `refund_buyer` cancels the order AND queues release (NL-183
+	// always-queue contract); a late webhook arriving after a cancel is the
+	// other case. `Earning.payoutStatus` stays in its prior state — the
+	// gate is a skip, not a status transition. Mirrors how `payoutHoldAt`
+	// doesn't transition payoutStatus either.
+	if (earning.order?.cancelledAt) {
+		logger.info(
+			{
+				earningId,
+				orderId: earning.orderId,
+				reason: "order_cancelled",
+				cancelledAt: earning.order.cancelledAt,
 			},
 			"payout.release.skipped",
 		);
