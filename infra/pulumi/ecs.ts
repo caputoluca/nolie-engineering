@@ -284,6 +284,10 @@ const taskRole = new aws.iam.Role(`nolie-task-${stack}`, {
 
 const NODE_ENV = config.require("nodeEnv");
 
+// Sentry's environment label is deploy topology, derived from the stack.
+// Map the `prod` stack to Sentry's canonical "production" environment.
+const SENTRY_ENVIRONMENT = stack === "prod" ? "production" : stack;
+
 // =============================================================================
 // API Service
 // =============================================================================
@@ -369,7 +373,7 @@ export const workerService = new awsx.ecs.FargateService(
 						value: NODE_ENV,
 					},
 					{ name: "REDIS_URL", value: redisEndpoint },
-					{ name: "SENTRY_ENVIRONMENT", value: stack },
+					{ name: "SENTRY_ENVIRONMENT", value: SENTRY_ENVIRONMENT },
 				],
 				secrets: secrets(WORKER_SECRETS, "worker"),
 			},
