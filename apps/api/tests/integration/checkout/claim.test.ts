@@ -1442,15 +1442,16 @@ describe("POST /checkout/claim", () => {
 			expect(order.shippingCents).toBe(250);
 		});
 
-		it("six-card all-letter bundle auto-upgrades to a standard_card parcel at the fallback rate", async () => {
-			// Letter shipping caps at 5 cards (USPS FCML weight tiers + bend
-			// test). A 6th letter listing in the bundle pushes it over the
-			// limit; checkout flips the rail to a default parcel preset
-			// (`standard_card`) so the seller can ship in a bubble mailer
-			// instead of an envelope. The buyer is charged the parcel
-			// fallback rate, not 6× the letter rate.
+		it("two-card all-letter bundle auto-upgrades to a standard_card parcel at the fallback rate", async () => {
+			// Letter shipping is single-card only (NL-315): an untracked PWE may
+			// carry at most one card. A second letter listing pushes the bundle
+			// past LETTER_MAX_CARD_COUNT, so checkout flips the rail to a default
+			// parcel preset (`standard_card`) — the seller ships a tracked bubble
+			// mailer and the buyer pays the parcel fallback rate, not 2× the
+			// letter rate. Both cards are cheap ($5) so the count, not the value
+			// ceiling, triggers the upgrade.
 			const seller = await setupSellerWithListing({
-				price: 8,
+				price: 5,
 				itemType: "physical",
 				shippingCostCents: 250,
 			});
@@ -1458,32 +1459,28 @@ describe("POST /checkout/claim", () => {
 				where: { id: seller.listing.id },
 				data: { shippingPresetKey: "raw_single_pwe" },
 			});
-			const extraIds: string[] = [];
-			for (let i = 0; i < 5; i++) {
-				const extra = await createFixedPriceListingForSeller(
-					seller.sellerProfileId,
-					{ price: 8, itemType: "physical" },
-				);
-				await prisma.listing.update({
-					where: { id: extra.id },
-					data: {
-						shippingPresetKey: "raw_single_pwe",
-						shippingCostCents: 250,
-					},
-				});
-				extraIds.push(extra.id);
-			}
+			const extra = await createFixedPriceListingForSeller(
+				seller.sellerProfileId,
+				{ price: 5, itemType: "physical" },
+			);
+			await prisma.listing.update({
+				where: { id: extra.id },
+				data: {
+					shippingPresetKey: "raw_single_pwe",
+					shippingCostCents: 250,
+				},
+			});
 
 			const buyer = await setupReadyBuyer();
 			const quoteId = await createQuoteFor(buyer.api, [
 				seller.listing.id,
-				...extraIds,
+				extra.id,
 			]);
 
 			const response = await postClaim(buyer.api, {
 				quoteId,
 				paymentMethodId: buyer.paymentMethodId,
-				idempotencyKey: uniqueIdempotencyKey("letter-upgrade"),
+				idempotencyKey: uniqueIdempotencyKey("letter-upgrade-count"),
 			});
 
 			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
@@ -1491,7 +1488,41 @@ describe("POST /checkout/claim", () => {
 				where: { id: body.orderIds[0] },
 				include: { lineItems: true },
 			});
-			expect(order.lineItems).toHaveLength(6);
+			expect(order.lineItems).toHaveLength(2);
+			expect(order.shippingPresetKey).toBe("standard_card");
+			expect(order.shippingCents).toBe(650);
+		});
+
+		it("single letter listing over the $15 value ceiling upgrades to a standard_card parcel", async () => {
+			// Single card, so the card-count gate passes — but the listing value
+			// exceeds LETTER_MAX_BUNDLE_VALUE_CENTS, so the bundle upgrades to a
+			// tracked parcel instead of riding an untracked envelope. Force the
+			// letter tag directly (the per-listing gate would normally block a $20
+			// letter listing); this guards the order-time value cap against
+			// listing-gate drift and the accepted-offer path.
+			const seller = await setupSellerWithListing({
+				price: 20,
+				itemType: "physical",
+				shippingCostCents: 250,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { shippingPresetKey: "raw_single_pwe" },
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("letter-upgrade-value"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+			});
 			expect(order.shippingPresetKey).toBe("standard_card");
 			expect(order.shippingCents).toBe(650);
 		});
