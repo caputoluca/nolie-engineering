@@ -20,12 +20,14 @@ export function getPayoutReleaseDelayMs(): number {
  * `delivered` event. Business days, not calendar days, so a Friday-printed
  * label still gets the full buyer-noticing window before payout.
  *
- * Tighter than Whatnot's 10-day standard — bets that the loss-reserve
- * model can absorb the cases where a buyer files INR after a 3-day-old
- * payout has already released. Revisit if INR rates run higher than
- * the reserve covers.
+ * Set just under Whatnot's 10-day standard, leaving a gap below the
+ * 10-business-day deemed-delivered review-prompt clock
+ * (DEEMED_DELIVERED_BUSINESS_DAYS). Widened from the original 3 days: the
+ * loss-reserve model couldn't reliably absorb buyers filing INR after a
+ * payout had already released, so the buyer-noticing window now leads the
+ * payout. Revisit if INR rates stay well inside what the reserve covers.
  */
-export const LETTER_PAYOUT_RELEASE_BUSINESS_DAYS = 3;
+export const LETTER_PAYOUT_RELEASE_BUSINESS_DAYS = 7;
 
 /**
  * Resolves the absolute timestamp at which a letter-mail label's payout
