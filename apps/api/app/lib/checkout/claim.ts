@@ -1009,6 +1009,8 @@ async function loadShipFromBySellerProfile(
 					firstName: true,
 					lastName: true,
 					handle: true,
+					// NL-230: seller zone for the shipping-escalation due-instants.
+					timezone: true,
 				},
 			},
 			shippingFromAddress: {
@@ -1049,6 +1051,7 @@ async function loadShipFromBySellerProfile(
 			postalCode: addr.postalCode,
 			country: addr.country,
 			phone: seller.user.phone,
+			timezone: seller.user.timezone,
 		});
 	}
 	return map;

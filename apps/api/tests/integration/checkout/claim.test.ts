@@ -177,6 +177,34 @@ describe("POST /checkout/claim", () => {
 			expect(quote.consumedByOrderId).toBe(order.id);
 		});
 
+		it("stamps the four NL-230 ship due-columns on a shipping checkout order", async () => {
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 500,
+			});
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+
+			const body = await assertResponse<{ orderIds: string[] }>(
+				await postClaim(buyer.api, {
+					quoteId,
+					paymentMethodId: buyer.paymentMethodId,
+					idempotencyKey: uniqueIdempotencyKey("due-cols"),
+				}),
+				200,
+			);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+			});
+			expect(order.fulfillmentMode).toBe("shipping");
+			expect(order.shipHeadsUpDueAt).not.toBeNull();
+			expect(order.shipPastDueDueAt).not.toBeNull();
+			expect(order.shipFinalWarningDueAt).not.toBeNull();
+			expect(order.shipAutoCancelDueAt).not.toBeNull();
+		});
+
 		it("multi-listing single-seller claim → 1 Order with N OrderLineItems sharing 1 PaymentIntent", async () => {
 			const seller = await setupSellerWithListing({
 				price: 30,
@@ -454,6 +482,12 @@ describe("POST /checkout/claim", () => {
 			expect(order.shipFromName).toBeNull();
 			expect(order.shipFromLine1).toBeNull();
 			expect(order.shipFromCity).toBeNull();
+
+			// NL-230: pickup never ships, so it gets no escalation due-columns.
+			expect(order.shipHeadsUpDueAt).toBeNull();
+			expect(order.shipPastDueDueAt).toBeNull();
+			expect(order.shipFinalWarningDueAt).toBeNull();
+			expect(order.shipAutoCancelDueAt).toBeNull();
 
 			// Pickup snapshot is populated from the seller's PickupLocation.
 			expect(order.pickupLocationId).toBe(seller.pickupLocation?.id);
