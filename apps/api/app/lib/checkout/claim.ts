@@ -42,7 +42,7 @@ import {
 	computeIdempotencyPayloadHash,
 	validateIdempotencyKeyFormat,
 } from "./idempotency.js";
-import { type CheckoutListing, loadCheckoutListings } from "./listings.js";
+import { type CheckoutListing, partitionCheckoutListings } from "./listings.js";
 import {
 	type MaterializationGroup,
 	materializeOrders,
@@ -142,54 +142,69 @@ export async function claimCheckout(
 		quote.lines.map((l) => [l.listingId, asResolvedMethod(l.fulfillmentMode)]),
 	);
 
-	const [listings, buyer, spendable] = await Promise.all([
-		loadCheckoutListings(db, listingIds),
-		db.user.findUnique({
-			where: { id: buyerId },
-			select: {
-				email: true,
-				phone: true,
-				taxExemptStatus: true,
-				billing: {
-					select: {
-						customerId: true,
-						paymentMethods: {
-							where: { id: body.paymentMethodId },
-							select: {
-								id: true,
-								stripePaymentMethodId: true,
-								brand: true,
-								last4: true,
+	const [{ listings, unavailableListingIds }, buyer, spendable] =
+		await Promise.all([
+			partitionCheckoutListings(db, listingIds),
+			db.user.findUnique({
+				where: { id: buyerId },
+				select: {
+					email: true,
+					phone: true,
+					taxExemptStatus: true,
+					billing: {
+						select: {
+							customerId: true,
+							paymentMethods: {
+								where: { id: body.paymentMethodId },
+								select: {
+									id: true,
+									stripePaymentMethodId: true,
+									brand: true,
+									last4: true,
+								},
+								take: 1,
 							},
-							take: 1,
 						},
 					},
+					shippingAddresses: quote.shippingAddressId
+						? {
+								where: { id: quote.shippingAddressId },
+								select: {
+									id: true,
+									fullName: true,
+									line1: true,
+									line2: true,
+									city: true,
+									state: true,
+									postalCode: true,
+									country: true,
+								},
+								take: 1,
+							}
+						: false,
 				},
-				shippingAddresses: quote.shippingAddressId
-					? {
-							where: { id: quote.shippingAddressId },
-							select: {
-								id: true,
-								fullName: true,
-								line1: true,
-								line2: true,
-								city: true,
-								state: true,
-								postalCode: true,
-								country: true,
-							},
-							take: 1,
-						}
-					: false,
-			},
-		}),
-		// Spendable balance (`availableCents` minus past-TTL grants pending
-		// expire) — drives the credit drift check below. Reading spendable
-		// here matches what the quote was computed against; the hold writer
-		// in Tx A then materialises the expiry so the actual CAS is backed
-		// by the same number the drift check approved.
-		getSpendableBalance({ db, userId: buyerId }),
-	]);
+			}),
+			// Spendable balance (`availableCents` minus past-TTL grants pending
+			// expire) — drives the credit drift check below. Reading spendable
+			// here matches what the quote was computed against; the hold writer
+			// in Tx A then materialises the expiry so the actual CAS is backed
+			// by the same number the drift check approved.
+			getSpendableBalance({ db, userId: buyerId }),
+		]);
+
+	// A listing went unavailable between quote and claim — sold, pulled, or its
+	// seller suspended (NL-230 Layer 1). Collect *every* such id, not just the
+	// first, so the buyer can drop them all in one step. Same error contract as
+	// the in-tx reservation race below, so the FE renders one "no longer
+	// available" banner regardless of which gate caught it. Thrown before any
+	// charge or reservation — nothing has moved yet.
+	if (unavailableListingIds.length > 0) {
+		throw new HttpError(
+			"Some listings are no longer available",
+			CheckoutClaimErrorCode.unavailable_listings,
+			{ statusCode: 409, data: { unavailableListingIds } },
+		);
+	}
 
 	const customerId = buyer?.billing?.customerId;
 	if (!buyer || !customerId) {
@@ -1009,6 +1024,8 @@ async function loadShipFromBySellerProfile(
 					firstName: true,
 					lastName: true,
 					handle: true,
+					// NL-230: seller zone for the shipping-escalation due-instants.
+					timezone: true,
 				},
 			},
 			shippingFromAddress: {
@@ -1049,6 +1066,7 @@ async function loadShipFromBySellerProfile(
 			postalCode: addr.postalCode,
 			country: addr.country,
 			phone: seller.user.phone,
+			timezone: seller.user.timezone,
 		});
 	}
 	return map;

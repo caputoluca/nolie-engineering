@@ -1,4 +1,5 @@
 import {
+	computeShipDueColumns,
 	generateDisplayId,
 	type SellerVacationPeriod,
 	snapshotSellerVacation,
@@ -31,6 +32,9 @@ export interface ShipFromSnapshot {
 	postalCode: string;
 	country: string;
 	phone: string | null;
+	/** Seller's IANA timezone (NL-230), or null ⇒ default-zone fallback. Sets
+	 *  the local hour the shipping-escalation sends fire at. */
+	timezone: string | null;
 }
 
 export interface PickupSnapshot {
@@ -108,6 +112,11 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 	type OrderLineItemRow = Prisma.OrderLineItemCreateManyInput;
 	const orderRows: OrderRow[] = [];
 	const lineItemRows: OrderLineItemRow[] = [];
+
+	// One placed-at instant for the whole checkout drives the shipping-escalation
+	// due-columns (NL-230). BIN orders are created pending and charged within the
+	// same minute, so creation time is the ship-clock anchor.
+	const placedAt = new Date();
 
 	for (const group of input.groups) {
 		const isShipping = group.fulfillmentMode === "shipping";
@@ -236,6 +245,18 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			input.vacationBySellerProfileId.get(group.sellerProfileId) ?? null,
 		);
 
+		// NL-230: shipping orders get their escalation due-instants now, folded
+		// into the createMany below (per-row, one round trip). Pickup/digital
+		// never ship, so they get none and never enter the escalation sweep.
+		const shipDueColumns =
+			isShipping && shipFrom
+				? computeShipDueColumns({
+						placedAt,
+						vacationEndsAt: vacationSnapshot.sellerVacationEndsAt,
+						timezone: shipFrom.timezone,
+					})
+				: {};
+
 		orderRows.push({
 			id: group.orderId,
 			displayId: generateDisplayId(),
@@ -243,6 +264,7 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			buyerEmailSnapshot: input.buyerEmailSnapshot,
 			sellerProfileId: group.sellerProfileId,
 			...vacationSnapshot,
+			...shipDueColumns,
 			originationType: OrderOriginationType.checkout,
 			originationRef: null,
 			paymentIntentId: null,
@@ -279,6 +301,7 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 						shipFromPostalCode: shipFrom.postalCode,
 						shipFromCountry: shipFrom.country,
 						shipFromPhone: shipFrom.phone,
+						shipFromTimezone: shipFrom.timezone,
 					}
 				: {}),
 			...(pickup
