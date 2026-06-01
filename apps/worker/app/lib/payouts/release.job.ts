@@ -11,9 +11,9 @@ import { RetryableError } from "../../retryable-error.js";
 import { reportError, reportWarning } from "../observability/sentry/report.js";
 import type { PayoutsContext } from "./context.js";
 import {
+	abandonFeeNettedTransfer,
 	applyFeeNetting,
 	finalizeFullyNettedTransfer,
-	reverseFeeNetting,
 } from "./fee-netting.js";
 import {
 	markPayoutAsFailed,
@@ -570,31 +570,22 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 				);
 			});
 
-		// Abandon the transfer atomically: reverse its fee netting, mark it
-		// failed, and release its line claim — all or nothing. A future retry
-		// then claims the lines into a NEW PayoutTransfer with a fresh id (and so
-		// a fresh Stripe idempotency key). The fee reversal MUST be atomic with
-		// the unclaim: the retry's fresh transfer can never re-encounter these
-		// applications, so they must be reversed, not idempotently re-applied —
-		// and a half-done abandon (netting reversed but lines still claimed, or
-		// vice versa) would strand the payout. If the whole tx fails, the
-		// transfer stays `pending` with `stripeFailedAt` set and the sweep
-		// recovers it (better than the old best-effort `.catch` pair, which could
-		// leave lines pinned to a failed transfer with no recovery).
+		// Abandon the transfer atomically: a `pending → failed` CAS, then reverse
+		// its fee netting and release its line claim — all or nothing. A future
+		// retry then claims the lines into a NEW PayoutTransfer with a fresh id
+		// (and so a fresh Stripe idempotency key). The CAS is the mutex against the
+		// reconcile sweep: if `pay()` stalled past the abandoned-transfer cutoff,
+		// the sweep can be abandoning this very transfer concurrently, and two
+		// unguarded reversals would lost-update the debit's `nettedCents` negative.
+		// `abandonFeeNettedTransfer` lets exactly one of them win (the loser
+		// no-ops). If the whole tx fails, the transfer stays `pending` with
+		// `stripeFailedAt` set and the sweep recovers it.
 		try {
-			await ctx.prisma.$transaction(async (tx) => {
-				await reverseFeeNetting(tx, payoutTransferId);
-				await tx.payoutTransfer.update({
-					where: { id: payoutTransferId },
-					data: { status: "failed", failedAt: new Date() },
-				});
-				if (!isOrphan) {
-					await tx.earningLine.updateMany({
-						where: { payoutTransferId, paidAt: null },
-						data: { payoutTransferId: null },
-					});
-				}
-			});
+			await ctx.prisma.$transaction((tx) =>
+				abandonFeeNettedTransfer(tx, payoutTransferId, {
+					unclaimLines: !isOrphan,
+				}),
+			);
 		} catch (err) {
 			reportError(err, {
 				operation: "release_payout_abandon_transfer",
