@@ -493,7 +493,18 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	// `feeNettedCents` records the deduction. The Stripe transfer is the net.
 	const netToTransferCents = amountCents - feeNettedCents;
 
-	if (netToTransferCents === 0) {
+	if (netToTransferCents < 0) {
+		// Invariant violation: `applyFeeNetting` caps feeNettedCents at the claimed
+		// gross, so net is provably >= 0. A negative here means that cap was broken
+		// upstream — surface it loudly instead of letting it masquerade as a Stripe
+		// `transfer_failed` below. Treat as fully-netted (transfer nothing).
+		reportError(new Error("payout.release: netToTransferCents is negative"), {
+			operation: "payout_release_negative_net",
+			extra: { earningId, amountCents, feeNettedCents, payoutTransferId },
+		});
+	}
+
+	if (netToTransferCents <= 0) {
 		// Fully netted: the fee consumed the entire payout. Nothing to transfer,
 		// and `payments.seller.pay` rejects amount <= 0, so skip Stripe and
 		// finalize directly. This is a SUCCESS (the earnings landed against the
