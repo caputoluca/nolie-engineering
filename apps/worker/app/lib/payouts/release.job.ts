@@ -1,4 +1,4 @@
-import { getReleasableLines } from "@nolie/core/payouts";
+import { allocateFeeDebits, getReleasableLines } from "@nolie/core/payouts";
 import {
 	isPrismaRecordNotFoundError,
 	isPrismaUniqueError,
