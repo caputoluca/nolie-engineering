@@ -334,6 +334,97 @@ describe("computeRankBaseScore", () => {
 			DEFAULT_RANKING_CONFIG.lowEffortPenalty;
 		expect(stacked).toBeCloseTo(expected, 10);
 	});
+
+	it("subtracts merchKeywordPenalty when title names non-card merch", () => {
+		// "Pikachu Hat" — the canonical June 2026 incident. Title alone fires it
+		// and the description is a normal-length template, so the base is exactly
+		// `-merchKeywordPenalty`.
+		const hat = computeRankBaseScore(
+			{
+				title: "2026 Regional Championship Pikachu Hat",
+				description: TEMPLATE_DESC,
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(hat).toBeCloseTo(-DEFAULT_RANKING_CONFIG.merchKeywordPenalty, 10);
+	});
+
+	it("drives a sweet-spot-priced merch listing's base negative (regression: hat at rank #1-2)", () => {
+		// A $75 playmat sits dead-center of the premium plateau (full 0.35) but
+		// the 0.50 merch demerit pushes the base below zero, so even brand-new
+		// (max recency 0.30) its rankScore lands in the tail, not rank #1.
+		const playmat = computeRankBaseScore(
+			{
+				title: "Pokemon Regional Championship Pikachu Premium Playmat",
+				description: TEMPLATE_DESC,
+				priceUSD: 75,
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		// premium(0.35) − merch(0.50) = −0.15
+		expect(playmat).toBeCloseTo(
+			PREMIUM_W - DEFAULT_RANKING_CONFIG.merchKeywordPenalty,
+			10,
+		);
+		expect(playmat).toBeLessThan(0);
+	});
+
+	it("fires the merch demerit from description as well as title", () => {
+		const fromDesc = computeRankBaseScore(
+			{
+				title: "Charizard ex 199/165",
+				description: "Comes bundled with a free Charizard plush. See photos.",
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(fromDesc).toBeCloseTo(
+			-DEFAULT_RANKING_CONFIG.merchKeywordPenalty,
+			10,
+		);
+	});
+
+	it("does NOT demote real cards whose names embed a merch substring", () => {
+		// Word boundaries: "Captain" must not trip "cap", "Magneton" must not
+		// trip "magnet". These are real Pokemon — base must be a clean 0.
+		const captain = computeRankBaseScore(
+			{ title: "Captain Pikachu 131/131", description: TEMPLATE_DESC },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const magneton = computeRankBaseScore(
+			{ title: "1996 Magneton 082/165", description: TEMPLATE_DESC },
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(captain).toBe(0);
+		expect(magneton).toBe(0);
+	});
+
+	it("does NOT demote sealed product (ETB / booster / pin collection)", () => {
+		// Sealed inventory is legit and deliberately absent from MERCH_KEYWORDS.
+		const etb = computeRankBaseScore(
+			{ title: "Mega Evolution Elite Trainer Box", description: TEMPLATE_DESC },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const pins = computeRankBaseScore(
+			{
+				title: "Crown Zenith Inteleon Pin Collection",
+				description: TEMPLATE_DESC,
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(etb).toBe(0);
+		expect(pins).toBe(0);
+	});
+
+	it("the merchKeywordPenalty knob is fully reversible (0 ⇒ no demerit)", () => {
+		const input = { title: "Pikachu Hat", description: TEMPLATE_DESC };
+		const penalized = computeRankBaseScore(input, DEFAULT_RANKING_CONFIG);
+		const off = computeRankBaseScore(input, {
+			...DEFAULT_RANKING_CONFIG,
+			merchKeywordPenalty: 0,
+		});
+		expect(penalized).toBe(-DEFAULT_RANKING_CONFIG.merchKeywordPenalty);
+		expect(off).toBe(0);
+	});
 });
 
 describe("matchesNegativeKeyword", () => {
@@ -371,6 +462,50 @@ describe("matchesNegativeKeyword", () => {
 		);
 		expect(
 			matchesNegativeKeyword(
+				"Charizard ex Holo PSA 10",
+				"Pristine condition, near mint, see photos.",
+			),
+		).toBe(false);
+	});
+});
+
+describe("matchesMerchKeyword", () => {
+	it("matches case-insensitively in title", async () => {
+		const { matchesMerchKeyword } = await import("../../src/explore/ranking");
+		expect(matchesMerchKeyword("PIKACHU HAT", null)).toBe(true);
+		expect(matchesMerchKeyword("Pikachu Premium Playmat", null)).toBe(true);
+		expect(matchesMerchKeyword("Charizard ex PSA 10", null)).toBe(false);
+	});
+
+	it("respects word boundaries to avoid false positives on real cards", async () => {
+		const { matchesMerchKeyword } = await import("../../src/explore/ranking");
+		expect(matchesMerchKeyword("Captain Pikachu 131/131", null)).toBe(false);
+		expect(matchesMerchKeyword("1996 Magneton 082/165", null)).toBe(false);
+		expect(matchesMerchKeyword("Hatterene V Alt Art", null)).toBe(false);
+		expect(matchesMerchKeyword("Pikachu Hat Never Worn", null)).toBe(true);
+	});
+
+	it("handles multi-word and hyphenated variants", async () => {
+		const { matchesMerchKeyword } = await import("../../src/explore/ranking");
+		expect(matchesMerchKeyword("Charizard T-Shirt", null)).toBe(true);
+		expect(matchesMerchKeyword("Charizard T Shirt", null)).toBe(true);
+		expect(matchesMerchKeyword("Tournament Play Mat", null)).toBe(true);
+		expect(matchesMerchKeyword("Eevee Action Figure", null)).toBe(true);
+	});
+
+	it("does not match sealed product (deliberately excluded)", async () => {
+		const { matchesMerchKeyword } = await import("../../src/explore/ranking");
+		expect(matchesMerchKeyword("Elite Trainer Box", null)).toBe(false);
+		expect(matchesMerchKeyword("Booster Box 36 Packs", null)).toBe(false);
+		expect(matchesMerchKeyword("Crown Zenith Pin Collection", null)).toBe(
+			false,
+		);
+	});
+
+	it("returns false for a clean card listing", async () => {
+		const { matchesMerchKeyword } = await import("../../src/explore/ranking");
+		expect(
+			matchesMerchKeyword(
 				"Charizard ex Holo PSA 10",
 				"Pristine condition, near mint, see photos.",
 			),

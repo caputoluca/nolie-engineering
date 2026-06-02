@@ -122,6 +122,20 @@ export interface RankingConfig {
 	 */
 	negativeKeywordPenalty: number;
 	/**
+	 * Subtractive penalty applied to `rankBaseScore` when the title or
+	 * description names a non-card merch item (see `MERCH_KEYWORDS`: hat,
+	 * playmat, plush, funko, figurine, …). Larger than
+	 * `negativeKeywordPenalty` by design: novelty fakes (wooden/replica) are
+	 * a soft nudge, but legit merch priced in the $35-$300 sweet spot otherwise
+	 * maxes the premium + recency terms and lands at the very top of /explore
+	 * with no counter-signal (the dictionary tokenBoost is z-score-neutral at
+	 * cold start, so a character name in the title does nothing). At 0.50 a
+	 * sweet-spot merch listing's base goes negative, so even brand-new it sits
+	 * deep in the tail rather than rank #1-2. Fully reversible (set to 0); not
+	 * a WHERE filter. Superseded by the persisted-`kind` feed gate (Phase 2).
+	 */
+	merchKeywordPenalty: number;
+	/**
 	 * Sensitivity of the price-vs-median sigmoid (`k` in
 	 * `mult = 1 + k · tanh(log2(price/median))`). At `k = 0.10` a listing
 	 * priced at half its token's median lands at ~0.92x multiplier; double
@@ -194,8 +208,18 @@ export interface RankingConfig {
  *           listings) moved top-25 median $172 → $99 and dispersed $1k+
  *           cards from ranks 28-90 → 90-220. Forces a one-time recompute
  *           of every row at the new shape.
+ *   v8 → 9: merch demerit added to the base (`merchKeywordPenalty`, a strong
+ *           0.50 subtraction on non-card merch nouns — hat, playmat, plush,
+ *           funko, figurine, …). Live-catalog data (June 2026) showed the
+ *           two freshest in-band listings were a Pikachu playmat and a
+ *           Pikachu hat sitting at /explore ranks #1-2: the recency + price-
+ *           band terms max out for any $35-$300 listing and nothing
+ *           distinguished merch from a card. This is the cheap, removable
+ *           stopgap; the durable fix persists the AI-classified `kind` and
+ *           gates the feed on it (Phase 2). Bump forces a one-time
+ *           recompute so existing merch sinks on the next refresh tick.
  */
-export const RANK_BASE_VERSION = 8;
+export const RANK_BASE_VERSION = 9;
 
 /**
  * Lower edge of the price sweet-spot band. Inside `[LO, HI]` the plateau
@@ -257,6 +281,7 @@ export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 	longTitlePenalty: 0.04,
 	tokenBoostSensitivity: 0.2,
 	negativeKeywordPenalty: 0.08,
+	merchKeywordPenalty: 0.5,
 	priceMultSensitivity: 0.1,
 	priceMultMin: 0.85,
 	priceMultMax: 1.1,
@@ -296,6 +321,53 @@ export const NEGATIVE_KEYWORDS: ReadonlyArray<string> = [
 	"fan-made",
 	"proxy",
 	"proxies",
+];
+
+/**
+ * Non-card merch nouns. A title/description match subtracts the (larger)
+ * `RankingConfig.merchKeywordPenalty`. Distinct from `NEGATIVE_KEYWORDS`
+ * (which targets novelty *fakes* of cards — wooden carvings, replicas): this
+ * targets legitimate, sellable, but non-single-card inventory — apparel,
+ * plushes, figures, playmats, accessories — that the price-band + recency
+ * terms otherwise float to the top of a card-focused feed.
+ *
+ * Curated for precision: matched whole-word (see `MERCH_KEYWORD_REGEX`), so
+ * "cap" can't fire on "Captain" and "magnet" can't fire on "Magneton".
+ * SEALED PRODUCT IS DELIBERATELY ABSENT — "elite trainer box", "booster",
+ * "tin", "pin collection" are real card inventory and must NOT be demoted.
+ * This is a stopgap; the durable fix is the persisted AI `kind` gate
+ * (Phase 2), which classifies these as `other` at the source. Sellers can
+ * rename to dodge, but the AI gate closes that.
+ */
+export const MERCH_KEYWORDS: ReadonlyArray<string> = [
+	"hat",
+	"cap",
+	"beanie",
+	"playmat",
+	"play mat",
+	"plush",
+	"plushie",
+	"plushies",
+	"funko",
+	"figurine",
+	"action figure",
+	"bobblehead",
+	"bobble head",
+	"keychain",
+	"key chain",
+	"lanyard",
+	"backpack",
+	"hoodie",
+	"t-shirt",
+	"tshirt",
+	"t shirt",
+	"mug",
+	"tumbler",
+	"poster",
+	"costume",
+	"cosplay",
+	"statue",
+	"magnet",
 ];
 
 /**
@@ -422,6 +494,31 @@ export function matchesNegativeKeyword(
 }
 
 /**
+ * Same compile-once / whole-word strategy as `NEGATIVE_KEYWORD_REGEX`, over
+ * `MERCH_KEYWORDS`. Word boundaries are load-bearing here: they keep "cap"
+ * off "Captain", "magnet" off "Magneton", "hat" off "Hatterene", etc.
+ */
+const MERCH_KEYWORD_REGEX = new RegExp(
+	`\\b(?:${MERCH_KEYWORDS.map((k) =>
+		k.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&"),
+	).join("|")})\\b`,
+	"i",
+);
+
+/**
+ * True when the listing's title or description names a non-card merch item
+ * (`MERCH_KEYWORDS`). Same title+description join and case-insensitive,
+ * whole-word matching as `matchesNegativeKeyword`.
+ */
+export function matchesMerchKeyword(
+	title: string,
+	description: string | null,
+): boolean {
+	const haystack = `${title} ${description ?? ""}`;
+	return MERCH_KEYWORD_REGEX.test(haystack);
+}
+
+/**
  * Asymmetric plateau in log10(price) space. Full credit (1.0) across
  * `[PLATEAU_LO_USD, PLATEAU_HI_USD]`, quadratic decay below (sub-$10
  * clamps to 0), linear decay above (the long tail). Clamped to `[0, 1]`.
@@ -452,6 +549,7 @@ function sweetSpotPlateauShape(priceUSD: number): number {
  * Time-independent part of the score:
  *   sellerTrust·w + cartAdd·w + save·w + premium·w·plateauShape(price)
  *     − lowEffort?·penalty − longTitle?·penalty − negKeyword?·penalty
+ *     − merchKeyword?·penalty
  *
  * The premium term dominates the additive terms by design — at weight 0.35,
  * a sweet-spot listing ($35-$300) contributes the full 0.35 to the base,
@@ -485,8 +583,18 @@ export function computeRankBaseScore(
 	const negativeKeyword = matchesNegativeKeyword(input.title, input.description)
 		? config.negativeKeywordPenalty
 		: 0;
+	const merchKeyword = matchesMerchKeyword(input.title, input.description)
+		? config.merchKeywordPenalty
+		: 0;
 	return (
-		trust + cartAdd + save + premium - lowEffort - longTitle - negativeKeyword
+		trust +
+		cartAdd +
+		save +
+		premium -
+		lowEffort -
+		longTitle -
+		negativeKeyword -
+		merchKeyword
 	);
 }
 
