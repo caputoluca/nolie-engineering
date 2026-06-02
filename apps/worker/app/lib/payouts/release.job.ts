@@ -6,6 +6,7 @@ import {
 	type Prisma,
 } from "@nolie/db";
 import { PaymentErrorCode } from "@nolie/payments";
+import { config } from "../../config.js";
 import { logger } from "../../logger.js";
 import { RetryableError } from "../../retryable-error.js";
 import { reportError, reportWarning } from "../observability/sentry/report.js";
@@ -88,6 +89,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			order: {
 				select: {
 					id: true,
+					displayId: true,
 					buyerId: true,
 					paymentIntentId: true,
 					paymentChargeId: true,
@@ -128,6 +130,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 				select: {
 					userId: true,
 					connectAccountId: true,
+					user: { select: { handle: true } },
 				},
 			},
 		},
@@ -652,41 +655,83 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			return;
 		}
 
-		reportWarning("Payout to seller failed", {
-			operation: "release_payout",
-			extra: {
-				earningId,
-				orderId: earning.orderId,
-				error: result.error,
-				message: result.message,
+		await markPayoutAsFailed(ctx.prisma, { earningId });
+
+		// Only email the seller when the failure is genuinely theirs to fix: the
+		// destination connected account can't receive funds (payouts disabled /
+		// pending verification / invalid account → `invalid_stripe_account`). For
+		// platform-side or unattributable failures (our balance/config, the
+		// source_transaction over-amount, a Stripe error we can't pin on them) we
+		// must NOT tell the seller "fix your payout details" — it isn't their
+		// fault. Those alert the team via Slack to triage + retry from admin.
+		// (`insufficient_funds` returned earlier via the reschedule flow.)
+		const sellerAtFault =
+			result.error === PaymentErrorCode.invalid_stripe_account;
+
+		reportWarning(
+			sellerAtFault
+				? "Seller payout failed — connected account can't receive funds"
+				: "Seller payout failed (platform-side)",
+			{
+				operation: "release_payout",
+				extra: {
+					earningId,
+					orderId: earning.orderId,
+					error: result.error,
+					message: result.message,
+					sellerAtFault,
+				},
 			},
-		});
+		);
 		logger.error(
 			{
 				earningId,
 				orderId: earning.orderId,
 				error: result.error,
 				message: result.message,
+				sellerAtFault,
 			},
 			"payout.release: payout failed",
 		);
 
-		await markPayoutAsFailed(ctx.prisma, { earningId });
-
-		if (orderIdForNotification) {
-			void ctx.queues.notifications
-				.payoutFailed({
-					orderId: orderIdForNotification,
-					userId: earning.sellerProfile.userId,
+		if (sellerAtFault) {
+			if (orderIdForNotification) {
+				void ctx.queues.notifications
+					.payoutFailed({
+						orderId: orderIdForNotification,
+						userId: earning.sellerProfile.userId,
+					})
+					.catch((err) => {
+						reportError(err, {
+							operation: "queue_payout_failed_notification",
+							extra: { earningId, orderId: earning.orderId },
+						});
+						logger.warn(
+							{ err, earningId, orderId: earning.orderId },
+							"payout.release: Failed to queue payoutFailed notification",
+						);
+					});
+			}
+		} else {
+			void ctx.slack
+				.notifyPayoutTransferFailed({
+					orderId: earning.order.id,
+					displayId: earning.order.displayId,
+					earningId,
+					sellerHandle: earning.sellerProfile.user.handle,
+					amountCents: netToTransferCents,
+					errorCode: result.error,
+					message: result.message ?? null,
+					adminLink: `${config.frontend_url}/admin/orders/${earning.order.id}`,
 				})
 				.catch((err) => {
 					reportError(err, {
-						operation: "queue_payout_failed_notification",
+						operation: "slack_payout_transfer_failed",
 						extra: { earningId, orderId: earning.orderId },
 					});
-					logger.warn(
+					logger.error(
 						{ err, earningId, orderId: earning.orderId },
-						"payout.release: Failed to queue payoutFailed notification",
+						"payout.release: failed to post payout-failed Slack alert",
 					);
 				});
 		}
