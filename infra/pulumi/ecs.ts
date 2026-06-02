@@ -99,6 +99,8 @@ const API_SECRETS = [
 	"EASYPOST_API_KEY",
 	"EASYPOST_WEBHOOK_SECRET",
 	"INTERNAL_API_SECRET",
+	"POSTHOG_API_KEY",
+	"POSTHOG_HOST",
 	// PORT is set in environment array
 ];
 
