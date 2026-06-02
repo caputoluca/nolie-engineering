@@ -255,16 +255,18 @@ describe("Payout Release", () => {
 	// =========================================================================
 	// TEST 7: Payment fails (transfer error) - marks as failed
 	// =========================================================================
-	it("marks payout as failed when Stripe transfer fails", async () => {
+	it("marks payout failed and alerts the team (no seller email) on a platform-side transfer failure", async () => {
 		// Arrange: Create earning ready for payout
-		const { earning, order } = await createPendingPayout();
+		const { earning } = await createPendingPayout();
 		const { ctx, mocks } = createTestPayoutsContext();
 
-		// Mock: Payment fails due to transfer error (e.g., invalid bank account)
+		// Mock: a non-attributable transfer failure (NL-231: our balance/config or
+		// the source_transaction over-amount — NOT the seller's payout details).
 		mocks.payments.seller.pay.mockResolvedValueOnce({
 			success: false,
 			error: "transfer_failed",
-			message: "The bank account could not be verified",
+			message:
+				"Transfers using this transaction as a source must not exceed the source amount",
 		});
 
 		// Act: Run release job
@@ -289,10 +291,41 @@ describe("Payout Release", () => {
 		expect(transfer.status).toBe("failed");
 		expect(transfer.failedAt).not.toBeNull();
 
-		// Assert: Seller notified of failure
-		assertNotificationQueued(mocks, "payoutFailed", {
-			orderId: order.id,
+		// NL-231: the failure isn't the seller's fault, so we do NOT email them
+		// "fix your payout details" — we alert the team via Slack to triage.
+		expect(
+			mocks.queues._getOperationsByJob("notifications", "payoutFailed"),
+		).toHaveLength(0);
+		expect(mocks.slack.notifyPayoutTransferFailed).toHaveBeenCalledTimes(1);
+	});
+
+	// =========================================================================
+	// NL-231: only the seller-attributable failure emails the seller. A
+	// connected account that can't receive funds (payouts disabled / pending
+	// verification / invalid account) surfaces as `invalid_stripe_account` and
+	// IS the seller's to fix — so we email them and skip the team Slack alert.
+	// =========================================================================
+	it("emails the seller (no team alert) when their connected account can't receive the transfer", async () => {
+		const { earning, order } = await createPendingPayout();
+		const { ctx, mocks } = createTestPayoutsContext();
+
+		mocks.payments.seller.pay.mockResolvedValueOnce({
+			success: false,
+			error: "invalid_stripe_account",
+			message: "Payouts are not allowed on this account",
 		});
+
+		await release(createMockJob({ earningId: earning.id }), ctx);
+
+		const failedEarning = await prisma.earning.findUnique({
+			where: { id: earning.id },
+		});
+		expect(failedEarning?.payoutStatus).toBe(PayoutStatus.failed);
+
+		// The seller is emailed to fix their payout setup...
+		assertNotificationQueued(mocks, "payoutFailed", { orderId: order.id });
+		// ...and the team is NOT paged — there's nothing for us to triage.
+		expect(mocks.slack.notifyPayoutTransferFailed).not.toHaveBeenCalled();
 	});
 
 	// =========================================================================
