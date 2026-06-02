@@ -51,6 +51,8 @@ export interface OrderForFinalization {
 	acceptedOfferId: string | null;
 	fulfillmentMode: FulfillmentMode;
 	subtotalCents: number;
+	shippingCents: number;
+	totalCents: number;
 	applicationFeeCents: number;
 	processingFeeCents: number;
 	taxCents: number;
@@ -159,6 +161,8 @@ const ORDER_FOR_FINALIZATION_SELECT = {
 	originationRef: true,
 	fulfillmentMode: true,
 	subtotalCents: true,
+	shippingCents: true,
+	totalCents: true,
 	applicationFeeCents: true,
 	processingFeeCents: true,
 	taxCents: true,
@@ -215,6 +219,8 @@ function toOrderForFinalization(
 				: null,
 		fulfillmentMode: r.fulfillmentMode,
 		subtotalCents: r.subtotalCents,
+		shippingCents: r.shippingCents,
+		totalCents: r.totalCents,
 		applicationFeeCents: r.applicationFeeCents,
 		processingFeeCents: r.processingFeeCents,
 		taxCents: r.taxCents,
