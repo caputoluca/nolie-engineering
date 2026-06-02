@@ -99,6 +99,8 @@ const API_SECRETS = [
 	"EASYPOST_API_KEY",
 	"EASYPOST_WEBHOOK_SECRET",
 	"INTERNAL_API_SECRET",
+	"POSTHOG_API_KEY",
+	"POSTHOG_HOST",
 	// PORT is set in environment array
 ];
 
@@ -331,7 +333,7 @@ export const apiService = new awsx.ecs.FargateService(`nolie-api-${stack}`, {
 				{ name: "REDIS_URL", value: redisEndpoint },
 				{ name: "PORT", value: "8000" },
 				{ name: "HOST", value: "0.0.0.0" },
-				{ name: "SENTRY_ENVIRONMENT", value: stack },
+				{ name: "SENTRY_ENVIRONMENT", value: SENTRY_ENVIRONMENT },
 			],
 			secrets: secrets(API_SECRETS, "api"),
 		},

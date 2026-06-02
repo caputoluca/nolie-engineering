@@ -131,6 +131,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				payments: app.payments,
 				queues: app.queues,
 				realtime: app.realtime,
+				analytics: app.analytics,
 				buyerId: request.session.user.id,
 				body: request.body,
 			});

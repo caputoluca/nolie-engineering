@@ -3,6 +3,7 @@ import { PaymentErrorCode, type PaymentErrorCodeType } from "../errors.js";
 import {
 	idempotencyKeyWithVersion,
 	isInsufficientFundsError,
+	isSellerAccountError,
 	isStripeError,
 	shouldThrowError,
 	toCents,
@@ -109,15 +110,27 @@ export async function paySeller(
 			}
 
 			if (isInsufficientFundsError(err)) {
-				// Insufficient funds error: return structured failure
+				// Platform-side: our Stripe balance can't cover the transfer.
+				// Caller reschedules; never the seller's fault.
 				return {
 					success: false,
 					error: PaymentErrorCode.insufficient_funds,
 					message: err.message,
 				};
+			} else if (isSellerAccountError(err)) {
+				// Seller-actionable: the destination connected account can't
+				// receive the transfer (payouts disabled / pending verification /
+				// invalid account). Distinct code so the caller can notify the
+				// seller to fix their payout setup — see release.job.
+				return {
+					success: false,
+					error: PaymentErrorCode.invalid_stripe_account,
+					message: err.message,
+				};
 			} else {
-				// Non-retryable business logic errors: return structured failure
-				// Examples: invalid account, insufficient funds, account restrictions
+				// Everything else non-retryable: platform-side or unattributable
+				// (over-amount, misconfig, "contact Stripe"). Caller alerts the
+				// team but does NOT blame the seller's payout details.
 				return {
 					success: false,
 					error: PaymentErrorCode.transfer_failed,

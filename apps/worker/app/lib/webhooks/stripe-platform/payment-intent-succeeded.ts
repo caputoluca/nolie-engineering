@@ -121,6 +121,7 @@ export async function paymentIntentSucceeded(
 		queues: ctx.queues,
 		logger: ctx.logger,
 		reportError,
+		analytics: ctx.analytics,
 	});
 
 	fanOutCanceledSiblings({
