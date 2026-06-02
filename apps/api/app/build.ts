@@ -2,6 +2,7 @@
 import type { S3Client } from "@aws-sdk/client-s3";
 import fastifyCookie from "@fastify/cookie";
 import corsPlugin from "@fastify/cors";
+import type { ServerAnalytics } from "@nolie/analytics/server";
 import type { PaymentsClient } from "@nolie/payments";
 import type { NoLieQueues } from "@nolie/queues";
 import type { createRestClient, RestClient } from "@nolie/realtime/server";
@@ -11,6 +12,7 @@ import fastifyRawBody from "fastify-raw-body";
 import hyperid from "hyperid";
 import { logger } from "./logger.js";
 import { type AIClient, aiPlugin } from "./plugins/ai.js";
+import { analyticsPlugin } from "./plugins/analytics.js";
 import { authPlugin } from "./plugins/auth.js";
 import { cachePlugin } from "./plugins/cache.js";
 import { envPlugin } from "./plugins/config.js";
@@ -69,6 +71,7 @@ export interface BuildAppOptions {
 	moderation?: ModerationClient;
 	queues?: NoLieQueues;
 	storage?: S3Client;
+	analytics?: ServerAnalytics;
 }
 
 export async function buildApp(options?: BuildAppOptions) {
@@ -133,6 +136,9 @@ export async function buildApp(options?: BuildAppOptions) {
 
 	fastify.log.debug("Initializing engagement event hook");
 	await fastify.register(eventsPlugin);
+
+	fastify.log.debug("Initializing analytics (posthog)");
+	await fastify.register(analyticsPlugin, { instance: options?.analytics });
 
 	fastify.log.debug("Initializing cache");
 	await fastify.register(cachePlugin); // connect to cache

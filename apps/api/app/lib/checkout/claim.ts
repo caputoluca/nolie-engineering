@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { ServerAnalytics } from "@nolie/analytics/server";
 import {
 	finalizeCheckoutTx,
 	loadFinalizableOrdersByIds,
@@ -67,6 +68,7 @@ interface ClaimInput {
 		notifications: QueueOf<"notifications">;
 	};
 	realtime: RestClient;
+	analytics: ServerAnalytics;
 	buyerId: string;
 	body: {
 		quoteId: string;
@@ -574,6 +576,7 @@ export async function claimCheckout(
 			queues: input.queues,
 			logger,
 			reportError,
+			analytics: input.analytics,
 		});
 		fanOutCanceledSiblings({
 			realtime: input.realtime,
