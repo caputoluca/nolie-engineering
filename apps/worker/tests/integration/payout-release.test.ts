@@ -949,6 +949,57 @@ describe("Payout Release", () => {
 			});
 		});
 	});
+
+	// =========================================================================
+	// NL-231: source_transaction selection for credit-funded orders. A transfer
+	// pinned to a charge can't exceed it (Stripe: the sum of transfers against a
+	// charge must not exceed the charge amount). When wallet credit covered part
+	// of the order, the card charge is `totalCents − credit` — smaller than the
+	// seller's net — so the charge can't fund the transfer and we must pay from
+	// the platform balance instead.
+	// =========================================================================
+	describe("source_transaction selection (NL-231 partial credit)", () => {
+		it("pays from the platform balance (no source charge) when credit shrinks the charge below the seller's net", async () => {
+			// Default fixture: total 10_000, net 8_000. Credit 9_000 leaves a card
+			// charge of 1_000 — far below the 8_000 net, so pinning to it would hit
+			// Stripe's "must not exceed the source amount" error (the live bug).
+			const { earning, order, winner } = await createPendingPayout();
+			const wallet = await prisma.wallet.create({
+				data: { userId: winner.id },
+			});
+			await prisma.appliedCredit.create({
+				data: { orderId: order.id, walletId: wallet.id, appliedCents: 9_000 },
+			});
+			const { ctx, mocks } = createTestPayoutsContext();
+
+			await release(createMockJob({ earningId: earning.id }), ctx);
+
+			const payOps = mocks.payments._getOperationsOfType("seller.pay");
+			expect(payOps).toHaveLength(1);
+			const params = payOps[0]?.params as {
+				sourceChargeId: string | null;
+				amount: number;
+			};
+			// The fix: no source charge — the transfer draws on the platform balance.
+			expect(params.sourceChargeId).toBeNull();
+			// Seller is still paid their full net (the credit-funded portion is ours).
+			expect(params.amount).toBe(earning.netAmount / 100);
+		});
+
+		it("pins the transfer to the charge when no credit was applied (charge funds the full net)", async () => {
+			const { earning, order } = await createPendingPayout();
+			const { ctx, mocks } = createTestPayoutsContext();
+
+			await release(createMockJob({ earningId: earning.id }), ctx);
+
+			const payOps = mocks.payments._getOperationsOfType("seller.pay");
+			expect(payOps).toHaveLength(1);
+			const params = payOps[0]?.params as { sourceChargeId: string | null };
+			// source_transaction kept — net (8_000) ≤ card charge (10_000), so the
+			// charge can fund it and we get its balance-availability guarantee.
+			expect(params.sourceChargeId).toBe(order.paymentChargeId);
+		});
+	});
 });
 
 // ============================================================================
