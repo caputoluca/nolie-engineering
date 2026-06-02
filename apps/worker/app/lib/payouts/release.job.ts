@@ -91,6 +91,10 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 					buyerId: true,
 					paymentIntentId: true,
 					paymentChargeId: true,
+					// Needed to derive the card-charged amount (total − credit)
+					// so we don't pin a transfer to a charge that can't fund it.
+					totalCents: true,
+					appliedCredits: { select: { appliedCents: true } },
 					// NL-319: defensive gate against paths that still enqueue
 					// `payout.release` on a cancelled order (the dispute
 					// resolver — its always-queue contract — and any late
@@ -526,6 +530,31 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 	const amountInDollars = netToTransferCents / 100;
 
+	// Stripe pins a transfer with `source_transaction` to its charge, and the sum
+	// of transfers against one charge can never exceed the charge amount
+	// (docs.stripe.com/connect/separate-charges-and-transfers). When the buyer
+	// paid partly from wallet credit, the card charge is only
+	// `totalCents − creditApplied` — smaller than the seller's net — and the
+	// credit-covered portion sits in our platform balance, not the charge. Pin to
+	// that undersized charge and Stripe rejects the over-amount. So we attach the
+	// source charge only when it can provably fund the WHOLE earning's payout
+	// (`netAmount`, not just this run's slice — partial releases share one charge
+	// and must not overshoot it in aggregate). Otherwise we transfer straight from
+	// the platform balance, exactly like the full-credit case where there's no
+	// charge to pin to at all. Keeping the source charge wherever it fits
+	// preserves its benefit: the transfer succeeds against unsettled charge funds
+	// instead of failing on a thin available balance.
+	const appliedCreditCents = earning.order.appliedCredits.reduce(
+		(sum, c) => sum + c.appliedCents,
+		0,
+	);
+	const cardChargedCents = earning.order.totalCents - appliedCreditCents;
+	const sourceChargeId =
+		earning.order.paymentChargeId !== null &&
+		earning.netAmount <= cardChargedCents
+			? earning.order.paymentChargeId
+			: null;
+
 	logger.info(
 		{
 			earningId,
@@ -537,6 +566,9 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			buyerId,
 			payoutTransferId,
 			orphan: isOrphan,
+			sourcePinned: sourceChargeId !== null,
+			cardChargedCents,
+			appliedCreditCents,
 		},
 		"payout.release: calling payments.seller.pay",
 	);
@@ -546,7 +578,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		sellerConnectAccountId: connectAccountId,
 		orderId: earning.order.id,
 		buyerId,
-		sourceChargeId: earning.order.paymentChargeId,
+		sourceChargeId,
 		payoutTransferId,
 	});
 
