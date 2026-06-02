@@ -2,7 +2,7 @@
 import type { S3Client } from "@aws-sdk/client-s3";
 import fastifyCookie from "@fastify/cookie";
 import corsPlugin from "@fastify/cors";
-import type { AnalyticsClient } from "@nolie/analytics/server";
+import type { ServerAnalytics } from "@nolie/analytics/server";
 import type { PaymentsClient } from "@nolie/payments";
 import type { NoLieQueues } from "@nolie/queues";
 import type { createRestClient, RestClient } from "@nolie/realtime/server";
@@ -71,7 +71,7 @@ export interface BuildAppOptions {
 	moderation?: ModerationClient;
 	queues?: NoLieQueues;
 	storage?: S3Client;
-	analytics?: AnalyticsClient;
+	analytics?: ServerAnalytics;
 }
 
 export async function buildApp(options?: BuildAppOptions) {
