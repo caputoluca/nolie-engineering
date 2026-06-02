@@ -11,6 +11,11 @@ import { RetryableError } from "../../retryable-error.js";
 import { reportError, reportWarning } from "../observability/sentry/report.js";
 import type { PayoutsContext } from "./context.js";
 import {
+	abandonFeeNettedTransfer,
+	applyFeeNetting,
+	finalizeFullyNettedTransfer,
+} from "./fee-netting.js";
+import {
 	markPayoutAsFailed,
 	reschedulePayoutForInsufficientFunds,
 } from "./release-utils.js";
@@ -263,6 +268,11 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	const isOrphan = earning.lines.length === 0;
 
 	let amountCents: number;
+	// NL-231: cancellation-fee cents netted out of this run's gross inside the
+	// claim tx (Rung 1 of the collection waterfall). Stays 0 on the orphan-shim
+	// path — netting only runs on the normal per-line claim. The Stripe transfer
+	// is for `amountCents − feeNettedCents`; `amountCents` stays GROSS on the row.
+	let feeNettedCents = 0;
 	// earningLineId → releasable cents this run. Empty for the orphan
 	// shim (no EarningLine rows). Drives both the transfer size and the
 	// post-claim amount re-derivation (a crashed or concurrent sibling
@@ -436,10 +446,26 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 					});
 				}
 
-				return { payoutTransferId: pt.id, amountCents: claimedCents };
+				// NL-231: net the seller's outstanding cancellation-fee debits
+				// against this claimed gross, INSIDE the claim tx so the
+				// application rows + debit draw-downs roll back atomically with a
+				// lost claim (the retry then re-nets against the fresh transfer).
+				const nettedCents = await applyFeeNetting(tx, {
+					sellerProfileId: earning.sellerProfileId,
+					payoutTransferId: pt.id,
+					grossCents: claimedCents,
+					earningId,
+				});
+
+				return {
+					payoutTransferId: pt.id,
+					amountCents: claimedCents,
+					feeNettedCents: nettedCents,
+				};
 			});
 			payoutTransferId = claim.payoutTransferId;
 			amountCents = claim.amountCents;
+			feeNettedCents = claim.feeNettedCents;
 		} catch (err) {
 			if (err instanceof ClaimLost) {
 				logger.info(
@@ -461,13 +487,52 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		}
 	}
 
-	const amountInDollars = amountCents / 100;
+	// NL-231: the seller receives gross minus whatever fee debt netted out of
+	// this run. `amountCents` stays GROSS on the PayoutTransfer (preserves the
+	// NL-183 invariant `amountCents == Σ claimed line releasable cents`);
+	// `feeNettedCents` records the deduction. The Stripe transfer is the net.
+	const netToTransferCents = amountCents - feeNettedCents;
+
+	if (netToTransferCents < 0) {
+		// Invariant violation: `applyFeeNetting` caps feeNettedCents at the claimed
+		// gross, so net is provably >= 0. A negative here means that cap was broken
+		// upstream — surface it loudly instead of letting it masquerade as a Stripe
+		// `transfer_failed` below. Treat as fully-netted (transfer nothing).
+		reportError(new Error("payout.release: netToTransferCents is negative"), {
+			operation: "payout_release_negative_net",
+			extra: { earningId, amountCents, feeNettedCents, payoutTransferId },
+		});
+	}
+
+	if (netToTransferCents <= 0) {
+		// Fully netted: the fee consumed the entire payout. Nothing to transfer,
+		// and `payments.seller.pay` rejects amount <= 0, so skip Stripe and
+		// finalize directly. This is a SUCCESS (the earnings landed against the
+		// seller's fee debt; the debit(s) settled in the claim tx) — distinct
+		// from the `amountCents <= 0` ERROR gate above (genuine no-money).
+		logger.info(
+			{
+				earningId,
+				orderId: earning.order.id,
+				grossCents: amountCents,
+				feeNettedCents,
+				payoutTransferId,
+			},
+			"payout.release.fully_netted",
+		);
+		await finalizeFullyNettedPayout(ctx, { earningId, payoutTransferId });
+		return;
+	}
+
+	const amountInDollars = netToTransferCents / 100;
 
 	logger.info(
 		{
 			earningId,
 			orderId: earning.order.id,
 			amountInDollars,
+			grossInDollars: amountCents / 100,
+			feeNettedCents,
 			connectAccountId,
 			buyerId,
 			payoutTransferId,
@@ -486,35 +551,50 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	});
 
 	if (!result.success) {
-		// Failed Transfer — mark the pre-allocated PayoutTransfer row as
-		// failed and release its line claim. A future retry then claims
-		// the lines into a NEW PayoutTransfer with a fresh id (and so a
-		// fresh Stripe idempotency key — a genuine new attempt, not
-		// Stripe's cached 24h failure for the old key).
+		// Record the Stripe failure in its OWN commit, BEFORE the abandon tx
+		// below. This is the crash-recovery discriminator (NL-231): if the
+		// worker dies mid-abandon, the sweep sees `stripeFailedAt` set and knows
+		// the transfer is safe to reverse + unclaim — versus a crash that loses
+		// the outcome entirely, which it can't safely auto-reverse (the money
+		// may have moved). Best-effort: if this write itself fails, the abandon
+		// below still runs; only a double failure falls back to manual review.
 		await ctx.prisma.payoutTransfer
 			.update({
 				where: { id: payoutTransferId },
-				data: { status: "failed", failedAt: new Date() },
+				data: { stripeFailedAt: new Date() },
 			})
 			.catch((err) => {
 				logger.error(
 					{ err, earningId, payoutTransferId },
-					"payout.release: failed to mark PayoutTransfer as failed",
+					"payout.release: failed to record stripeFailedAt before abandon",
 				);
 			});
 
-		if (!isOrphan) {
-			await ctx.prisma.earningLine
-				.updateMany({
-					where: { payoutTransferId, paidAt: null },
-					data: { payoutTransferId: null },
-				})
-				.catch((err) => {
-					logger.error(
-						{ err, earningId, payoutTransferId },
-						"payout.release: failed to unclaim lines after failed transfer",
-					);
-				});
+		// Abandon the transfer atomically: a `pending → failed` CAS, then reverse
+		// its fee netting and release its line claim — all or nothing. A future
+		// retry then claims the lines into a NEW PayoutTransfer with a fresh id
+		// (and so a fresh Stripe idempotency key). The CAS is the mutex against the
+		// reconcile sweep: if `pay()` stalled past the abandoned-transfer cutoff,
+		// the sweep can be abandoning this very transfer concurrently, and two
+		// unguarded reversals would lost-update the debit's `nettedCents` negative.
+		// `abandonFeeNettedTransfer` lets exactly one of them win (the loser
+		// no-ops). If the whole tx fails, the transfer stays `pending` with
+		// `stripeFailedAt` set and the sweep recovers it.
+		try {
+			await ctx.prisma.$transaction((tx) =>
+				abandonFeeNettedTransfer(tx, payoutTransferId, {
+					unclaimLines: !isOrphan,
+				}),
+			);
+		} catch (err) {
+			reportError(err, {
+				operation: "release_payout_abandon_transfer",
+				extra: { earningId, payoutTransferId },
+			});
+			logger.error(
+				{ err, earningId, payoutTransferId },
+				"payout.release: failed to abandon transfer (reverse netting + unclaim); sweep will recover",
+			);
 		}
 
 		if (result.error === PaymentErrorCode.insufficient_funds) {
@@ -674,6 +754,49 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		);
 		throw new RetryableError(
 			"Failed to update earning + lines + transfer, retrying...",
+		);
+	}
+}
+
+/**
+ * Finalize an exact-zero ("fully netted") payout — the fee consumed the whole
+ * run, so no Stripe transfer was made. Wraps `finalizeFullyNettedTransfer` in a
+ * tx with release.job's error semantics. A transient failure throws
+ * RetryableError; the BullMQ retry re-fires this job but finds the lines already
+ * claimed (claim_lost), so the crash-recovery sweep — which resumes this same
+ * idempotent finalize for an exact-zero transfer (`feeNettedCents == amountCents`)
+ * — is the durable backstop. A concurrent status change surfaces as
+ * RecordNotFound and is a clean skip.
+ */
+async function finalizeFullyNettedPayout(
+	ctx: PayoutsContext,
+	{
+		earningId,
+		payoutTransferId,
+	}: { earningId: string; payoutTransferId: string },
+): Promise<void> {
+	try {
+		await ctx.prisma.$transaction((tx) =>
+			finalizeFullyNettedTransfer(tx, {
+				earningId,
+				payoutTransferId,
+				now: new Date(),
+			}),
+		);
+	} catch (err) {
+		if (isPrismaRecordNotFoundError(err)) {
+			logger.warn(
+				{ earningId, payoutTransferId },
+				"payout.release: earning status changed during fully-netted finalize; skipping",
+			);
+			return;
+		}
+		logger.error(
+			{ earningId, payoutTransferId, err },
+			"payout.release: failed to finalize fully-netted payout, retrying...",
+		);
+		throw new RetryableError(
+			"Failed to finalize fully-netted payout, retrying...",
 		);
 	}
 }
