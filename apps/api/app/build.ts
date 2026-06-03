@@ -45,6 +45,7 @@ import { contactRoutes } from "./routes/contact.js";
 import { exploreRoutes } from "./routes/explore.js";
 import { handlesRoutes } from "./routes/handles.js";
 import { healthRoutes } from "./routes/health.js";
+import { klaviyoRoutes } from "./routes/klaviyo.js";
 import { listingRoutes } from "./routes/listings/index.js";
 import { meRoutes } from "./routes/me/index.js";
 import { moderationRoutes } from "./routes/moderations.js";
@@ -204,6 +205,7 @@ export async function buildApp(options?: BuildAppOptions) {
 	await fastify.register(easypostWebhookRoutes, {
 		prefix: "/shipping/easypost",
 	});
+	await fastify.register(klaviyoRoutes, { prefix: "/klaviyo" });
 	await fastify.register(moderationRoutes, { prefix: "/moderations" });
 	await fastify.register(sitemapRoutes, { prefix: "/sitemap" });
 	await fastify.register(exploreRoutes, { prefix: "/explore" });

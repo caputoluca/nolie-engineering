@@ -102,6 +102,7 @@ const API_SECRETS = [
 	"POSTHOG_API_KEY",
 	"POSTHOG_HOST",
 	"KLAVIYO_API_KEY",
+	"KLAVIYO_WEBHOOK_SECRET",
 	// PORT is set in environment array
 ];
 
