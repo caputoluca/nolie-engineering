@@ -67,6 +67,7 @@ interface ClaimInput {
 	queues: {
 		engagementEvents: QueueOf<"engagementEvents">;
 		notifications: QueueOf<"notifications">;
+		klaviyoSaves: QueueOf<"klaviyoSaves">;
 	};
 	realtime: RestClient;
 	analytics: ServerAnalytics;
