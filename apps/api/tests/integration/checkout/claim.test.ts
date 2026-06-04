@@ -1449,7 +1449,7 @@ describe("POST /checkout/claim", () => {
 		// listing's own dims). The decision is frozen on Order.shippingPresetKey
 		// so PI-succeeded + label-purchase don't re-derive it.
 
-		it("single letter listing produces an Order on the letter rail charged at the flat $2.50", async () => {
+		it("single letter listing produces an Order on the letter rail charged at the flat $1.95", async () => {
 			const seller = await setupSellerWithListing({
 				price: 10,
 				itemType: "physical",
@@ -1473,17 +1473,15 @@ describe("POST /checkout/claim", () => {
 				where: { id: body.orderIds[0] },
 			});
 			expect(order.shippingPresetKey).toBe("raw_single_pwe");
-			expect(order.shippingCents).toBe(250);
+			expect(order.shippingCents).toBe(195);
 		});
 
-		it("two-card all-letter bundle auto-upgrades to a standard_card parcel at the fallback rate", async () => {
-			// Letter shipping is single-card only (NL-315): an untracked PWE may
-			// carry at most one card. A second letter listing pushes the bundle
-			// past LETTER_MAX_CARD_COUNT, so checkout flips the rail to a default
-			// parcel preset (`standard_card`) — the seller ships a tracked bubble
-			// mailer and the buyer pays the parcel fallback rate, not 2× the
-			// letter rate. Both cards are cheap ($5) so the count, not the value
-			// ceiling, triggers the upgrade.
+		it("two-card all-letter bundle within the caps stays on the letter rail at the flat $1.95", async () => {
+			// Letter shipping carries up to LETTER_MAX_CARD_COUNT (3) cards as
+			// long as the combined value stays within LETTER_MAX_BUNDLE_VALUE_CENTS.
+			// Two cheap ($5) cards clear both gates, so the bundle rides one
+			// untracked envelope at the flat letter rate — not two labels and not
+			// a parcel upgrade.
 			const seller = await setupSellerWithListing({
 				price: 5,
 				itemType: "physical",
@@ -1514,7 +1512,108 @@ describe("POST /checkout/claim", () => {
 			const response = await postClaim(buyer.api, {
 				quoteId,
 				paymentMethodId: buyer.paymentMethodId,
-				idempotencyKey: uniqueIdempotencyKey("letter-upgrade-count"),
+				idempotencyKey: uniqueIdempotencyKey("letter-two-card"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+			expect(order.lineItems).toHaveLength(2);
+			expect(order.shippingPresetKey).toBe("raw_single_pwe");
+			expect(order.shippingCents).toBe(195);
+		});
+
+		it("three-card all-letter bundle at the card-count cap stays on the letter rail at the flat $1.95", async () => {
+			// Three is LETTER_MAX_CARD_COUNT — the inclusive edge that must STAY
+			// letter (a fourth card upgrades to parcel; see the count-cap test
+			// below). Three cheap ($5) cards combine to $15, well under
+			// LETTER_MAX_BUNDLE_VALUE_CENTS, so this isolates the card-count
+			// boundary from the value boundary: the bundle rides one untracked
+			// envelope at the flat letter rate, not three labels and not a parcel.
+			const seller = await setupSellerWithListing({
+				price: 5,
+				itemType: "physical",
+				shippingCostCents: 250,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { shippingPresetKey: "raw_single_pwe" },
+			});
+			const extras = await Promise.all([
+				createFixedPriceListingForSeller(seller.sellerProfileId, {
+					price: 5,
+					itemType: "physical",
+				}),
+				createFixedPriceListingForSeller(seller.sellerProfileId, {
+					price: 5,
+					itemType: "physical",
+				}),
+			]);
+			await prisma.listing.updateMany({
+				where: { id: { in: extras.map((e) => e.id) } },
+				data: { shippingPresetKey: "raw_single_pwe", shippingCostCents: 250 },
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				...extras.map((e) => e.id),
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("letter-three-card"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+			expect(order.lineItems).toHaveLength(3);
+			expect(order.shippingPresetKey).toBe("raw_single_pwe");
+			expect(order.shippingCents).toBe(195);
+		});
+
+		it("two-card all-letter bundle over the $30 value ceiling upgrades to a standard_card parcel", async () => {
+			// Card count is within the cap (2 ≤ 3), but the two cards SUM to $40,
+			// past LETTER_MAX_BUNDLE_VALUE_CENTS. An untracked envelope shouldn't
+			// carry that much value, so checkout flips the bundle to a tracked
+			// standard_card parcel at the fallback rate.
+			const seller = await setupSellerWithListing({
+				price: 20,
+				itemType: "physical",
+				shippingCostCents: 250,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { shippingPresetKey: "raw_single_pwe" },
+			});
+			const extra = await createFixedPriceListingForSeller(
+				seller.sellerProfileId,
+				{ price: 20, itemType: "physical" },
+			);
+			await prisma.listing.update({
+				where: { id: extra.id },
+				data: {
+					shippingPresetKey: "raw_single_pwe",
+					shippingCostCents: 250,
+				},
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				extra.id,
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("letter-upgrade-value-bundle"),
 			});
 
 			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
@@ -1527,15 +1626,70 @@ describe("POST /checkout/claim", () => {
 			expect(order.shippingCents).toBe(650);
 		});
 
-		it("single letter listing over the $15 value ceiling upgrades to a standard_card parcel", async () => {
+		it("four-card all-letter bundle over the card-count cap upgrades to a standard_card parcel", async () => {
+			// Combined value ($20) is within LETTER_MAX_BUNDLE_VALUE_CENTS, but a
+			// fourth card pushes the bundle past LETTER_MAX_CARD_COUNT (3). The
+			// count gate alone forces the parcel upgrade — the seller ships one
+			// tracked bubble mailer at the fallback rate, not four envelopes.
+			const seller = await setupSellerWithListing({
+				price: 5,
+				itemType: "physical",
+				shippingCostCents: 250,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { shippingPresetKey: "raw_single_pwe" },
+			});
+			const extras = await Promise.all([
+				createFixedPriceListingForSeller(seller.sellerProfileId, {
+					price: 5,
+					itemType: "physical",
+				}),
+				createFixedPriceListingForSeller(seller.sellerProfileId, {
+					price: 5,
+					itemType: "physical",
+				}),
+				createFixedPriceListingForSeller(seller.sellerProfileId, {
+					price: 5,
+					itemType: "physical",
+				}),
+			]);
+			await prisma.listing.updateMany({
+				where: { id: { in: extras.map((e) => e.id) } },
+				data: { shippingPresetKey: "raw_single_pwe", shippingCostCents: 250 },
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				...extras.map((e) => e.id),
+			]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("letter-upgrade-count"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+			expect(order.lineItems).toHaveLength(4);
+			expect(order.shippingPresetKey).toBe("standard_card");
+			expect(order.shippingCents).toBe(650);
+		});
+
+		it("single letter listing over the $30 value ceiling upgrades to a standard_card parcel", async () => {
 			// Single card, so the card-count gate passes — but the listing value
 			// exceeds LETTER_MAX_BUNDLE_VALUE_CENTS, so the bundle upgrades to a
 			// tracked parcel instead of riding an untracked envelope. Force the
-			// letter tag directly (the per-listing gate would normally block a $20
+			// letter tag directly (the per-listing gate would normally block a $35
 			// letter listing); this guards the order-time value cap against
 			// listing-gate drift and the accepted-offer path.
 			const seller = await setupSellerWithListing({
-				price: 20,
+				price: 35,
 				itemType: "physical",
 				shippingCostCents: 250,
 			});
@@ -1559,6 +1713,39 @@ describe("POST /checkout/claim", () => {
 			});
 			expect(order.shippingPresetKey).toBe("standard_card");
 			expect(order.shippingCents).toBe(650);
+		});
+
+		it("single letter listing priced exactly at the $30 value ceiling stays on the letter rail", async () => {
+			// Inclusive complement to the over-value upgrade above. canShipLetter
+			// gates with a strict `>` on LETTER_MAX_BUNDLE_VALUE_CENTS, so a bundle
+			// worth EXACTLY $30 is still letter-eligible — it must NOT upgrade. This
+			// pins the `>` vs `>=` boundary so a future tightening to `>=` (which
+			// would silently bump every $30 letter to a $6.50 parcel) fails here.
+			const seller = await setupSellerWithListing({
+				price: 30,
+				itemType: "physical",
+				shippingCostCents: 250,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { shippingPresetKey: "raw_single_pwe" },
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("letter-value-boundary"),
+			});
+
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+			});
+			expect(order.shippingPresetKey).toBe("raw_single_pwe");
+			expect(order.shippingCents).toBe(195);
 		});
 
 		it("mixed letter + parcel bundle stays on the parcel rail with bundle-max shipping", async () => {
