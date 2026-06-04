@@ -1449,7 +1449,7 @@ describe("POST /checkout/claim", () => {
 		// listing's own dims). The decision is frozen on Order.shippingPresetKey
 		// so PI-succeeded + label-purchase don't re-derive it.
 
-		it("single letter listing produces an Order on the letter rail charged at the flat $2.50", async () => {
+		it("single letter listing produces an Order on the letter rail charged at the flat $1.95", async () => {
 			const seller = await setupSellerWithListing({
 				price: 10,
 				itemType: "physical",
@@ -1473,10 +1473,10 @@ describe("POST /checkout/claim", () => {
 				where: { id: body.orderIds[0] },
 			});
 			expect(order.shippingPresetKey).toBe("raw_single_pwe");
-			expect(order.shippingCents).toBe(250);
+			expect(order.shippingCents).toBe(195);
 		});
 
-		it("two-card all-letter bundle within the caps stays on the letter rail at the flat $2.50", async () => {
+		it("two-card all-letter bundle within the caps stays on the letter rail at the flat $1.95", async () => {
 			// Letter shipping carries up to LETTER_MAX_CARD_COUNT (3) cards as
 			// long as the combined value stays within LETTER_MAX_BUNDLE_VALUE_CENTS.
 			// Two cheap ($5) cards clear both gates, so the bundle rides one
@@ -1522,7 +1522,7 @@ describe("POST /checkout/claim", () => {
 			});
 			expect(order.lineItems).toHaveLength(2);
 			expect(order.shippingPresetKey).toBe("raw_single_pwe");
-			expect(order.shippingCents).toBe(250);
+			expect(order.shippingCents).toBe(195);
 		});
 
 		it("two-card all-letter bundle over the $30 value ceiling upgrades to a standard_card parcel", async () => {
