@@ -10,6 +10,7 @@ import type { PrismaClient } from "@nolie/db";
 import { PaymentStatus } from "@nolie/db";
 import { errors, HttpError } from "@nolie/errors/http";
 import { joinName } from "@nolie/lib/name";
+import type { ServerMarketing } from "@nolie/marketing/server";
 import { PaymentErrorCode, type PaymentsClient } from "@nolie/payments";
 import { isStripeRateLimitError } from "@nolie/payments/utils";
 import type { QueueOf } from "@nolie/queues";
@@ -69,6 +70,7 @@ interface ClaimInput {
 	};
 	realtime: RestClient;
 	analytics: ServerAnalytics;
+	marketing: ServerMarketing;
 	buyerId: string;
 	body: {
 		quoteId: string;
@@ -577,6 +579,7 @@ export async function claimCheckout(
 			logger,
 			reportError,
 			analytics: input.analytics,
+			marketing: input.marketing,
 		});
 		fanOutCanceledSiblings({
 			realtime: input.realtime,
