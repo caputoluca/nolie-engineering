@@ -132,6 +132,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				queues: app.queues,
 				realtime: app.realtime,
 				analytics: app.analytics,
+				marketing: app.marketing,
 				buyerId: request.session.user.id,
 				body: request.body,
 			});

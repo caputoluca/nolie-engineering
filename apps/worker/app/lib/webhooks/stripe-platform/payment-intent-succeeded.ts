@@ -122,6 +122,7 @@ export async function paymentIntentSucceeded(
 		logger: ctx.logger,
 		reportError,
 		analytics: ctx.analytics,
+		marketing: ctx.marketing,
 	});
 
 	fanOutCanceledSiblings({
