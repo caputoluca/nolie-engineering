@@ -45,8 +45,21 @@ export interface ListingPackageDims {
 export interface OrderForFinalization {
 	id: string;
 	buyerId: string;
+	/** Buyer's CURRENT email/name (the User relation, not `buyerEmailSnapshot`) —
+	 *  the Klaviyo identity spine must track the live email, not the immutable
+	 *  receipt snapshot, or the order_completed event fragments onto a stale
+	 *  profile. */
+	buyerEmail: string;
+	buyerFirstName: string | null;
+	buyerLastName: string | null;
 	sellerProfileId: string;
 	sellerUserId: string;
+	/** Seller's CURRENT email/name (the User relation) — the Klaviyo identity
+	 *  spine for the seller-side `sale_completed` event (NL-353), same live-email
+	 *  rationale as the buyer fields above. */
+	sellerEmail: string;
+	sellerFirstName: string | null;
+	sellerLastName: string | null;
 	originationType: OrderOriginationType;
 	acceptedOfferId: string | null;
 	fulfillmentMode: FulfillmentMode;
@@ -155,8 +168,14 @@ export function computeBundleDims(
 const ORDER_FOR_FINALIZATION_SELECT = {
 	id: true,
 	buyerId: true,
+	buyer: { select: { email: true, firstName: true, lastName: true } },
 	sellerProfileId: true,
-	sellerProfile: { select: { userId: true } },
+	sellerProfile: {
+		select: {
+			userId: true,
+			user: { select: { email: true, firstName: true, lastName: true } },
+		},
+	},
 	originationType: true,
 	originationRef: true,
 	fulfillmentMode: true,
@@ -210,8 +229,14 @@ function toOrderForFinalization(
 	return {
 		id: r.id,
 		buyerId: r.buyerId,
+		buyerEmail: r.buyer.email,
+		buyerFirstName: r.buyer.firstName,
+		buyerLastName: r.buyer.lastName,
 		sellerProfileId: r.sellerProfileId,
 		sellerUserId: r.sellerProfile.userId,
+		sellerEmail: r.sellerProfile.user.email,
+		sellerFirstName: r.sellerProfile.user.firstName,
+		sellerLastName: r.sellerProfile.user.lastName,
 		originationType: r.originationType,
 		acceptedOfferId:
 			r.originationType === OrderOriginationType.offer_accepted

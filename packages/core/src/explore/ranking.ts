@@ -136,6 +136,38 @@ export interface RankingConfig {
 	 */
 	merchKeywordPenalty: number;
 	/**
+	 * Max low-resolution demerit (explore-ranking-v3 PR1, §5.1.4). Subtracted
+	 * from the base — a hero at/below `resFullPx` min-dimension and with zero
+	 * engagement loses the full `lowResDemerit`; the penalty ramps linearly to 0
+	 * at `resGoodPx` and decays toward 0 as engagement accrues
+	 * (`imageDemeritDecayK`). Demotion-only: a high-res hero earns nothing. This
+	 * is the visible fix for "ugly (low-res) photos at the top of /explore" — the
+	 * offenders are low-resolution slabs/screenshots, not blurry images (blur is
+	 * deferred, §5.1.0). Fully reversible (set to 0); the refresh `ENABLE_IMAGE_
+	 * DEMERIT` kill switch neutralizes it without a version bump.
+	 */
+	lowResDemerit: number;
+	/**
+	 * Min-dimension (px) at/below which the resolution demerit is at full
+	 * strength. `min(heroWidth, heroHeight)` — invariant to the EXIF-orientation
+	 * w/h swap (§5.1.1).
+	 */
+	resFullPx: number;
+	/**
+	 * Min-dimension (px) at/above which the resolution demerit is zero. Tuned
+	 * toward the catalog norm (~1200px median min-dim) so the sub-1000px tail
+	 * (303px slabs, 699px screenshots) sinks while the norm is untouched
+	 * (§5.1.4).
+	 */
+	resGoodPx: number;
+	/**
+	 * Cold-start prior strength for the image demerit's engagement decay
+	 * (`demerit ×= K/(E+K)`, `E = addToCartCount + saveCount`). Full demerit
+	 * while unproven, fading as real engagement judges the listing — a proven
+	 * seller's low-res photo stops being penalized once buyers cart/save it.
+	 */
+	imageDemeritDecayK: number;
+	/**
 	 * Sensitivity of the price-vs-median sigmoid (`k` in
 	 * `mult = 1 + k · tanh(log2(price/median))`). At `k = 0.10` a listing
 	 * priced at half its token's median lands at ~0.92x multiplier; double
@@ -218,8 +250,15 @@ export interface RankingConfig {
  *           stopgap; the durable fix persists the AI-classified `kind` and
  *           gates the feed on it (Phase 2). Bump forces a one-time
  *           recompute so existing merch sinks on the next refresh tick.
+ *   v9 → 10: image-resolution demerit added to the base (explore-ranking-v3
+ *           PR1, §5.1.4). `computeImageDemerit` subtracts a graduated low-res
+ *           penalty keyed off the denormalized `heroWidth`/`heroHeight`, decayed
+ *           by engagement. Demotion-only; fail-open (null dims ⇒ 0). The bump
+ *           forces a one-time recompute so existing listings pick up the demerit
+ *           on the next refresh tick once their hero dims are backfilled. Gated
+ *           by the `ENABLE_IMAGE_DEMERIT` kill switch at the refresh worker.
  */
-export const RANK_BASE_VERSION = 9;
+export const RANK_BASE_VERSION = 10;
 
 /**
  * Lower edge of the price sweet-spot band. Inside `[LO, HI]` the plateau
@@ -276,12 +315,32 @@ export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 		premium: 0.35,
 	},
 	recencyHalfLifeHours: 72,
-	perSellerCap: 3,
+	// Global per-seller cap (NOT per-page): `applyDiversity` keeps a seller's
+	// top-N ranked listings and demotes the rest to the tail, so the feed reads
+	// as a varied market rather than one seller's storefront. Dropped 3 → 2
+	// (explore-ranking-v3 §5.1.6): live-catalog data showed prolific sellers
+	// clustering hard near the top (one seller held 4 of the top 12), and the
+	// image-resolution demerit only breaks up the LOW-RES clusters — a seller
+	// with good 1200px photos still stacks the top without this. Cap 2 lifts
+	// page-one seller diversity from ~8 to ~12 distinct sellers per 24 slots and
+	// spreads top-slot exposure. Demote-not-drop + applied at snapshot build, so
+	// it's instantly reversible with no version bump. Their profile page is the
+	// uncapped storefront.
+	perSellerCap: 2,
 	lowEffortPenalty: 0.12,
 	longTitlePenalty: 0.04,
 	tokenBoostSensitivity: 0.2,
 	negativeKeywordPenalty: 0.08,
 	merchKeywordPenalty: 0.5,
+	// Image-resolution demerit (explore-ranking-v3 PR1, §5.1.4). v1 starting
+	// point validated on the Phase-0 spike: at lowResDemerit 0.15 the 303px
+	// top-of-feed slabs fall from #1-3 to ~#22-28 while the 1200px norm is
+	// untouched (resGoodPx 1100 ≈ just under the catalog median min-dim, so
+	// only the sub-1000px tail is demoted). Tune via a RANK_BASE_VERSION bump.
+	lowResDemerit: 0.15,
+	resFullPx: 500,
+	resGoodPx: 1100,
+	imageDemeritDecayK: 8,
 	priceMultSensitivity: 0.1,
 	priceMultMin: 0.85,
 	priceMultMax: 1.1,
@@ -426,6 +485,16 @@ export interface RankBaseInput {
 	 * without touching other signals.
 	 */
 	priceUSD?: number | null;
+	/**
+	 * Denormalized hero-image width/height in pixels (explore-ranking-v3 PR1).
+	 * Written by the `image-quality` score job, read by the refresh worker from
+	 * `Listing.heroWidth/heroHeight`. Null/undefined when the hero is unscored or
+	 * the probe failed — `computeImageDemerit` fails open to 0 in that case, so an
+	 * unscored or unreadable listing is never penalized. The refresh worker passes
+	 * null for both when the `ENABLE_IMAGE_DEMERIT` kill switch is off.
+	 */
+	heroWidth?: number | null;
+	heroHeight?: number | null;
 }
 
 function clamp01(v: number): number {
@@ -546,10 +615,54 @@ function sweetSpotPlateauShape(priceUSD: number): number {
 }
 
 /**
+ * Resolution-only image demerit (explore-ranking-v3 PR1, §5.1.4). Pure function
+ * over the denormalized hero dimensions + engagement. Demotion-only: a high-res
+ * hero earns nothing, a low-res one is penalized.
+ *
+ *   minDim   = min(heroWidth, heroHeight)            ← EXIF-swap-invariant
+ *   resFrac  = clamp01((resGoodPx − minDim) / (resGoodPx − resFullPx))
+ *   raw      = lowResDemerit · resFrac               ← full at ≤resFullPx, 0 at ≥resGoodPx
+ *   decay    = K / (E + K),  E = addToCartCount + saveCount
+ *   demerit  = raw · decay                           ← fades as engagement proves the listing
+ *
+ * Fail-open is the load-bearing safety property: a null/zero/undefined hero
+ * dimension (unscored listing, or a probe failure that left dims null) yields 0,
+ * so uncertainty never produces a penalty. Blur and aspect are deliberately NOT
+ * here — blur's Laplacian metric proved unreliable and aspect is a presentation
+ * concern, not a ranking signal (§5.1.0).
+ */
+export function computeImageDemerit(
+	input: Pick<
+		RankBaseInput,
+		"heroWidth" | "heroHeight" | "addToCartCount" | "saveCount"
+	>,
+	config: RankingConfig,
+): number {
+	const w = input.heroWidth;
+	const h = input.heroHeight;
+	// Fail-open: unscored or unreadable hero earns no demerit.
+	if (w == null || h == null || w <= 0 || h <= 0) return 0;
+
+	const span = config.resGoodPx - config.resFullPx;
+	if (span <= 0) return 0;
+
+	const minDim = Math.min(w, h);
+	const resFrac = clamp01((config.resGoodPx - minDim) / span);
+	if (resFrac <= 0) return 0;
+
+	const raw = config.lowResDemerit * resFrac;
+	const engagement =
+		Math.max(0, input.addToCartCount ?? 0) + Math.max(0, input.saveCount ?? 0);
+	const decay =
+		config.imageDemeritDecayK / (engagement + config.imageDemeritDecayK);
+	return raw * decay;
+}
+
+/**
  * Time-independent part of the score:
  *   sellerTrust·w + cartAdd·w + save·w + premium·w·plateauShape(price)
  *     − lowEffort?·penalty − longTitle?·penalty − negKeyword?·penalty
- *     − merchKeyword?·penalty
+ *     − merchKeyword?·penalty − imageDemerit
  *
  * The premium term dominates the additive terms by design — at weight 0.35,
  * a sweet-spot listing ($35-$300) contributes the full 0.35 to the base,
@@ -586,6 +699,7 @@ export function computeRankBaseScore(
 	const merchKeyword = matchesMerchKeyword(input.title, input.description)
 		? config.merchKeywordPenalty
 		: 0;
+	const imageDemerit = computeImageDemerit(input, config);
 	return (
 		trust +
 		cartAdd +
@@ -594,7 +708,8 @@ export function computeRankBaseScore(
 		lowEffort -
 		longTitle -
 		negativeKeyword -
-		merchKeyword
+		merchKeyword -
+		imageDemerit
 	);
 }
 
