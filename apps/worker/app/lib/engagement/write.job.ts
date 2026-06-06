@@ -83,6 +83,20 @@ async function flushBuffer(ctx: WorkerContextBase): Promise<void> {
 	}
 }
 
+const UUID_RE =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Coerce a non-UUID value to null before the `::uuid` cast. `referrer_query_id`
+ * arrives straight from a client header (`X-NL-Referrer-Query-Id`), so a
+ * malformed value would otherwise make the cast throw and fail the ENTIRE
+ * batch INSERT — taking up to 100 unrelated events down with it — rather than
+ * just dropping its own attribution. A bad id reads correctly as "unattributed".
+ */
+function asUuidOrNull(value: string | null): string | null {
+	return value && UUID_RE.test(value) ? value : null;
+}
+
 async function bulkInsertEvents(
 	prisma: WorkerContextBase["prisma"],
 	envelopes: EngagementEventEnvelope[],
@@ -103,11 +117,11 @@ async function bulkInsertEvents(
 				${e.sellerId},
 				${e.orderId},
 				${e.surface},
-				${e.queryId}::uuid,
+				${asUuidOrNull(e.queryId)}::uuid,
 				${e.rankPosition}::smallint,
 				${e.rankEpoch},
 				${e.referrerSurface},
-				${e.referrerQueryId}::uuid,
+				${asUuidOrNull(e.referrerQueryId)}::uuid,
 				${e.referrerRankPosition}::smallint,
 				${e.client},
 				${e.appVersion},
