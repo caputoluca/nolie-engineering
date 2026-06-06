@@ -953,14 +953,17 @@ describe("applyDiversity", () => {
 		title = id,
 	): DiversityCandidate => ({ id, sellerProfileId, title });
 
-	it("demotes a seller's 4th item past the cap without dropping anything", () => {
+	it("demotes a seller's items past the cap to the tail without dropping anything", () => {
+		// perSellerCap = 2 (§5.1.6): seller A keeps its top 2 in rank order;
+		// the 3rd and 4th demote to the tail (preserving their relative order),
+		// and the lower-ranked C/D sellers slide up into the kept body.
 		const ordered: DiversityCandidate[] = [
 			cand("a1", "A", "alpha"),
 			cand("b1", "B", "beta"),
 			cand("a2", "A", "gamma"),
 			cand("c1", "C", "delta"),
-			cand("a3", "A", "epsilon"),
-			cand("a4", "A", "zeta"), // 4th from A — over perSellerCap (3)
+			cand("a3", "A", "epsilon"), // 3rd from A — over perSellerCap (2)
+			cand("a4", "A", "zeta"), // 4th from A — over perSellerCap (2)
 			cand("d1", "D", "eta"),
 		];
 
@@ -968,15 +971,10 @@ describe("applyDiversity", () => {
 
 		expect(result).toHaveLength(ordered.length);
 		expect(new Set(result)).toEqual(new Set(ordered.map((c) => c.id)));
-		expect(result[result.length - 1]).toBe("a4");
-		expect(result.slice(0, ordered.length - 1)).toEqual([
-			"a1",
-			"b1",
-			"a2",
-			"c1",
-			"a3",
-			"d1",
-		]);
+		// Kept body: A capped at 2, everyone else in rank order.
+		expect(result.slice(0, 5)).toEqual(["a1", "b1", "a2", "c1", "d1"]);
+		// Tail: A's overflow, original relative order preserved.
+		expect(result.slice(5)).toEqual(["a3", "a4"]);
 	});
 
 	it("demotes a same-seller near-identical duplicate even under the cap", () => {
@@ -993,7 +991,7 @@ describe("applyDiversity", () => {
 	});
 
 	it("holds the per-seller cap across every simulated page slice", () => {
-		const cap = DEFAULT_RANKING_CONFIG.perSellerCap; // 3
+		const cap = DEFAULT_RANKING_CONFIG.perSellerCap; // 2
 		const pageSize = 4;
 
 		const ordered: DiversityCandidate[] = [];

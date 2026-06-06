@@ -315,7 +315,18 @@ export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 		premium: 0.35,
 	},
 	recencyHalfLifeHours: 72,
-	perSellerCap: 3,
+	// Global per-seller cap (NOT per-page): `applyDiversity` keeps a seller's
+	// top-N ranked listings and demotes the rest to the tail, so the feed reads
+	// as a varied market rather than one seller's storefront. Dropped 3 → 2
+	// (explore-ranking-v3 §5.1.6): live-catalog data showed prolific sellers
+	// clustering hard near the top (one seller held 4 of the top 12), and the
+	// image-resolution demerit only breaks up the LOW-RES clusters — a seller
+	// with good 1200px photos still stacks the top without this. Cap 2 lifts
+	// page-one seller diversity from ~8 to ~12 distinct sellers per 24 slots and
+	// spreads top-slot exposure. Demote-not-drop + applied at snapshot build, so
+	// it's instantly reversible with no version bump. Their profile page is the
+	// uncapped storefront.
+	perSellerCap: 2,
 	lowEffortPenalty: 0.12,
 	longTitlePenalty: 0.04,
 	tokenBoostSensitivity: 0.2,
