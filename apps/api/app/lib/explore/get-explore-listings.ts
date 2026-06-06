@@ -30,12 +30,30 @@ export interface ExploreImpression {
 	listingId: string;
 	sellerId: string;
 	rankPosition: number;
+	/**
+	 * Originating feed query id. Set by the ranked path so the emitted
+	 * impression carries the SAME id the client echoes on a later action —
+	 * the join key. Omitted by legacy/sort, where the emit falls back to the
+	 * per-request id (those paths don't carry a stable cross-page id).
+	 */
+	queryId?: string;
 }
 
-interface LoadExploreListingsResult {
+interface PageSlice {
 	listings: ExploreListingSummary[];
 	nextCursor: string | null;
 	impressions: ExploreImpression[];
+}
+
+interface LoadExploreListingsResult extends PageSlice {
+	/**
+	 * The query id this page is attributed under — the value the route echoes
+	 * back to the client, which then stamps it on every downstream action.
+	 * The ranked path carries it across pages via the cursor so all pages of
+	 * one scroll share it (otherwise page 2+ impressions and their actions
+	 * land under different ids and never join). Legacy/sort use the request id.
+	 */
+	queryId: string;
 }
 
 /**
@@ -119,7 +137,7 @@ type LegacyExploreQuery = Pick<ExploreQueryType, "cursor" | "limit">;
 async function loadExploreListings(
 	db: DbClient,
 	query: LegacyExploreQuery,
-): Promise<LoadExploreListingsResult> {
+): Promise<PageSlice> {
 	const { cursor, limit = DEFAULT_EXPLORE_LIMIT } = query;
 
 	const listings = await queryListings(db, {
@@ -159,7 +177,7 @@ async function legacyGetExploreListings(
 	db: DbClient,
 	query: ExploreQueryType,
 	exploreListingsCache: CacheOf<"exploreListings">,
-): Promise<LoadExploreListingsResult> {
+): Promise<PageSlice> {
 	const { limit, cursor } = query;
 
 	if (limit === DEFAULT_EXPLORE_LIMIT && !cursor) {
@@ -187,6 +205,14 @@ interface ExploreCursor {
 	e: number;
 	/** offset into the frozen ID array. */
 	o: number;
+	/**
+	 * Originating feed query id, minted on page 0 and carried forward on every
+	 * page so all pages of one scroll share it. Optional only for backward
+	 * compatibility: cursors minted before this shipped lack `q` and decode to
+	 * `undefined`, falling back to the per-request id (the old behavior) for
+	 * that one continuation — no crash, self-heals on the next fresh page 0.
+	 */
+	q?: string;
 }
 
 function encodeCursor(c: ExploreCursor): string {
@@ -197,7 +223,7 @@ function decodeCursor(raw: string): ExploreCursor | null {
 	try {
 		const c = JSON.parse(Buffer.from(raw, "base64url").toString());
 		if (typeof c?.e === "number" && typeof c?.o === "number") {
-			return { e: c.e, o: c.o };
+			return { e: c.e, o: c.o, q: typeof c?.q === "string" ? c.q : undefined };
 		}
 	} catch {
 		// Malformed/foreign cursor (e.g. a legacy id-cursor after a kill-switch
@@ -266,6 +292,7 @@ async function hydrateWindow(
 	db: DbClient,
 	window: string[],
 	offset: number,
+	queryId: string,
 ): Promise<HydratedWindow> {
 	if (window.length === 0) return { listings: [], impressions: [] };
 	const records = await queryListings(db, {
@@ -286,6 +313,7 @@ async function hydrateWindow(
 				listingId: record.id,
 				sellerId: record.sellerProfileId,
 				rankPosition: position,
+				queryId,
 			});
 		}
 	}
@@ -297,10 +325,15 @@ async function loadRankedExploreListings(
 	query: ExploreQueryType,
 	snapshotCache: CacheOf<"exploreSnapshot">,
 	currentEpoch: number,
+	requestQueryId: string,
 ): Promise<LoadExploreListingsResult> {
 	const limit = query.limit ?? DEFAULT_EXPLORE_LIMIT;
 	const parsed = query.cursor ? decodeCursor(query.cursor) : null;
 	const offset = parsed?.o ?? 0;
+	// Page 0 mints the feed query id (this request's id); every later page
+	// recovers it from the cursor. So all pages of one scroll — and the actions
+	// taken on them — attribute under one id and join cleanly.
+	const queryId = parsed?.q ?? requestQueryId;
 
 	const loadSnapshot = (epoch: number) =>
 		snapshotCache.get(`${epoch}`, {
@@ -323,14 +356,19 @@ async function loadRankedExploreListings(
 	const snap = frozen ?? (await loadSnapshot(currentEpoch));
 
 	const window = snap.ids.slice(offset, offset + limit);
-	const { listings, impressions } = await hydrateWindow(db, window, offset);
+	const { listings, impressions } = await hydrateWindow(
+		db,
+		window,
+		offset,
+		queryId,
+	);
 	const nextOffset = offset + limit;
 	const nextCursor =
 		nextOffset < snap.ids.length
-			? encodeCursor({ e: effectiveEpoch, o: nextOffset })
+			? encodeCursor({ e: effectiveEpoch, o: nextOffset, q: queryId })
 			: null;
 
-	return { listings, nextCursor, impressions };
+	return { listings, nextCursor, impressions, queryId };
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +383,12 @@ function parseEpoch(raw: string | null | undefined): number {
 interface GetExploreListingsInput {
 	db: DbClient;
 	query: ExploreQueryType;
+	/**
+	 * The request's per-request id (`request.queryId`). On page 0 it becomes
+	 * the feed query id minted into the cursor; on later pages it's only a
+	 * fallback (the cursor carries the real one). Legacy/sort use it directly.
+	 */
+	queryId: string;
 	caches: {
 		exploreListings: CacheOf<"exploreListings">;
 		exploreSnapshot: CacheOf<"exploreSnapshot">;
@@ -353,8 +397,8 @@ interface GetExploreListingsInput {
 	/**
 	 * Per-request impression emit hook. Invoked once after the page slice is
 	 * built, with one entry per returned listing. Callback owns the surface
-	 * and rank epoch, the lib owns the rank position. Skipped on legacy /
-	 * kill-switch / sort-mode paths (no meaningful rank position to record).
+	 * and rank epoch, the lib owns the rank position + (ranked path) query id.
+	 * Skipped on legacy / kill-switch paths (no meaningful rank position).
 	 */
 	onImpressions?: (impressions: ExploreImpression[]) => void;
 }
@@ -362,16 +406,18 @@ interface GetExploreListingsInput {
 export async function getExploreListings(
 	input: GetExploreListingsInput,
 ): Promise<LoadExploreListingsResult> {
-	const { db, query, caches, redis, onImpressions } = input;
+	const { db, query, queryId, caches, redis, onImpressions } = input;
 
 	// Sort modes bypass the ranking + caching system entirely. Opt-in feature,
-	// low traffic; forking the snapshot cache per sort would blow memory.
+	// low traffic; forking the snapshot cache per sort would blow memory. Its
+	// impressions don't carry a cross-page query id (integer-offset cursor), so
+	// they fall back to the request id at emit time — acceptable for an opt-in.
 	if (query.sort && query.sort !== "featured") {
 		const result = await loadSortedExploreListings(db, query);
 		if (onImpressions && result.impressions.length > 0) {
 			onImpressions(result.impressions);
 		}
-		return result;
+		return { ...result, queryId };
 	}
 
 	// Kill switch + rank epoch in one round trip, not two. Fail-safe (§10):
@@ -388,11 +434,17 @@ export async function getExploreListings(
 			EXPLORE_RANK_EPOCH_KEY,
 		);
 	} catch {
-		return legacyGetExploreListings(db, query, caches.exploreListings);
+		return {
+			...(await legacyGetExploreListings(db, query, caches.exploreListings)),
+			queryId,
+		};
 	}
 
 	if (enabledRaw !== "1") {
-		return legacyGetExploreListings(db, query, caches.exploreListings);
+		return {
+			...(await legacyGetExploreListings(db, query, caches.exploreListings)),
+			queryId,
+		};
 	}
 	// Defensive degrade: the switch read above is fail-safe, but the ranked
 	// path itself must never 500 /explore on an unforeseen data edge. A throw
@@ -404,6 +456,7 @@ export async function getExploreListings(
 			query,
 			caches.exploreSnapshot,
 			parseEpoch(epochRaw),
+			queryId,
 		);
 		if (onImpressions && result.impressions.length > 0) {
 			onImpressions(result.impressions);
@@ -415,6 +468,9 @@ export async function getExploreListings(
 			{ err, event: "explore_ranked_fallback" },
 			"ranked explore path threw; serving legacy",
 		);
-		return legacyGetExploreListings(db, query, caches.exploreListings);
+		return {
+			...(await legacyGetExploreListings(db, query, caches.exploreListings)),
+			queryId,
+		};
 	}
 }
