@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
 	applyDiversity,
+	computeImageDemerit,
+	computePriceMult,
 	computeRankBaseScore,
 	computeRankScore,
 	computeTokenBoost,
 	DEFAULT_RANKING_CONFIG,
 	type DiversityCandidate,
 	LONG_TITLE_MAX_CHARS,
+	matchesMerchKeyword,
+	matchesNegativeKeyword,
 	PLATEAU_HI_USD,
 	PLATEAU_LO_USD,
 	type RankingConfig,
@@ -429,18 +433,12 @@ describe("computeRankBaseScore", () => {
 
 describe("matchesNegativeKeyword", () => {
 	it("matches case-insensitively in title", async () => {
-		const { matchesNegativeKeyword } = await import(
-			"../../src/explore/ranking"
-		);
 		expect(matchesNegativeKeyword("WOODEN Eevee Card", null)).toBe(true);
 		expect(matchesNegativeKeyword("Wooden Eevee Card", null)).toBe(true);
 		expect(matchesNegativeKeyword("Real PSA 10 Eevee", null)).toBe(false);
 	});
 
 	it("respects word boundaries to avoid false positives", async () => {
-		const { matchesNegativeKeyword } = await import(
-			"../../src/explore/ranking"
-		);
 		// "approximately" contains "proxy" as substring but not as whole word.
 		expect(matchesNegativeKeyword("Approximately NM Card", null)).toBe(false);
 		// Direct "proxy" should still fire.
@@ -448,18 +446,12 @@ describe("matchesNegativeKeyword", () => {
 	});
 
 	it("handles hyphenated variants", async () => {
-		const { matchesNegativeKeyword } = await import(
-			"../../src/explore/ranking"
-		);
 		expect(matchesNegativeKeyword("Hand-Carved Eevee", null)).toBe(true);
 		expect(matchesNegativeKeyword("Hand Carved Eevee", null)).toBe(true);
 		expect(matchesNegativeKeyword("Hand-made Pikachu", null)).toBe(true);
 	});
 
 	it("returns false for a clean listing", async () => {
-		const { matchesNegativeKeyword } = await import(
-			"../../src/explore/ranking"
-		);
 		expect(
 			matchesNegativeKeyword(
 				"Charizard ex Holo PSA 10",
@@ -471,14 +463,12 @@ describe("matchesNegativeKeyword", () => {
 
 describe("matchesMerchKeyword", () => {
 	it("matches case-insensitively in title", async () => {
-		const { matchesMerchKeyword } = await import("../../src/explore/ranking");
 		expect(matchesMerchKeyword("PIKACHU HAT", null)).toBe(true);
 		expect(matchesMerchKeyword("Pikachu Premium Playmat", null)).toBe(true);
 		expect(matchesMerchKeyword("Charizard ex PSA 10", null)).toBe(false);
 	});
 
 	it("respects word boundaries to avoid false positives on real cards", async () => {
-		const { matchesMerchKeyword } = await import("../../src/explore/ranking");
 		expect(matchesMerchKeyword("Captain Pikachu 131/131", null)).toBe(false);
 		expect(matchesMerchKeyword("1996 Magneton 082/165", null)).toBe(false);
 		expect(matchesMerchKeyword("Hatterene V Alt Art", null)).toBe(false);
@@ -486,7 +476,6 @@ describe("matchesMerchKeyword", () => {
 	});
 
 	it("handles multi-word and hyphenated variants", async () => {
-		const { matchesMerchKeyword } = await import("../../src/explore/ranking");
 		expect(matchesMerchKeyword("Charizard T-Shirt", null)).toBe(true);
 		expect(matchesMerchKeyword("Charizard T Shirt", null)).toBe(true);
 		expect(matchesMerchKeyword("Tournament Play Mat", null)).toBe(true);
@@ -494,7 +483,6 @@ describe("matchesMerchKeyword", () => {
 	});
 
 	it("does not match sealed product (deliberately excluded)", async () => {
-		const { matchesMerchKeyword } = await import("../../src/explore/ranking");
 		expect(matchesMerchKeyword("Elite Trainer Box", null)).toBe(false);
 		expect(matchesMerchKeyword("Booster Box 36 Packs", null)).toBe(false);
 		expect(matchesMerchKeyword("Crown Zenith Pin Collection", null)).toBe(
@@ -503,7 +491,6 @@ describe("matchesMerchKeyword", () => {
 	});
 
 	it("returns false for a clean card listing", async () => {
-		const { matchesMerchKeyword } = await import("../../src/explore/ranking");
 		expect(
 			matchesMerchKeyword(
 				"Charizard ex Holo PSA 10",
@@ -795,7 +782,6 @@ describe("computeTokenBoost", () => {
 
 describe("computePriceMult", () => {
 	it("returns 1.0 (neutral) when the listing has no price", async () => {
-		const { computePriceMult } = await import("../../src/explore/ranking");
 		const mult = computePriceMult(
 			{ priceUSD: null, refMedianUSD: 50 },
 			DEFAULT_RANKING_CONFIG,
@@ -804,7 +790,6 @@ describe("computePriceMult", () => {
 	});
 
 	it("returns 1.0 (neutral) when no token median is available", async () => {
-		const { computePriceMult } = await import("../../src/explore/ranking");
 		const mult = computePriceMult(
 			{ priceUSD: 25, refMedianUSD: null },
 			DEFAULT_RANKING_CONFIG,
@@ -813,7 +798,6 @@ describe("computePriceMult", () => {
 	});
 
 	it("returns exactly 1.0 at the median (log2(1) = 0 → tanh(0) = 0)", async () => {
-		const { computePriceMult } = await import("../../src/explore/ranking");
 		const mult = computePriceMult(
 			{ priceUSD: 50, refMedianUSD: 50 },
 			DEFAULT_RANKING_CONFIG,
@@ -822,7 +806,6 @@ describe("computePriceMult", () => {
 	});
 
 	it("demotes below-median listings (e.g. $5 vs $50 median ≈ 0.90x)", async () => {
-		const { computePriceMult } = await import("../../src/explore/ranking");
 		// ratio = 0.1, log2(0.1) ≈ -3.32, tanh ≈ -0.998
 		// mult = 1 + 0.10 · (-0.998) ≈ 0.900
 		const mult = computePriceMult(
@@ -834,7 +817,6 @@ describe("computePriceMult", () => {
 	});
 
 	it("lifts above-median listings (e.g. $100 vs $50 median ≈ 1.08x)", async () => {
-		const { computePriceMult } = await import("../../src/explore/ranking");
 		// ratio = 2.0, log2(2) = 1, tanh(1) ≈ 0.762
 		// mult = 1 + 0.10 · 0.762 ≈ 1.076
 		const mult = computePriceMult(
@@ -846,7 +828,6 @@ describe("computePriceMult", () => {
 	});
 
 	it("clamps to priceMultMin for extreme below-median (saturates the sigmoid)", async () => {
-		const { computePriceMult } = await import("../../src/explore/ranking");
 		// ratio ≈ 0.001 — well past the 0.01 floor. tanh(log2(0.01)) = tanh(-6.64) ≈ -1
 		// mult ≈ 1 - 0.10 = 0.90, which is within [0.85, 1.10] — not clamped to floor.
 		// To force the floor we'd need a more aggressive k. Verify with k=0.30:
@@ -862,7 +843,6 @@ describe("computePriceMult", () => {
 	});
 
 	it("clamps to priceMultMax for extreme above-median", async () => {
-		const { computePriceMult } = await import("../../src/explore/ranking");
 		// $5000 vs $50 median = 100x; sigmoid saturates near +1.
 		// With k=0.30 aggressive: mult = 1 + 0.30 ≈ 1.30, clamped to 1.10.
 		const aggressive = {
@@ -877,7 +857,6 @@ describe("computePriceMult", () => {
 	});
 
 	it("treats priceUSD ≤ 0 as neutral (defensive against bad data)", async () => {
-		const { computePriceMult } = await import("../../src/explore/ranking");
 		expect(
 			computePriceMult(
 				{ priceUSD: 0, refMedianUSD: 50 },
@@ -893,7 +872,6 @@ describe("computePriceMult", () => {
 	});
 
 	it("the priceMultSensitivity knob is fully reversible (0 ⇒ no adjustment)", async () => {
-		const { computePriceMult } = await import("../../src/explore/ranking");
 		// k=0 collapses the sigmoid contribution to zero; mult is always 1.0
 		// regardless of the price/median ratio.
 		const off = { ...DEFAULT_RANKING_CONFIG, priceMultSensitivity: 0 };
@@ -1055,5 +1033,139 @@ describe("applyDiversity", () => {
 		}
 
 		expect(kept.filter((id) => id.startsWith("a"))).toHaveLength(cap);
+	});
+});
+
+describe("computeImageDemerit", () => {
+	const cfg = DEFAULT_RANKING_CONFIG;
+	const DEMERIT = cfg.lowResDemerit; // 0.15
+	const K = cfg.imageDemeritDecayK; // 8
+
+	it("fails open to 0 on missing or non-positive dimensions", () => {
+		// Unscored / unreadable hero ⇒ never a penalty under uncertainty.
+		expect(computeImageDemerit({}, cfg)).toBe(0);
+		expect(
+			computeImageDemerit({ heroWidth: 1200, heroHeight: null }, cfg),
+		).toBe(0);
+		expect(
+			computeImageDemerit({ heroWidth: null, heroHeight: 1200 }, cfg),
+		).toBe(0);
+		expect(computeImageDemerit({ heroWidth: 0, heroHeight: 0 }, cfg)).toBe(0);
+		expect(computeImageDemerit({ heroWidth: -10, heroHeight: 1200 }, cfg)).toBe(
+			0,
+		);
+	});
+
+	it("earns no demerit at or above resGoodPx (demotion-only)", () => {
+		expect(
+			computeImageDemerit(
+				{ heroWidth: cfg.resGoodPx, heroHeight: cfg.resGoodPx },
+				cfg,
+			),
+		).toBe(0);
+		// The catalog norm (~1200px min-dim) is untouched.
+		expect(
+			computeImageDemerit({ heroWidth: 1200, heroHeight: 1600 }, cfg),
+		).toBe(0);
+	});
+
+	it("applies the full demerit at or below resFullPx with no engagement", () => {
+		// The literal top-of-feed offenders: 303px CGC slabs.
+		expect(
+			computeImageDemerit({ heroWidth: 303, heroHeight: 303 }, cfg),
+		).toBeCloseTo(DEMERIT, 10);
+		expect(
+			computeImageDemerit(
+				{ heroWidth: cfg.resFullPx, heroHeight: cfg.resFullPx },
+				cfg,
+			),
+		).toBeCloseTo(DEMERIT, 10);
+	});
+
+	it("ramps linearly between resFullPx and resGoodPx", () => {
+		// Midpoint of [500, 1100] = 800 ⇒ resFrac 0.5 ⇒ half the demerit.
+		const midDim = (cfg.resFullPx + cfg.resGoodPx) / 2;
+		expect(
+			computeImageDemerit({ heroWidth: midDim, heroHeight: midDim }, cfg),
+		).toBeCloseTo(DEMERIT * 0.5, 10);
+	});
+
+	it("keys off min(width, height) — EXIF-orientation-swap invariant", () => {
+		// A 1600×303 landscape and a 303×1600 portrait demerit identically.
+		const landscape = computeImageDemerit(
+			{ heroWidth: 1600, heroHeight: 303 },
+			cfg,
+		);
+		const portrait = computeImageDemerit(
+			{ heroWidth: 303, heroHeight: 1600 },
+			cfg,
+		);
+		expect(landscape).toBeCloseTo(DEMERIT, 10);
+		expect(landscape).toBe(portrait);
+	});
+
+	it("decays toward 0 as engagement accrues (× K/(E+K))", () => {
+		// E = addToCartCount + saveCount = K ⇒ exactly half the raw demerit.
+		const halfDecayed = computeImageDemerit(
+			{ heroWidth: 303, heroHeight: 303, addToCartCount: K, saveCount: 0 },
+			cfg,
+		);
+		expect(halfDecayed).toBeCloseTo(DEMERIT * 0.5, 10);
+
+		// Carts and saves both count toward E.
+		const split = computeImageDemerit(
+			{ heroWidth: 303, heroHeight: 303, addToCartCount: 4, saveCount: 4 },
+			cfg,
+		);
+		expect(split).toBeCloseTo(DEMERIT * 0.5, 10);
+
+		// Heavy engagement nearly erases the demerit.
+		const proven = computeImageDemerit(
+			{ heroWidth: 303, heroHeight: 303, addToCartCount: 92, saveCount: 0 },
+			cfg,
+		);
+		expect(proven).toBeCloseTo(DEMERIT * (K / (92 + K)), 10);
+	});
+
+	it("is subtracted from computeRankBaseScore for a low-res hero", () => {
+		// Two identical listings; only the hero resolution differs. The low-res
+		// one's base is lower by exactly its (undecayed) demerit.
+		const normal = computeRankBaseScore(
+			{
+				title: SHORT_TITLE,
+				description: TEMPLATE_DESC,
+				heroWidth: 1200,
+				heroHeight: 1600,
+			},
+			cfg,
+		);
+		const lowRes = computeRankBaseScore(
+			{
+				title: SHORT_TITLE,
+				description: TEMPLATE_DESC,
+				heroWidth: 300,
+				heroHeight: 400,
+			},
+			cfg,
+		);
+		expect(normal - lowRes).toBeCloseTo(DEMERIT, 10);
+	});
+
+	it("leaves the base score unchanged when hero dims are absent (kill-switch path)", () => {
+		// The refresh worker passes null dims when ENABLE_IMAGE_DEMERIT is off.
+		const withDims = computeRankBaseScore(
+			{
+				title: SHORT_TITLE,
+				description: TEMPLATE_DESC,
+				heroWidth: null,
+				heroHeight: null,
+			},
+			cfg,
+		);
+		const withoutDims = computeRankBaseScore(
+			{ title: SHORT_TITLE, description: TEMPLATE_DESC },
+			cfg,
+		);
+		expect(withDims).toBe(withoutDims);
 	});
 });
