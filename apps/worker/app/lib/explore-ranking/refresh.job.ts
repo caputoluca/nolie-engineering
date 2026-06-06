@@ -219,6 +219,11 @@ interface RankableListing {
 	 * (NL-239). Worker reads only — unlike `addToCartCount`, which the
 	 * worker is the sole writer of. */
 	saveCount: number;
+	/** Denormalized hero-image dimensions, written by the `image-quality` score
+	 * job (explore-ranking-v3 PR1). Null until the hero is scored or on a probe
+	 * failure — the resolution demerit fails open to 0 on null. */
+	heroWidth: number | null;
+	heroHeight: number | null;
 }
 
 /**
@@ -380,6 +385,8 @@ async function loadRankableListings(
 			startingBid: true,
 			listingType: true,
 			saveCount: true,
+			heroWidth: true,
+			heroHeight: true,
 		},
 	});
 }
@@ -758,6 +765,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 	const saveSignalEnabled = process.env.ENABLE_SAVE_SIGNAL !== "false";
 	const priceMultEnabled = process.env.ENABLE_PRICE_MULT !== "false";
 	const premiumPriceEnabled = process.env.ENABLE_PREMIUM_PRICE !== "false";
+	const imageDemeritEnabled = process.env.ENABLE_IMAGE_DEMERIT !== "false";
 
 	let scoreMin = Number.POSITIVE_INFINITY;
 	let scoreMax = Number.NEGATIVE_INFINITY;
@@ -856,6 +864,10 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 				addToCartCount,
 				saveCount,
 				priceUSD: premiumPriceEnabled ? priceUSD : null,
+				// Kill switch: pass null dims when disabled → the demerit
+				// collapses to 0 without touching any other signal.
+				heroWidth: imageDemeritEnabled ? r.heroWidth : null,
+				heroHeight: imageDemeritEnabled ? r.heroHeight : null,
 			},
 			DEFAULT_RANKING_CONFIG,
 		);
@@ -942,6 +954,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			saveSignalEnabled,
 			priceMultEnabled,
 			premiumPriceEnabled,
+			imageDemeritEnabled,
 			durationMs: Date.now() - start,
 			scoreMin: Number.isFinite(scoreMin) ? scoreMin : null,
 			scoreMax: Number.isFinite(scoreMax) ? scoreMax : null,
