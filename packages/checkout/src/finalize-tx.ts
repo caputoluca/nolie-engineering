@@ -54,6 +54,12 @@ export interface OrderForFinalization {
 	buyerLastName: string | null;
 	sellerProfileId: string;
 	sellerUserId: string;
+	/** Seller's CURRENT email/name (the User relation) — the Klaviyo identity
+	 *  spine for the seller-side `sale_completed` event (NL-353), same live-email
+	 *  rationale as the buyer fields above. */
+	sellerEmail: string;
+	sellerFirstName: string | null;
+	sellerLastName: string | null;
 	originationType: OrderOriginationType;
 	acceptedOfferId: string | null;
 	fulfillmentMode: FulfillmentMode;
@@ -164,7 +170,12 @@ const ORDER_FOR_FINALIZATION_SELECT = {
 	buyerId: true,
 	buyer: { select: { email: true, firstName: true, lastName: true } },
 	sellerProfileId: true,
-	sellerProfile: { select: { userId: true } },
+	sellerProfile: {
+		select: {
+			userId: true,
+			user: { select: { email: true, firstName: true, lastName: true } },
+		},
+	},
 	originationType: true,
 	originationRef: true,
 	fulfillmentMode: true,
@@ -223,6 +234,9 @@ function toOrderForFinalization(
 		buyerLastName: r.buyer.lastName,
 		sellerProfileId: r.sellerProfileId,
 		sellerUserId: r.sellerProfile.userId,
+		sellerEmail: r.sellerProfile.user.email,
+		sellerFirstName: r.sellerProfile.user.firstName,
+		sellerLastName: r.sellerProfile.user.lastName,
 		originationType: r.originationType,
 		acceptedOfferId:
 			r.originationType === OrderOriginationType.offer_accepted
