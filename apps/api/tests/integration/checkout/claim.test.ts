@@ -255,6 +255,56 @@ describe("POST /checkout/claim", () => {
 			expect(order.lineItems[0]?.referrerSurface).toBe("explore");
 		});
 
+		it("Buy-Now request referrer wins over a stale cart triad for the same listing", async () => {
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 500,
+			});
+			const buyer = await setupReadyBuyer();
+			// The buyer once added this listing to their cart from one feed slot
+			// (triad A), then later bought it via Buy-Now from a different slot
+			// (triad B, on the claim headers). The Buy-Now slot is the one that
+			// drove the conversion, so it must win — otherwise the purchase is
+			// mis-attributed to the older cart-add slot.
+			await prisma.cartItem.create({
+				data: {
+					buyerId: buyer.session.user.id,
+					listingId: seller.listing.id,
+					priceCentsAtAdd: 5000,
+					referrerQueryId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+					referrerRankPosition: 9,
+					referrerSurface: "home",
+				},
+			});
+
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const response = await postClaim(
+				buyer.api,
+				{
+					quoteId,
+					paymentMethodId: buyer.paymentMethodId,
+					idempotencyKey: uniqueIdempotencyKey("buynow-wins"),
+				},
+				{
+					"x-nl-referrer-query-id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+					"x-nl-referrer-rank-position": "2",
+					"x-nl-referrer-surface": "explore",
+				},
+			);
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+			expect(order.lineItems[0]?.referrerQueryId).toBe(
+				"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+			);
+			expect(order.lineItems[0]?.referrerRankPosition).toBe(2);
+			expect(order.lineItems[0]?.referrerSurface).toBe("explore");
+		});
+
 		it("stamps the four NL-230 ship due-columns on a shipping checkout order", async () => {
 			const seller = await setupSellerWithListing({
 				price: 50,
