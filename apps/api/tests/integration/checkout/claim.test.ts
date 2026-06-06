@@ -177,6 +177,134 @@ describe("POST /checkout/claim", () => {
 			expect(quote.consumedByOrderId).toBe(order.id);
 		});
 
+		it("carries the cart item's referrer triad onto the OrderLineItem at claim", async () => {
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 500,
+			});
+			const buyer = await setupReadyBuyer();
+			// The buyer discovered the listing in the explore feed; the triad was
+			// stored on the cart item at add time. The claim re-reads listings by
+			// id, so it must re-attach the cart referrer — otherwise the purchase
+			// can't be joined back to the feed slot (this was 0% before the fix).
+			await prisma.cartItem.create({
+				data: {
+					buyerId: buyer.session.user.id,
+					listingId: seller.listing.id,
+					priceCentsAtAdd: 5000,
+					referrerQueryId: "11111111-1111-4111-8111-111111111111",
+					referrerRankPosition: 7,
+					referrerSurface: "explore",
+				},
+			});
+
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const response = await postClaim(buyer.api, {
+				quoteId,
+				paymentMethodId: buyer.paymentMethodId,
+				idempotencyKey: uniqueIdempotencyKey("referrer"),
+			});
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+			expect(order.lineItems[0]?.referrerQueryId).toBe(
+				"11111111-1111-4111-8111-111111111111",
+			);
+			expect(order.lineItems[0]?.referrerRankPosition).toBe(7);
+			expect(order.lineItems[0]?.referrerSurface).toBe("explore");
+		});
+
+		it("falls back to the claim request's referrer header for a cartless Buy-Now line", async () => {
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 500,
+			});
+			const buyer = await setupReadyBuyer();
+			// Buy-Now bypasses the cart (no CartItem), so the buyer's PDP triad
+			// rides the claim request's X-NL-Referrer-* headers; materializeOrders
+			// uses it as the per-line fallback when the line has no cart triad.
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const response = await postClaim(
+				buyer.api,
+				{
+					quoteId,
+					paymentMethodId: buyer.paymentMethodId,
+					idempotencyKey: uniqueIdempotencyKey("buynow-referrer"),
+				},
+				{
+					"x-nl-referrer-query-id": "22222222-2222-4222-8222-222222222222",
+					"x-nl-referrer-rank-position": "3",
+					"x-nl-referrer-surface": "explore",
+				},
+			);
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+			expect(order.lineItems[0]?.referrerQueryId).toBe(
+				"22222222-2222-4222-8222-222222222222",
+			);
+			expect(order.lineItems[0]?.referrerRankPosition).toBe(3);
+			expect(order.lineItems[0]?.referrerSurface).toBe("explore");
+		});
+
+		it("Buy-Now request referrer wins over a stale cart triad for the same listing", async () => {
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 500,
+			});
+			const buyer = await setupReadyBuyer();
+			// The buyer once added this listing to their cart from one feed slot
+			// (triad A), then later bought it via Buy-Now from a different slot
+			// (triad B, on the claim headers). The Buy-Now slot is the one that
+			// drove the conversion, so it must win — otherwise the purchase is
+			// mis-attributed to the older cart-add slot.
+			await prisma.cartItem.create({
+				data: {
+					buyerId: buyer.session.user.id,
+					listingId: seller.listing.id,
+					priceCentsAtAdd: 5000,
+					referrerQueryId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+					referrerRankPosition: 9,
+					referrerSurface: "home",
+				},
+			});
+
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const response = await postClaim(
+				buyer.api,
+				{
+					quoteId,
+					paymentMethodId: buyer.paymentMethodId,
+					idempotencyKey: uniqueIdempotencyKey("buynow-wins"),
+				},
+				{
+					"x-nl-referrer-query-id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+					"x-nl-referrer-rank-position": "2",
+					"x-nl-referrer-surface": "explore",
+				},
+			);
+			const body = await assertResponse<{ orderIds: string[] }>(response, 200);
+
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+			expect(order.lineItems[0]?.referrerQueryId).toBe(
+				"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+			);
+			expect(order.lineItems[0]?.referrerRankPosition).toBe(2);
+			expect(order.lineItems[0]?.referrerSurface).toBe("explore");
+		});
+
 		it("stamps the four NL-230 ship due-columns on a shipping checkout order", async () => {
 			const seller = await setupSellerWithListing({
 				price: 50,

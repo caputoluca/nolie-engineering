@@ -88,6 +88,17 @@ interface MaterializeInput {
 	 *  buyer claimed. Sellers not on vacation are absent — the snapshot
 	 *  helper handles `null` and writes null fields for those orders. */
 	vacationBySellerProfileId: Map<string, SellerVacationPeriod>;
+	/** §19 — the claim request's originating impression triad. Only ever
+	 *  populated on a Buy-Now claim (the cart-checkout URL carries no referrer
+	 *  headers), where the buyer's PDP triad rides the claim request. Takes
+	 *  precedence over the cart-item triad per line, since the Buy-Now slot is
+	 *  the one that drove the conversion. All-null on a cart checkout or a
+	 *  referrer-less claim, in which case the per-line cart triad is used. */
+	requestReferrer: {
+		queryId: string | null;
+		rankPosition: number | null;
+		surface: string | null;
+	};
 }
 
 /**
@@ -220,6 +231,24 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			applicationFeeCents += totals.applicationFeeCents;
 			processingFeeCents += totals.processingFeeCents;
 
+			// §19 — resolve the originating-impression triad as a unit. The claim
+			// request's PDP triad wins when present: it only ever exists on a
+			// Buy-Now (the cart-checkout URL carries no referrer), and it's the
+			// slot that actually drove the conversion — so it must beat any older
+			// cart-add triad for the same listing (a buyer can have X in their
+			// cart AND Buy-Now X). Otherwise fall back to the cart-item triad
+			// carried on the CheckoutListing (the normal cart path; null on a
+			// referrer-less direct quote). The settle worker reads these off the
+			// line to stamp `purchase_completed`.
+			const lineReferrer =
+				input.requestReferrer.queryId != null
+					? input.requestReferrer
+					: {
+							queryId: listing.referrerQueryId,
+							rankPosition: listing.referrerRankPosition,
+							surface: listing.referrerSurface,
+						};
+
 			lineItemRows.push({
 				orderId: group.orderId,
 				listingId: listing.id,
@@ -232,12 +261,9 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 				applicationFeeCents: totals.applicationFeeCents,
 				processingFeeCents: totals.processingFeeCents,
 				sellerEarningCents: lineSellerEarning,
-				// §19 — forward the cart-item's referrer triad (null on the
-				// direct-quote path that bypasses cart). Settle worker reads
-				// these to stamp the `purchase_completed` event envelope.
-				referrerQueryId: listing.referrerQueryId,
-				referrerRankPosition: listing.referrerRankPosition,
-				referrerSurface: listing.referrerSurface,
+				referrerQueryId: lineReferrer.queryId,
+				referrerRankPosition: lineReferrer.rankPosition,
+				referrerSurface: lineReferrer.surface,
 			});
 		}
 
