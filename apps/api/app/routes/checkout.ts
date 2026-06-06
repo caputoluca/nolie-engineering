@@ -135,6 +135,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				marketing: app.marketing,
 				buyerId: request.session.user.id,
 				body: request.body,
+				requestReferrer: request.referrer,
 			});
 			return reply.status(200).send(result);
 		},

@@ -78,6 +78,15 @@ interface ClaimInput {
 		paymentMethodId: string;
 		idempotencyKey: string;
 	};
+	/** §19 — the claim request's originating-impression triad (from the
+	 *  `X-NL-Referrer-*` headers). Fallback for cartless Buy-Now lines whose
+	 *  triad rides the claim request rather than a cart item. All-null when the
+	 *  client sent no referrer headers. */
+	requestReferrer: {
+		queryId: string | null;
+		rankPosition: number | null;
+		surface: string | null;
+	};
 }
 
 /**
@@ -149,7 +158,7 @@ export async function claimCheckout(
 
 	const [{ listings, unavailableListingIds }, buyer, spendable] =
 		await Promise.all([
-			partitionCheckoutListings(db, listingIds),
+			partitionCheckoutListings(db, buyerId, listingIds),
 			db.user.findUnique({
 				where: { id: buyerId },
 				select: {
@@ -489,6 +498,7 @@ export async function claimCheckout(
 			paymentMethodBrand: paymentMethod.brand,
 			paymentMethodLast4: paymentMethod.last4,
 			vacationBySellerProfileId,
+			requestReferrer: input.requestReferrer,
 		});
 
 		// Credit holds — batched. One wallet CAS + one createManyAndReturn

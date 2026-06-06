@@ -88,6 +88,16 @@ interface MaterializeInput {
 	 *  buyer claimed. Sellers not on vacation are absent — the snapshot
 	 *  helper handles `null` and writes null fields for those orders. */
 	vacationBySellerProfileId: Map<string, SellerVacationPeriod>;
+	/** §19 — the claim request's originating impression triad. Used as the
+	 *  per-line fallback when a listing has no cart-derived triad: cart lines
+	 *  always carry their own (written at add-time), so this only ever fills a
+	 *  cartless Buy-Now line, where the buyer's PDP triad rides the claim
+	 *  request. All-null on a referrer-less claim. */
+	requestReferrer: {
+		queryId: string | null;
+		rankPosition: number | null;
+		surface: string | null;
+	};
 }
 
 /**
@@ -220,6 +230,19 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			applicationFeeCents += totals.applicationFeeCents;
 			processingFeeCents += totals.processingFeeCents;
 
+			// §19 — resolve the originating-impression triad as a unit: the
+			// cart-item triad (carried on the CheckoutListing) wins; a cartless
+			// Buy-Now line falls back to the claim request's PDP triad. The
+			// settle worker reads these off the line to stamp `purchase_completed`.
+			const lineReferrer =
+				listing.referrerQueryId != null
+					? {
+							queryId: listing.referrerQueryId,
+							rankPosition: listing.referrerRankPosition,
+							surface: listing.referrerSurface,
+						}
+					: input.requestReferrer;
+
 			lineItemRows.push({
 				orderId: group.orderId,
 				listingId: listing.id,
@@ -232,12 +255,9 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 				applicationFeeCents: totals.applicationFeeCents,
 				processingFeeCents: totals.processingFeeCents,
 				sellerEarningCents: lineSellerEarning,
-				// §19 — forward the cart-item's referrer triad (null on the
-				// direct-quote path that bypasses cart). Settle worker reads
-				// these to stamp the `purchase_completed` event envelope.
-				referrerQueryId: listing.referrerQueryId,
-				referrerRankPosition: listing.referrerRankPosition,
-				referrerSurface: listing.referrerSurface,
+				referrerQueryId: lineReferrer.queryId,
+				referrerRankPosition: lineReferrer.rankPosition,
+				referrerSurface: lineReferrer.surface,
 			});
 		}
 
