@@ -213,11 +213,23 @@ interface SnapshotBuildLog {
 	buildMs: number;
 }
 
-async function buildSnapshotIds(
+/**
+ * The ranked-candidate core shared by every "first N of explore" surface: the
+ * candidate query (the covering index `sortPriority, rankScore DESC, id`), the
+ * §12 `compareForSnapshot` re-order, and the global per-seller diversity cap.
+ * Returns the FULL ordered id list (callers slice to their own depth) plus the
+ * candidate count for logging.
+ *
+ * Extracted so the explore snapshot and the Klaviyo trending feed (NL-353) rank
+ * from the IDENTICAL logic and cannot drift — the same "two surfaces MUST agree
+ * byte-for-byte" invariant `compareForSnapshot` is documented under. A consumer
+ * that needs a different *eligibility* set (e.g. the feed wants fixed-price only)
+ * filters at hydration, not here, so the ordering stays shared.
+ */
+export async function selectRankedCandidateIds(
 	db: DbClient,
-	rankEpoch: number,
-): Promise<string[]> {
-	const start = Date.now();
+	candidateLimit: number,
+): Promise<{ orderedIds: string[]; candidateCount: number }> {
 	const rows = await db.listing.findMany({
 		where: buildExploreWhere(),
 		select: {
@@ -229,15 +241,28 @@ async function buildSnapshotIds(
 			rankScore: true,
 		},
 		orderBy: [{ sortPriority: "asc" }, { rankScore: "desc" }, { id: "asc" }],
-		take: EXPLORE_CANDIDATE_LIMIT,
+		take: candidateLimit,
 	});
-
 	rows.sort(compareForSnapshot);
-	const ordered = applyDiversity(rows, DEFAULT_RANKING_CONFIG);
-	const ids = ordered.slice(0, EXPLORE_SNAPSHOT_DEPTH);
+	return {
+		orderedIds: applyDiversity(rows, DEFAULT_RANKING_CONFIG),
+		candidateCount: rows.length,
+	};
+}
+
+async function buildSnapshotIds(
+	db: DbClient,
+	rankEpoch: number,
+): Promise<string[]> {
+	const start = Date.now();
+	const { orderedIds, candidateCount } = await selectRankedCandidateIds(
+		db,
+		EXPLORE_CANDIDATE_LIMIT,
+	);
+	const ids = orderedIds.slice(0, EXPLORE_SNAPSHOT_DEPTH);
 
 	const log: SnapshotBuildLog = {
-		candidateCount: rows.length,
+		candidateCount,
 		keptCount: ids.length,
 		rankEpoch,
 		buildMs: Date.now() - start,
