@@ -1,17 +1,15 @@
 import { DAY_MS, SOLD_VISIBILITY_DAYS } from "@nolie/core/constants/listings";
 import { EngagementEventName } from "@nolie/core/engagement/catalog";
 import {
-	computePHat,
+	computeDemandMultiplier,
 	computePriceMult,
 	computeRankBaseScore,
 	computeRankScore,
-	computeTokenBoost,
 	DEFAULT_RANKING_CONFIG,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
 	type MatchedToken,
 	matchTokens,
-	priorFromDictWeight,
 	RANK_BASE_VERSION,
 	TOKEN_BOOST_MIN,
 	TOKEN_BOOST_VERSION,
@@ -28,15 +26,38 @@ import { reportWarning } from "../observability/sentry/report.js";
 
 const UPDATE_CHUNK = 500;
 
-// Token-popularity aggregation window + decay (docs/explore-ranking-v2.md §6.1).
-// 30d window, 7d half-life — events 7d old count half, 14d old count quarter.
-const TOKEN_POPULARITY_WINDOW_DAYS = 30;
-const TOKEN_POPULARITY_HALF_LIFE_DAYS = 7;
+// View-demand aggregation window (explore-ranking-v3 PR2, §5.2). A flat 30d
+// count, NOT time-decayed — demand here is "how many distinct people looked at
+// / saved / carted this listing in the last month", and we want a month-old
+// view to count the same as a day-old one (the recency term in the scorer is
+// the sole owner of freshness). Mirrors preview-demand-ranking.ts.
+const DEMAND_WINDOW_DAYS = 30;
 
-// `successes = cart_added + PURCHASE_SUCCESS_WEIGHT · purchase_completed` — a
-// purchase is a stronger intent signal than a cart-add. Doc §17 open Q#6
-// flags the 3× as tunable from real data.
-const PURCHASE_SUCCESS_WEIGHT = 3;
+// Intent weighting for the engagement composite (validated on the June 2026
+// prod export, signed off by the founder — preview-demand-ranking.ts):
+//   engagement = distinctViewers + SAVE_VIEWS·saveCount + CART_VIEWS·cartEvents
+// A save / cart is worth far more than a view because it's a high-intent,
+// position-resistant signal (a buyer doesn't bookmark something they clicked
+// off the top of the feed). Tunable post-deploy via ENABLE_*_SIGNAL kill
+// switches + these weights.
+const SAVE_VIEWS = 15;
+const CART_VIEWS = 25;
+
+// Subject-pooling pseudo-count: a listing trusts its OWN engagement once it
+// has ≫ POOL_M; below that it's pulled toward its subject's (character/set)
+// mean engagement, so a fresh listing of a popular character inherits that
+// character's demand. `w = e / (e + POOL_M)`.
+const POOL_M = 30;
+
+// Subject token kinds that drive demand pooling. Characters + sets only —
+// rarity is deliberately excluded (a "psa_10" pool would lump unrelated cards).
+const SUBJECT_KINDS = new Set(["character", "set"]);
+
+// Bot filter (audit-engagement-attribution.sql BLOCK 7): an anonymous_id that
+// viewed more than this many DISTINCT listings in the window is a scraper, not
+// a shopper. Its `listing_viewed` events are excluded from the distinct-viewer
+// count so a crawler can't manufacture demand.
+const BOT_BREADTH_THRESHOLD = 150;
 
 // Cross above this in any single refresh tick and we warn — by then the
 // tokenize-on-fly cost is in the danger zone and the §6.2 "denorm titleTokens
@@ -58,6 +79,14 @@ const ALWAYS_RANKABLE_STATUSES = [
 	ListingStatus.failed,
 	ListingStatus.reserved,
 ] as const;
+
+// The explore-served status set (identical to `buildExploreWhere`'s statuses in
+// apps/api). Demand is min-max normalized over ONLY these rows: the rankable
+// scan also drags in recently-updated terminal rows (sold/closed/cancelled via
+// the cutoff) that never serve on /explore, and a sold listing is exactly the
+// high-demand case — including it would stretch the range and compress every
+// served listing toward neutral (explore-ranking-v3 PR2).
+const SERVED_STATUSES = new Set<string>(ALWAYS_RANKABLE_STATUSES);
 
 interface SellerTrustInputRow {
 	sellerProfileId: string;
@@ -224,6 +253,11 @@ interface RankableListing {
 	 * failure — the resolution demerit fails open to 0 on null. */
 	heroWidth: number | null;
 	heroHeight: number | null;
+	/** Listing status. The scan pulls in recently-updated terminal rows
+	 * (sold/closed via the cutoff) that never serve on /explore; `status` lets
+	 * demand normalization restrict its min-max range to the served set
+	 * (`SERVED_STATUSES`) so those rows can't stretch it (v3 PR2). */
+	status: string;
 }
 
 /**
@@ -274,20 +308,14 @@ function median(values: number[]): number {
  */
 const PRICE_MEDIAN_MIN_BUCKET = 3;
 
-interface TokenAcc {
-	kind: string;
-	value: string;
-	successes: number;
-	trials: number;
-}
-
-interface TokenPopularityResult {
+interface DemandResult {
 	/** listingId → matched dictionary tokens. Tokenized once here and reused
 	 * by the scoring pass — never tokenize the same title twice per tick. */
 	matchedByListing: Map<string, MatchedToken[]>;
-	/** `${tokenKind}:${tokenValue}` → EB posterior `pHat`. Empty when the
-	 * `ENABLE_TOKEN_BOOST` kill switch is off or no signal landed yet. */
-	pHatByKey: Map<string, number>;
+	/** listingId → min-max-normalized view-demand in [0,1]. Empty when the
+	 * `ENABLE_TOKEN_BOOST` kill switch is off; the scoring pass then reads 0
+	 * (neutral multiplier) for every listing. */
+	normalizedDemandByListing: Map<string, number>;
 	/** `${tokenKind}:${tokenValue}` → median price (USD) across listings
 	 * matching this token. Tokens with fewer than `PRICE_MEDIAN_MIN_BUCKET`
 	 * priced listings are absent — caller falls back to `overallMedianPrice`. */
@@ -296,62 +324,26 @@ interface TokenPopularityResult {
 	 * matched tokens don't have enough listings to anchor their own median.
 	 * Null when no listing in the scan has a price. */
 	overallMedianPrice: number | null;
-	/** Mean of `pHat` across all known tokens — the z-score baseline for
-	 * `computeTokenBoost`. */
-	mu: number;
-	/** Stdev of `pHat` across all known tokens. ≤ 0 collapses the boost to
-	 * neutral in the scorer (no signal to amplify). */
-	sigma: number;
-	/** Rows actually written to `token_popularity` this tick. */
-	tokensRefreshed: number;
+	/** Max raw engagement (pre-normalization) across the scan — logged for
+	 * observability. 0 when demand is disabled or no signal landed. */
+	engagementMax: number;
 	/** Wall time of the `matchTokens` loop over every rankable listing.
 	 * Alarmed against `TOKENIZE_WARN_THRESHOLD_MS` — the §6.2
 	 * denorm-titleTokens escape hatch's only invisible trigger. */
 	tokenizeMs: number;
 }
 
-interface EventAggRow {
+interface DemandEventRow {
 	listingId: string;
-	eventName: string;
-	w: number;
+	/** Bot-filtered count of DISTINCT anonymous viewers in the window. */
+	viewers: number;
+	/** Count of `cart_added` EVENTS in the window (not net live cart size). */
+	carts: number;
 }
 
 function tokenKey(kind: string, value: string): string {
 	return `${kind}:${value}`;
 }
-
-/**
- * Lookup table: `${kind}:${value}` → curator-set `weight` from the
- * dictionary. Built once at module load — the dictionary is large enough
- * that scanning per-token at refresh time would burn a few ms per tick we
- * don't need to spend.
- */
-const DICT_WEIGHT_BY_KEY = (() => {
-	const m = new Map<string, number>();
-	for (const e of TOKEN_DICTIONARY.characters)
-		m.set(tokenKey("character", e.token), e.weight);
-	for (const e of TOKEN_DICTIONARY.sets)
-		m.set(tokenKey("set", e.token), e.weight);
-	for (const e of TOKEN_DICTIONARY.rarity)
-		m.set(tokenKey("rarity", e.token), e.weight);
-	return m;
-})();
-
-/**
- * Every `(kind, value)` pair from the dictionary, in scan order. Used by the
- * refresh job to write a `token_popularity` row per dictionary entry on
- * every tick — even tokens with zero observed events get a row whose pHat
- * reflects the curator's `weight` prior. Listings matching a "cold" token
- * still get a meaningful tokenBoost from the prior alone.
- */
-const ALL_DICTIONARY_TOKENS: ReadonlyArray<{ kind: string; value: string }> = [
-	...TOKEN_DICTIONARY.characters.map((e) => ({
-		kind: "character",
-		value: e.token,
-	})),
-	...TOKEN_DICTIONARY.sets.map((e) => ({ kind: "set", value: e.token })),
-	...TOKEN_DICTIONARY.rarity.map((e) => ({ kind: "rarity", value: e.token })),
-];
 
 /**
  * Bounded scan over rankable listings (§7 step 1): live-ish statuses
@@ -387,6 +379,7 @@ async function loadRankableListings(
 			saveCount: true,
 			heroWidth: true,
 			heroHeight: true,
+			status: true,
 		},
 	});
 }
@@ -394,8 +387,9 @@ async function loadRankableListings(
 /**
  * Live cart-add count per listing (NL-310 commit #8 — docs §9 step 3).
  * Single GROUP BY over the live `CartItem` table. "Current members, not
- * historical count" — the historical `cart_added` event stream feeds
- * `token_popularity`; this is a freshness signal added to the base score.
+ * historical count" — distinct from the 30d `cart_added` EVENT count that
+ * `aggregateDemand` consumes for the demand signal. This live-members count is
+ * the (small) cart term folded into the base score.
  *
  * Sole-writer pattern (mirrors `reviewAvgShrunk` per docs §7.1): the
  * refresh worker is the only writer of `Listing.addToCartCount`. A
@@ -424,40 +418,51 @@ async function loadCartAddCounts(
 	return out;
 }
 
+interface DemandSignalFlags {
+	/** When false, the cart-event term drops out of `engagement`. */
+	cartAddSignalEnabled: boolean;
+	/** When false, the save term drops out of `engagement`. */
+	saveSignalEnabled: boolean;
+}
+
 /**
- * Aggregate 30d of `engagement_event` into `token_popularity` and return
- * the in-memory pHat lookup + matched-token map for the scoring pass
- * (NL-310 commit #8 — docs §6, §9 stages 1-2).
+ * Per-listing VIEW-DEMAND signal for the scoring pass (explore-ranking-v3 PR2,
+ * §5.2). Replaces the inverted Empirical-Bayes token-CVR aggregation. Mirrors
+ * `apps/worker/scripts/preview-demand-ranking.ts` — its math was validated on
+ * the June 2026 prod export and signed off by the founder.
  *
- * Single read over the partitioned event table; tokenization runs once
- * per listing here (timed against the `TOKENIZE_WARN_THRESHOLD_MS` budget)
- * and the resulting `matchedByListing` is reused by the scoring pass — no
- * double-tokenize per tick. Empirical-Bayes posterior per (tokenKind,
- * tokenValue); prior fit by method-of-moments per `tokenKind` bucket.
+ * Per rankable listing:
+ *   engagement = distinctViewers30d + SAVE_VIEWS·saveCount + CART_VIEWS·cartEvents30d
+ * where `distinctViewers30d` is the bot-filtered COUNT(DISTINCT anonymous_id)
+ * of `listing_viewed` events (a scraper — anon_id viewing > BOT_BREADTH_THRESHOLD
+ * distinct listings — is excluded), `saveCount` is the listing's denormalized
+ * NET save count, and `cartEvents30d` is the COUNT of `cart_added` events (not
+ * net live cart size). Purchases are deliberately NOT in the signal (0% of
+ * purchases attribute to the feed slot today — audit BLOCK 4/5).
  *
- * Signal definitions (doc §6.1):
- *   successes = (decayed `cart_added`) + 3 · (decayed `purchase_completed`)
- *   trials    = max(decayed `listing_impression`, decayed `listing_viewed`)
- * The `max` smooths the transition from `listing_viewed` (noisier but
- * immediately available proxy) to `listing_impression` (real IPS
- * denominator) as the impression log accrues history. Exponential 7-day
- * half-life weighting applied SQL-side so a single decayed scalar per
- * (listing, event_name) crosses the wire.
+ * Then pooled toward the listing's subject (character/set) demand so a fresh
+ * listing of a popular character inherits that character's demand:
+ *   prior  = max(subjectAvg over the listing's matched character/set tokens),
+ *            or the global mean engagement if it matches no character/set token
+ *   w      = engagement / (engagement + POOL_M)
+ *   pooled = w·engagement + (1-w)·prior
+ *   demand = log1p(pooled)
+ * Finally min-max-normalized over the full rankable scan → [0,1].
  *
- * Scope: only events on currently-rankable listings contribute. A removed
- * listing's historical signal is lost — fine, because removed listings
- * can't be re-ranked anyway and the dictionary token will accrue fresh
- * signal from new listings that contain it.
+ * The price-median aggregation (priceMult input) runs unconditionally — it is
+ * independent of the demand signal and the scorer's `computePriceMult` has its
+ * own `ENABLE_PRICE_MULT` kill switch.
  *
- * Kill switch: `ENABLE_TOKEN_BOOST=false` short-circuits BEFORE the SQL
- * read and the upsert. We still tokenize titles (downstream code expects
- * a populated `matchedByListing` so the kill-switch path can write
- * `tokenBoost=1.0` uniformly without a second tokenize pass).
+ * Kill switch: `ENABLE_TOKEN_BOOST=false` skips the demand SQL + math entirely
+ * and returns an empty `normalizedDemandByListing` (scoring pass reads 0 →
+ * neutral 1.0× multiplier). We still tokenize + compute price medians so the
+ * kill-switch path keeps priceMult and the base score intact.
  */
-async function aggregateTokenPopularity(
+async function aggregateDemand(
 	ctx: WorkerContextBase,
 	scan: ReadonlyArray<RankableListing>,
-): Promise<TokenPopularityResult> {
+	flags: DemandSignalFlags,
+): Promise<DemandResult> {
 	const tokStart = Date.now();
 	const matchedByListing = new Map<string, MatchedToken[]>();
 	for (const r of scan) {
@@ -465,99 +470,12 @@ async function aggregateTokenPopularity(
 	}
 	const tokenizeMs = Date.now() - tokStart;
 
-	const empty = {
-		pHatByKey: new Map<string, number>(),
-		medianPriceByKey: new Map<string, number>(),
-		overallMedianPrice: null,
-		mu: 0,
-		sigma: 0,
-		tokensRefreshed: 0,
-	};
-
-	if (process.env.ENABLE_TOKEN_BOOST === "false" || scan.length === 0) {
-		return { matchedByListing, tokenizeMs, ...empty };
-	}
-
-	const idsSql = Prisma.join(scan.map((r) => Prisma.sql`${r.id}`));
-	const eventAgg = await ctx.prisma.$queryRaw<EventAggRow[]>`
-		SELECT
-			listing_id AS "listingId",
-			event_name AS "eventName",
-			SUM(POWER(
-				0.5,
-				EXTRACT(EPOCH FROM (now() - occurred_at)) / 86400.0 / ${TOKEN_POPULARITY_HALF_LIFE_DAYS}::float
-			))::float AS "w"
-		FROM engagement_event
-		WHERE occurred_at >= now() - (${TOKEN_POPULARITY_WINDOW_DAYS}::int * INTERVAL '1 day')
-		  AND listing_id IN (${idsSql})
-		  AND event_name IN (
-		    ${EngagementEventName.listingImpression},
-		    ${EngagementEventName.listingViewed},
-		    ${EngagementEventName.cartAdded},
-		    ${EngagementEventName.purchaseCompleted}
-		  )
-		GROUP BY listing_id, event_name
-	`;
-
-	interface ListingCounts {
-		impressions: number;
-		viewed: number;
-		cartAdded: number;
-		purchases: number;
-	}
-	const countsByListing = new Map<string, ListingCounts>();
-	for (const row of eventAgg) {
-		const c = countsByListing.get(row.listingId) ?? {
-			impressions: 0,
-			viewed: 0,
-			cartAdded: 0,
-			purchases: 0,
-		};
-		switch (row.eventName) {
-			case EngagementEventName.listingImpression:
-				c.impressions = row.w;
-				break;
-			case EngagementEventName.listingViewed:
-				c.viewed = row.w;
-				break;
-			case EngagementEventName.cartAdded:
-				c.cartAdded = row.w;
-				break;
-			case EngagementEventName.purchaseCompleted:
-				c.purchases = row.w;
-				break;
-		}
-		countsByListing.set(row.listingId, c);
-	}
-
-	// Fan listings × matched tokens → per-token accumulators.
-	const accByKey = new Map<string, TokenAcc>();
-	for (const [listingId, matches] of matchedByListing) {
-		if (matches.length === 0) continue;
-		const c = countsByListing.get(listingId);
-		if (!c) continue;
-		const successes = c.cartAdded + PURCHASE_SUCCESS_WEIGHT * c.purchases;
-		const trials = Math.max(c.impressions, c.viewed);
-		if (successes === 0 && trials === 0) continue;
-		for (const m of matches) {
-			const k = tokenKey(m.tokenKind, m.tokenValue);
-			const a = accByKey.get(k) ?? {
-				kind: m.tokenKind,
-				value: m.tokenValue,
-				successes: 0,
-				trials: 0,
-			};
-			a.successes += successes;
-			a.trials += trials;
-			accByKey.set(k, a);
-		}
-	}
-
-	// Price aggregation (NL-310 commit #8.5 — docs §10). Single pass over
-	// the scan pools the listing's effective price into every matched-token
-	// bucket; medians per bucket drive the per-listing `priceMult` sigmoid in
-	// the scoring loop below. Untokenized listings contribute to the overall
-	// median fallback so the sigmoid is still meaningful for them.
+	// Price aggregation (NL-310 commit #8.5 — docs §10). Independent of the
+	// demand signal; runs on every tick so priceMult survives the demand kill
+	// switch. Single pass pools the listing's effective price into every
+	// matched-token bucket; medians per bucket drive the per-listing priceMult
+	// sigmoid in the scoring loop. Untokenized listings still feed the overall
+	// median fallback.
 	const pricesByKey = new Map<string, number[]>();
 	const allPrices: number[] = [];
 	for (const r of scan) {
@@ -584,126 +502,191 @@ async function aggregateTokenPopularity(
 		}
 	}
 
-	// Build pHat for EVERY dictionary token (NL-310 commit #8.5 — Bayesian
-	// dict-weight prior). Per-token prior derived from the curator's
-	// `weight` field; observed events update the posterior smoothly as
-	// trials grow. Listings matching a "cold" (zero-event) token still
-	// get a meaningful tokenBoost from the prior alone — gives day-1
-	// differentiation without waiting for engagement events.
-	//
-	// Iterating ALL_DICTIONARY_TOKENS (not just accByKey) means we write a
-	// row for every dictionary entry on every tick — ~115 rows, fine at
-	// this scale. The previous per-kind method-of-moments fit is gone; the
-	// curator's weight encodes the prior we want directly. The per-token
-	// `medianPrice` is co-persisted (null when the bucket is below
-	// PRICE_MEDIAN_MIN_BUCKET — caller falls back to the overall median).
-	const pHatByKey = new Map<string, number>();
-	const upsertRows: Array<
-		TokenAcc & {
-			pHat: number;
-			alpha: number;
-			beta: number;
-			medianPrice: number | null;
-		}
-	> = [];
-	for (const t of ALL_DICTIONARY_TOKENS) {
-		const k = tokenKey(t.kind, t.value);
-		const weight = DICT_WEIGHT_BY_KEY.get(k) ?? 1.0;
-		const prior = priorFromDictWeight(weight);
-		const obs = accByKey.get(k);
-		const successes = obs?.successes ?? 0;
-		const trials = obs?.trials ?? 0;
-		const pHat = computePHat({
-			successes,
-			trials,
-			alpha: prior.alpha,
-			beta: prior.beta,
-		});
-		pHatByKey.set(k, pHat);
-		upsertRows.push({
-			kind: t.kind,
-			value: t.value,
-			successes,
-			trials,
-			pHat,
-			alpha: prior.alpha,
-			beta: prior.beta,
-			medianPrice: medianPriceByKey.get(k) ?? null,
-		});
+	const normalizedDemandByListing = new Map<string, number>();
+	if (process.env.ENABLE_TOKEN_BOOST === "false" || scan.length === 0) {
+		return {
+			matchedByListing,
+			normalizedDemandByListing,
+			medianPriceByKey,
+			overallMedianPrice,
+			engagementMax: 0,
+			tokenizeMs,
+		};
 	}
 
-	let tokensRefreshed = 0;
-	for (let i = 0; i < upsertRows.length; i += UPDATE_CHUNK) {
-		const chunk = upsertRows.slice(i, i + UPDATE_CHUNK);
-		const values = Prisma.join(
-			chunk.map(
-				(u) =>
-					Prisma.sql`(${u.kind}, ${u.value}, ${Math.round(u.successes)}::int, ${Math.round(u.trials)}::int, ${u.pHat}::double precision, ${u.alpha}::double precision, ${u.beta}::double precision, ${u.medianPrice}::double precision, now())`,
-			),
-		);
-		tokensRefreshed += await ctx.prisma.$executeRaw`
-			INSERT INTO token_popularity (
-				"tokenKind", "tokenValue", successes, trials,
-				"pHat", "priorAlpha", "priorBeta", "medianPrice", "computedAt"
-			) VALUES ${values}
-			ON CONFLICT ("tokenKind", "tokenValue") DO UPDATE SET
-				successes     = EXCLUDED.successes,
-				trials        = EXCLUDED.trials,
-				"pHat"        = EXCLUDED."pHat",
-				"priorAlpha"  = EXCLUDED."priorAlpha",
-				"priorBeta"   = EXCLUDED."priorBeta",
-				"medianPrice" = EXCLUDED."medianPrice",
-				"computedAt"  = EXCLUDED."computedAt"
-		`;
+	// Per-listing bot-filtered distinct viewers + cart-add event count, scoped
+	// to the scan IDs over the 30d window. The `scrapers` CTE flags any
+	// anonymous_id that viewed > BOT_BREADTH_THRESHOLD distinct listings and
+	// excludes its views from the distinct-viewer count (audit SQL BLOCK 7).
+	// anonymous_id NOT NULL on the view leg keeps server/null actors out.
+	const idsSql = Prisma.join(scan.map((r) => Prisma.sql`${r.id}`));
+	const demandRows = await ctx.prisma.$queryRaw<DemandEventRow[]>`
+		WITH scoped AS (
+			SELECT listing_id, event_name, anonymous_id
+			FROM engagement_event
+			WHERE occurred_at >= now() - (${DEMAND_WINDOW_DAYS}::int * INTERVAL '1 day')
+			  AND listing_id IN (${idsSql})
+			  AND event_name IN (
+			    ${EngagementEventName.listingViewed},
+			    ${EngagementEventName.cartAdded}
+			  )
+		),
+		scrapers AS (
+			SELECT anonymous_id
+			FROM scoped
+			WHERE event_name = ${EngagementEventName.listingViewed}
+			  AND anonymous_id IS NOT NULL
+			GROUP BY anonymous_id
+			HAVING COUNT(DISTINCT listing_id) > ${BOT_BREADTH_THRESHOLD}::int
+		),
+		viewers AS (
+			SELECT listing_id, COUNT(DISTINCT anonymous_id)::int AS "viewers"
+			FROM scoped
+			WHERE event_name = ${EngagementEventName.listingViewed}
+			  AND anonymous_id IS NOT NULL
+			  AND anonymous_id NOT IN (SELECT anonymous_id FROM scrapers)
+			GROUP BY listing_id
+		),
+		carts AS (
+			SELECT listing_id, COUNT(*)::int AS "carts"
+			FROM scoped
+			WHERE event_name = ${EngagementEventName.cartAdded}
+			GROUP BY listing_id
+		)
+		SELECT
+			COALESCE(v.listing_id, c.listing_id) AS "listingId",
+			COALESCE(v."viewers", 0)             AS "viewers",
+			COALESCE(c."carts", 0)               AS "carts"
+		FROM viewers v
+		FULL OUTER JOIN carts c ON c.listing_id = v.listing_id
+	`;
+
+	const viewersByListing = new Map<string, number>();
+	const cartsByListing = new Map<string, number>();
+	for (const row of demandRows) {
+		viewersByListing.set(row.listingId, row.viewers);
+		cartsByListing.set(row.listingId, row.carts);
 	}
 
-	// μ, σ over the just-computed pHats — z-score baseline for the per-listing
-	// `computeTokenBoost` call. With a single token σ collapses to 0, which
-	// the scorer reads as "no signal to amplify" and returns TOKEN_BOOST_MIN.
-	const pHats = Array.from(pHatByKey.values());
-	const mu = pHats.reduce((s, p) => s + p, 0) / pHats.length;
-	const variance =
-		pHats.length > 1
-			? pHats.reduce((s, p) => s + (p - mu) ** 2, 0) / pHats.length
+	// engagement = viewers + SAVE_VIEWS·saveCount + CART_VIEWS·cartEvents.
+	// Kill switches drop the save / cart term respectively (mirror the base
+	// score's per-signal switches).
+	const engagementByListing = new Map<string, number>();
+	let engagementMax = 0;
+	for (const r of scan) {
+		const viewers = viewersByListing.get(r.id) ?? 0;
+		const saves = flags.saveSignalEnabled ? r.saveCount : 0;
+		const carts = flags.cartAddSignalEnabled
+			? (cartsByListing.get(r.id) ?? 0)
 			: 0;
-	const sigma = Math.sqrt(variance);
+		const engagement = viewers + SAVE_VIEWS * saves + CART_VIEWS * carts;
+		engagementByListing.set(r.id, engagement);
+		if (engagement > engagementMax) engagementMax = engagement;
+	}
+
+	// Subject (character/set) average engagement. A listing pools toward the
+	// MAX subject average across its matched character/set tokens; pooling
+	// lets a fresh listing of a hot character inherit that character's demand.
+	const subjectVals = new Map<string, number[]>();
+	for (const [listingId, matches] of matchedByListing) {
+		const engagement = engagementByListing.get(listingId) ?? 0;
+		for (const m of matches) {
+			if (!SUBJECT_KINDS.has(m.tokenKind)) continue;
+			const k = tokenKey(m.tokenKind, m.tokenValue);
+			let arr = subjectVals.get(k);
+			if (!arr) {
+				arr = [];
+				subjectVals.set(k, arr);
+			}
+			arr.push(engagement);
+		}
+	}
+	const subjectAvg = new Map<string, number>();
+	for (const [k, vals] of subjectVals) {
+		subjectAvg.set(k, vals.reduce((s, x) => s + x, 0) / vals.length);
+	}
+	// scan.length > 0 is guaranteed: the function returns early on an empty scan.
+	const globalAvg =
+		scan.reduce((s, r) => s + (engagementByListing.get(r.id) ?? 0), 0) /
+		scan.length;
+
+	// Pooled demand = log1p(w·engagement + (1-w)·prior), then min-max-normalize
+	// across the scan. `prior` is the max matched subject average, or the global
+	// mean when the listing matches no character/set token.
+	const demandLogByListing = new Map<string, number>();
+	for (const r of scan) {
+		const engagement = engagementByListing.get(r.id) ?? 0;
+		const matches = matchedByListing.get(r.id) ?? [];
+		let prior = -1;
+		for (const m of matches) {
+			if (!SUBJECT_KINDS.has(m.tokenKind)) continue;
+			const mu = subjectAvg.get(tokenKey(m.tokenKind, m.tokenValue));
+			if (mu !== undefined && mu > prior) prior = mu;
+		}
+		if (prior < 0) prior = globalAvg;
+		const w = engagement / (engagement + POOL_M);
+		demandLogByListing.set(r.id, Math.log1p(w * engagement + (1 - w) * prior));
+	}
+
+	// Min-max normalize over the EXPLORE-SERVED rows only (`SERVED_STATUSES`).
+	// Pooling above intentionally spans the full scan (matches the preview), but
+	// the normalization range must exclude terminal cutoff rows (sold/closed) —
+	// otherwise a single recently-sold high-demand listing stretches dMax and
+	// compresses every served listing's multiplier toward 1.0 (appraiser, v3 PR2).
+	let dMin = Number.POSITIVE_INFINITY;
+	let dMax = Number.NEGATIVE_INFINITY;
+	for (const r of scan) {
+		if (!SERVED_STATUSES.has(r.status)) continue;
+		const v = demandLogByListing.get(r.id);
+		if (v === undefined) continue;
+		if (v < dMin) dMin = v;
+		if (v > dMax) dMax = v;
+	}
+	const span = dMax > dMin ? dMax - dMin : 0;
+	for (const [id, v] of demandLogByListing) {
+		const n = span > 0 ? (v - dMin) / span : 0;
+		// Clamp: terminal rows excluded from the range above can fall outside
+		// [0,1]; they don't serve, but keep the stored value well-formed.
+		normalizedDemandByListing.set(id, n < 0 ? 0 : n > 1 ? 1 : n);
+	}
 
 	return {
 		matchedByListing,
-		pHatByKey,
+		normalizedDemandByListing,
 		medianPriceByKey,
 		overallMedianPrice,
-		mu,
-		sigma,
-		tokensRefreshed,
+		engagementMax,
 		tokenizeMs,
 	};
 }
 
 /**
  * /explore default-feed ranking refresh (NL-284 docs/explore-ranking.md §7;
- * NL-310 v2 commit #6 extends with sellerTrust; commit #8 with token
- * popularity + live cart-add count). Sole writer of the time-decaying
- * `rankScore`, `Listing.addToCartCount`, `Listing.tokenBoost`,
- * `SellerProfile.reviewAvgShrunk`, and `token_popularity`. Pure scoring
- * formula lives in `@nolie/core/explore` — no SQL/TS duplication.
+ * NL-310 v2 commit #6 extends with sellerTrust; explore-ranking-v3 PR2 swaps
+ * the token-CVR multiplier for a view-demand one). Sole writer of the
+ * time-decaying `rankScore`, `Listing.addToCartCount`, `Listing.tokenBoost`
+ * (which now carries the view-demand multiplier, not CVR), and
+ * `SellerProfile.reviewAvgShrunk`. Pure scoring formula lives in
+ * `@nolie/core/explore` — no SQL/TS duplication.
  *
- * DB shape per tick (commit #8): 4 reads + 3 sets of bulk writes + 2 Redis
- * ops. Three of the four reads (`seller_profile` CTE, listing scan,
- * cart_item GROUP BY) are mutually independent — kicked off in parallel
- * via `Promise.all`. The fourth (`engagement_event` aggregation) depends
- * on the listing-scan IDs and follows. All writes are guarded by
- * `IS DISTINCT FROM` (listings + sellers) or `ON CONFLICT DO UPDATE`
- * (token_popularity) — `rankScore` advances every scheduled run because
- * `now` advances; that is intended, the 10-minute cadence (not byte-stable
- * idempotency) keeps writes negligible. Same-instant BullMQ retry is a
- * true no-op, so retries are safe.
+ * DB shape per tick (v3 PR2): 4 reads + 2 sets of bulk writes + 2 Redis ops.
+ * Three of the four reads (`seller_profile` CTE, listing scan, cart_item
+ * GROUP BY) are mutually independent — kicked off in parallel via
+ * `Promise.all`. The fourth (the `engagement_event` demand aggregation in
+ * `aggregateDemand`) depends on the listing-scan IDs and follows. The
+ * `token_popularity` write is GONE — that table was analytics-only, never
+ * read at serve time; the demand signal lives in memory for the tick and is
+ * stored per-listing in the reused `tokenBoost` column. The listing/seller
+ * writes are guarded by `IS DISTINCT FROM`; `rankScore` advances every
+ * scheduled run because `now` advances — intended, the 10-minute cadence (not
+ * byte-stable idempotency) keeps writes negligible. Same-instant BullMQ retry
+ * is a true no-op, so retries are safe.
  *
  * `titleTokens` denorm column intentionally NOT added (docs §4.1 vs §6.2
  * contradiction resolved against §4.1 per the May 2026 research pass).
- * Tokenization runs once per tick inside `aggregateTokenPopularity` and
- * the resulting map is reused by the scoring pass — ~10ms at current
- * catalog size. Triggers to revisit and denorm (any one):
+ * Tokenization runs once per tick inside `aggregateDemand` and the resulting
+ * map is reused by the scoring pass — ~10ms at current catalog size. Triggers
+ * to revisit and denorm (any one):
  *   (a) `tokenizeMs > TOKENIZE_WARN_THRESHOLD_MS` for a sustained stretch
  *       — Sentry warning below fires per tick when crossed (deduped by
  *       message fingerprint, so it lands as one alert);
@@ -716,10 +699,10 @@ async function aggregateTokenPopularity(
  * Scale escape hatch (§7 [DEFER], trigger-gated): the recency UPDATE can
  * move fully server-side (`SET rankScore = rankBaseScore + :wR * power(0.5,
  * extract(epoch from (now()-"createdAt"))/3600/:halfLife)`), zero rows in
- * app memory. NOT done now — the SQL pushdown can't recompute the v2 base
- * inputs (sellerTrust / addToCartCount / tokenBoost) without making the
- * SQL formula a fragile mirror of the pure scorer. The cutoff-bounded
- * scan keeps this sub-ms until that trigger fires.
+ * app memory. NOT done now — the SQL pushdown can't recompute the base
+ * inputs (sellerTrust / addToCartCount) or the per-listing demand multiplier
+ * without making the SQL formula a fragile mirror of the pure scorer. The
+ * cutoff-bounded scan keeps this sub-ms until that trigger fires.
  */
 export async function refresh(ctx: WorkerContextBase): Promise<void> {
 	const { prisma, redis, logger } = ctx;
@@ -738,10 +721,21 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			loadCartAddCounts(ctx),
 		]);
 
-	// Sequential: aggregation needs listing IDs from the scan.
-	const tokenPop = await aggregateTokenPopularity(ctx, scanRows);
+	const tokenBoostEnabled = process.env.ENABLE_TOKEN_BOOST !== "false";
+	const cartAddSignalEnabled = process.env.ENABLE_CART_ADD_SIGNAL !== "false";
+	const saveSignalEnabled = process.env.ENABLE_SAVE_SIGNAL !== "false";
+	const priceMultEnabled = process.env.ENABLE_PRICE_MULT !== "false";
+	const premiumPriceEnabled = process.env.ENABLE_PREMIUM_PRICE !== "false";
+	const imageDemeritEnabled = process.env.ENABLE_IMAGE_DEMERIT !== "false";
 
-	if (tokenPop.tokenizeMs > TOKENIZE_WARN_THRESHOLD_MS) {
+	// Sequential: demand aggregation needs listing IDs from the scan. The
+	// cart/save kill switches drop their term from the engagement composite.
+	const demand = await aggregateDemand(ctx, scanRows, {
+		cartAddSignalEnabled,
+		saveSignalEnabled,
+	});
+
+	if (demand.tokenizeMs > TOKENIZE_WARN_THRESHOLD_MS) {
 		// Sentry dedupes by message fingerprint, so the per-tick fires collapse
 		// to one alert in the UI. The structured `extra` carries the latest
 		// observed cost; investigate the `titleTokens` denorm trigger (a) from
@@ -751,7 +745,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			{
 				operation: "explore_rank_refresh",
 				extra: {
-					tokenizeMs: tokenPop.tokenizeMs,
+					tokenizeMs: demand.tokenizeMs,
 					listingsScanned: scanRows.length,
 					thresholdMs: TOKENIZE_WARN_THRESHOLD_MS,
 				},
@@ -760,19 +754,13 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 	}
 
 	const now = new Date();
-	const tokenBoostEnabled = process.env.ENABLE_TOKEN_BOOST !== "false";
-	const cartAddSignalEnabled = process.env.ENABLE_CART_ADD_SIGNAL !== "false";
-	const saveSignalEnabled = process.env.ENABLE_SAVE_SIGNAL !== "false";
-	const priceMultEnabled = process.env.ENABLE_PRICE_MULT !== "false";
-	const premiumPriceEnabled = process.env.ENABLE_PREMIUM_PRICE !== "false";
-	const imageDemeritEnabled = process.env.ENABLE_IMAGE_DEMERIT !== "false";
 
 	let scoreMin = Number.POSITIVE_INFINITY;
 	let scoreMax = Number.NEGATIVE_INFINITY;
 	let sellerTrustMax = 0;
 	let addToCartMax = 0;
 	let saveCountMax = 0;
-	let tokenBoostMax = TOKEN_BOOST_MIN;
+	let demandMultMax = TOKEN_BOOST_MIN;
 	let priceMultMax = 1.0;
 	let priceMultMin = 1.0;
 
@@ -788,31 +776,20 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 		const saveCount = saveSignalEnabled ? r.saveCount : 0;
 		if (saveCount > saveCountMax) saveCountMax = saveCount;
 
-		const matches = tokenPop.matchedByListing.get(r.id);
+		const matches = demand.matchedByListing.get(r.id);
 
-		// Map matched tokens → known pHats. Tokens with no row in
-		// token_popularity yet (cold-start) drop out — `computeTokenBoost`
-		// treats an empty array as "no signal" and returns TOKEN_BOOST_MIN.
-		let tokenBoost = TOKEN_BOOST_MIN;
-		if (tokenBoostEnabled) {
-			const pHats: number[] = [];
-			if (matches) {
-				for (const m of matches) {
-					const p = tokenPop.pHatByKey.get(tokenKey(m.tokenKind, m.tokenValue));
-					if (p !== undefined) pHats.push(p);
-				}
-			}
-			tokenBoost = computeTokenBoost(
-				{
-					tokenPHats: pHats,
-					mu: tokenPop.mu,
-					sigma: tokenPop.sigma,
-					titleLen: r.title.length,
-				},
-				DEFAULT_RANKING_CONFIG,
-			);
-		}
-		if (tokenBoost > tokenBoostMax) tokenBoostMax = tokenBoost;
+		// View-demand multiplier (explore-ranking-v3 PR2). The worker already
+		// computed each listing's subject-pooled, min-max-normalized demand in
+		// `aggregateDemand`; the scorer just maps it through the clamp. The
+		// kill switch (`ENABLE_TOKEN_BOOST=false`) leaves `normalizedDemand`
+		// empty, so this reads 0 → neutral 1.0× — the additive collapse.
+		const demandMult = tokenBoostEnabled
+			? computeDemandMultiplier(
+					{ normalizedDemand: demand.normalizedDemandByListing.get(r.id) ?? 0 },
+					DEFAULT_RANKING_CONFIG,
+				)
+			: TOKEN_BOOST_MIN;
+		if (demandMult > demandMultMax) demandMultMax = demandMult;
 
 		// Effective price for this listing, computed once and reused by both
 		// the multiplicative priceMult (vs-category sigmoid) and the additive
@@ -830,7 +807,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			let refMedianUSD: number | null = null;
 			if (matches) {
 				for (const m of matches) {
-					const med = tokenPop.medianPriceByKey.get(
+					const med = demand.medianPriceByKey.get(
 						tokenKey(m.tokenKind, m.tokenValue),
 					);
 					if (
@@ -841,7 +818,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 					}
 				}
 			}
-			if (refMedianUSD === null) refMedianUSD = tokenPop.overallMedianPrice;
+			if (refMedianUSD === null) refMedianUSD = demand.overallMedianPrice;
 			priceMult = computePriceMult(
 				{ priceUSD, refMedianUSD },
 				DEFAULT_RANKING_CONFIG,
@@ -872,7 +849,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			DEFAULT_RANKING_CONFIG,
 		);
 		const rankScore = computeRankScore(
-			{ rankBaseScore, createdAt: r.createdAt, now, tokenBoost, priceMult },
+			{ rankBaseScore, createdAt: r.createdAt, now, demandMult, priceMult },
 			DEFAULT_RANKING_CONFIG,
 		);
 		if (rankScore < scoreMin) scoreMin = rankScore;
@@ -884,7 +861,8 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			rankBaseScore,
 			rankBaseVersion: RANK_BASE_VERSION,
 			addToCartCount,
-			tokenBoost,
+			// Stored into the reused `tokenBoost` column (now view-demand, not CVR).
+			demandMult,
 		};
 	});
 
@@ -894,7 +872,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 		const values = Prisma.join(
 			chunk.map(
 				(p) =>
-					Prisma.sql`(${p.id}, ${p.rankScore}::double precision, ${p.rankBaseScore}::double precision, ${p.rankBaseVersion}::int, ${p.addToCartCount}::int, ${p.tokenBoost}::double precision, ${TOKEN_BOOST_VERSION}::int)`,
+					Prisma.sql`(${p.id}, ${p.rankScore}::double precision, ${p.rankBaseScore}::double precision, ${p.rankBaseVersion}::int, ${p.addToCartCount}::int, ${p.demandMult}::double precision, ${TOKEN_BOOST_VERSION}::int)`,
 			),
 		);
 		// Raw SQL targets the physical `auction` table (NL-284/NL-310 columns
@@ -936,15 +914,18 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			rowsScanned: scanRows.length,
 			rowsUpdated,
 			sellersTrustUpdated,
-			tokensRefreshed: tokenPop.tokensRefreshed,
 			sellerTrustMax,
 			addToCartMax,
 			saveCountMax,
-			tokenBoostMax,
+			// Demand signal (explore-ranking-v3 PR2): the demand multiplier ceiling
+			// observed this tick and the peak raw engagement before normalization.
+			demandMultMax,
+			engagementMax: demand.engagementMax,
+			demandListings: demand.normalizedDemandByListing.size,
 			priceMultMax,
 			priceMultMin,
-			overallMedianPrice: tokenPop.overallMedianPrice,
-			tokenizeMs: tokenPop.tokenizeMs,
+			overallMedianPrice: demand.overallMedianPrice,
+			tokenizeMs: demand.tokenizeMs,
 			dictSize:
 				TOKEN_DICTIONARY.characters.length +
 				TOKEN_DICTIONARY.sets.length +

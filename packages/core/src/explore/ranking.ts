@@ -6,18 +6,30 @@
  * docs/explore-ranking.md §5 for the cold-start catalog analysis that made
  * graded "quality" a fiction at the time.
  *
- * v2 (NL-310, this commit): the catalog grew 7× and cart shipped. v2 layers
- * three signals onto the v1 seam: (a) cart-adds (log-scaled engagement),
- * (b) populated `sellerTrust` (Bayesian-shrunk reviews + 1st Edition badge,
- * weight ramped 0 → 0.05 — sparse, but the seam is now live), and
- * (c) `tokenBoost` (Empirical-Bayes title-token popularity, max-of-tokens,
- * length-penalized). Composition turns multiplicative on `tokenBoost` so the
- * boost amplifies the additive signals without crowding them; everything else
- * stays additive (a cart-add is worth the same whether the listing is fresh
- * or stale). Recency comes down (0.45 → 0.30) now that other signals are
- * carrying weight. Kill-switch path: write `tokenBoost = 1.0` to every row →
- * multiplicative collapses cleanly to the additive form. See
- * docs/explore-ranking-v2.md §2 for the locked decisions.
+ * v2 (NL-310): the catalog grew 7× and cart shipped. v2 layers three signals
+ * onto the v1 seam: (a) cart-adds (log-scaled engagement), (b) populated
+ * `sellerTrust` (Bayesian-shrunk reviews + 1st Edition badge, weight ramped
+ * 0 → 0.05 — sparse, but the seam is now live), and (c) a per-listing
+ * multiplicative boost. Composition turns multiplicative on that boost so it
+ * amplifies the additive signals without crowding them; everything else stays
+ * additive (a cart-add is worth the same whether the listing is fresh or
+ * stale). Recency came down (0.45 → 0.30) now that other signals are carrying
+ * weight. Kill-switch path: write the boost = 1.0 to every row → multiplicative
+ * collapses cleanly to the additive form. See docs/explore-ranking-v2.md §2.
+ *
+ * v3 PR2 (explore-ranking-v3 §5.2, this commit): the v2 multiplier was an
+ * Empirical-Bayes z-score over per-token CONVERSION RATE. At ~0.18% catalog
+ * CVR that signal is mathematically inverted/inert — popular tokens get ≈no
+ * boost, only zero-traffic tokens float up. Replaced by `computeDemandMultiplier`,
+ * a per-listing VIEW-DEMAND multiplier: distinct 30d viewers (bot-filtered) +
+ * weighted saves + weighted cart events, pooled toward the listing's subject
+ * (character/set) demand, log1p'd, min-max-normalized across the rankable scan,
+ * and mapped to `[1.0, DEMAND_MULT_MAX]`. The physical `tokenBoost` /
+ * `tokenBoostVersion` columns are reused (no migration) but now carry demand,
+ * not CVR. Recency drops further (0.30 → 0.20) as a real demand signal takes
+ * over differentiation. PR1's image-resolution demerit and the premium plateau
+ * are untouched — they live entirely in `computeRankBaseScore`. Kill switch:
+ * `ENABLE_TOKEN_BOOST=false` still writes 1.0 to every row → additive collapse.
  *
  * No I/O, no clock: `now` is injected into `computeRankScore` so the worker
  * refresh job is the sole owner of the time-varying term. Weights, sensitivity,
@@ -96,22 +108,24 @@ export interface RankingConfig {
 	lowEffortPenalty: number;
 	/**
 	 * Additive demerit subtracted from the base when the title exceeds
-	 * `LONG_TITLE_MAX_CHARS`. Pairs with the multiplicative length damper
-	 * in `computeTokenBoost`. Smaller than the low-effort penalty because a
+	 * `LONG_TITLE_MAX_CHARS`. Smaller than the low-effort penalty because a
 	 * long title is sometimes legitimate (TCG titles can carry set + rarity
 	 * + grade); this deters obvious stuffing without burying real detail.
 	 */
 	longTitlePenalty: number;
 	/**
-	 * Sensitivity of `tokenBoost` to a token's z-score above the global pHat
-	 * mean. The boost form is `1 + k · z`, clamped to `[TOKEN_BOOST_MIN,
-	 * TOKEN_BOOST_MAX]`. At `k = 0.20`, a +1σ token (~top quartile) lands at
-	 * 1.20; a top-decile token (~1.28σ) lands at ~1.256 — aligning with the
-	 * doc's "top-decile hits ~1.25" target (docs §6.1, an "expected k ≈ 3"
-	 * is the doc's published guess; the calibration math actually wants
-	 * k ≈ 0.2 — tunable post-deploy from real distribution).
+	 * Sensitivity of the view-demand multiplier to a listing's normalized
+	 * demand (explore-ranking-v3 PR2). The multiplier form is
+	 * `clamp(1 + k · normalizedDemand, [TOKEN_BOOST_MIN, DEMAND_MULT_MAX])`,
+	 * where `normalizedDemand ∈ [0,1]` is the min-max-normalized log1p of the
+	 * listing's subject-pooled engagement (distinct viewers + weighted
+	 * saves/carts). At `k = 1.0` the top-demand listing earns the full 2.0×
+	 * and a zero-demand listing collapses to 1.0× (neutral). Replaces the
+	 * inverted Empirical-Bayes token-CVR z-score, which was mathematically
+	 * inert at our ~0.18% catalog conversion rate (docs/explore-ranking-v3.md
+	 * §5.2). Tunable post-deploy from the live demand distribution.
 	 */
-	tokenBoostSensitivity: number;
+	demandSensitivity: number;
 	/**
 	 * Subtractive penalty applied to `rankBaseScore` when the listing's title
 	 * or description matches any term in `NEGATIVE_KEYWORDS` (e.g. "wooden",
@@ -308,7 +322,11 @@ export const PLATEAU_ABOVE_SLOPE = 0.5;
 
 export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 	weights: {
-		recency: 0.3,
+		// v3 PR2: dropped 0.30 → 0.20. The view-demand multiplier
+		// (`computeDemandMultiplier`) now carries differentiation that recency
+		// was over-weighting at cold start; lowering it lets a high-demand older
+		// listing outrank a fresh-but-ignored one (half-life 72h unchanged).
+		recency: 0.2,
 		sellerTrust: 0.05,
 		cartAdd: 0.1,
 		save: 0.05,
@@ -329,7 +347,7 @@ export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 	perSellerCap: 2,
 	lowEffortPenalty: 0.12,
 	longTitlePenalty: 0.04,
-	tokenBoostSensitivity: 0.2,
+	demandSensitivity: 1.0,
 	negativeKeywordPenalty: 0.08,
 	merchKeywordPenalty: 0.5,
 	// Image-resolution demerit (explore-ranking-v3 PR1, §5.1.4). v1 starting
@@ -430,21 +448,26 @@ export const MERCH_KEYWORDS: ReadonlyArray<string> = [
 ];
 
 /**
- * Token-boost clamp range. 1.0 = neutral (no boost AND kill-switch value
- * the refresh job writes when ENABLE_TOKEN_BOOST is off). 1.30 = max — the
- * top of the curated dictionary's weight ladder. Out-of-range values from the
- * EB z-score formula clamp to this range BEFORE the length damper applies
- * (docs §6.1).
+ * Demand-multiplier clamp floor. 1.0 = neutral — both "no demand" (the bottom
+ * of the normalized range) AND the kill-switch value the refresh job writes to
+ * every row when `ENABLE_TOKEN_BOOST` is off. Named `TOKEN_BOOST_*` for
+ * continuity with the reused physical `tokenBoost` column (the multiplier value
+ * is stored there); the signal it carries is now view-demand, not CVR.
  */
 export const TOKEN_BOOST_MIN = 1.0;
-export const TOKEN_BOOST_MAX = 1.3;
 
 /**
- * Above this length the multiplicative token-boost damper kicks in
- * (`min(1, LONG_TITLE_MAX_CHARS / titleLen)`) AND the additive
- * `longTitlePenalty` fires at the base-score level. Picked at 60 — Etsy
- * uses 70, eBay 60-70; TCG titles are naturally short, so we cap tight
- * (docs §2).
+ * Demand-multiplier clamp ceiling (explore-ranking-v3 PR2). The top-demand
+ * listing in the rankable scan earns `1 + demandSensitivity·1 = 2.0×` at the
+ * default sensitivity; the clamp caps any future sensitivity retune so demand
+ * can lift hard but never wholly dominate the additive base + recency.
+ */
+export const DEMAND_MULT_MAX = 2.0;
+
+/**
+ * Above this length the additive `longTitlePenalty` fires at the base-score
+ * level. Picked at 60 — Etsy uses 70, eBay 60-70; TCG titles are naturally
+ * short, so we cap tight (docs §2).
  */
 export const LONG_TITLE_MAX_CHARS = 60;
 
@@ -718,17 +741,19 @@ export interface RankScoreInput {
 	createdAt: Date;
 	now: Date;
 	/**
-	 * Per-listing multiplicative boost from `computeTokenBoost`. Defaults to
-	 * `TOKEN_BOOST_MIN` (1.0 = neutral) so callers that don't yet supply it
+	 * Per-listing multiplicative view-demand boost from
+	 * `computeDemandMultiplier` (explore-ranking-v3 PR2). Defaults to
+	 * `TOKEN_BOOST_MIN` (1.0 = neutral) so callers that don't supply it
 	 * (legacy code paths, kill-switch state) get the additive v1-equivalent
-	 * form. The v2 refresh worker writes this column on every listing.
+	 * form. The refresh worker writes this into the (reused) `tokenBoost`
+	 * column on every listing.
 	 */
-	tokenBoost?: number;
+	demandMult?: number;
 	/**
 	 * Per-listing multiplicative price-vs-median modifier from
 	 * `computePriceMult`. Defaults to 1.0 (neutral) so callers that don't
 	 * yet supply it (no price on listing, no median for matched tokens) get
-	 * the unmodified token-boosted score.
+	 * the unmodified demand-boosted score.
 	 */
 	priceMult?: number;
 }
@@ -798,16 +823,16 @@ export function computePriceMult(
 }
 
 /**
- * Full score = (stored base + weighted recency decay) · tokenBoost · priceMult.
+ * Full score = (stored base + weighted recency decay) · demandMult · priceMult.
  * Both multiplicative modifiers default to 1.0 (neutral), so a caller that
  * supplies neither collapses cleanly to the v1 additive form. Kill-switch
  * paths write 1.0 to either column to neutralize that signal without
- * touching the others (docs §2, §8, §10).
+ * touching the others (docs §2, §10; v3 §5.2).
  *
  * Composition order is irrelevant for the math (both are scalar
  * multipliers) but the ranking-design intent is:
- *   - tokenBoost amplifies the catalog-wide popularity of the listing's
- *     subject (charizard > generic);
+ *   - demandMult amplifies the listing's view-demand, pooled toward its
+ *     subject (a high-viewer/high-save Charizard outranks an ignored one);
  *   - priceMult differentiates listings within the same token bucket by
  *     how their price compares to that bucket's median (PSA 10 above raw,
  *     bulk-cheap below).
@@ -817,7 +842,7 @@ export function computeRankScore(
 		rankBaseScore,
 		createdAt,
 		now,
-		tokenBoost = TOKEN_BOOST_MIN,
+		demandMult = TOKEN_BOOST_MIN,
 		priceMult = 1.0,
 	}: RankScoreInput,
 	config: RankingConfig,
@@ -828,74 +853,51 @@ export function computeRankScore(
 	);
 	const recency = 0.5 ** (ageHours / config.recencyHalfLifeHours);
 	return (
-		(rankBaseScore + config.weights.recency * recency) * tokenBoost * priceMult
+		(rankBaseScore + config.weights.recency * recency) * demandMult * priceMult
 	);
 }
 
-export interface ComputeTokenBoostInput {
+export interface ComputeDemandMultiplierInput {
 	/**
-	 * EB posterior means (`pHat`) of every token matched in the listing's
-	 * title. Empty = no matches → `tokenBoost = TOKEN_BOOST_MIN`. The caller
-	 * (refresh worker) resolves `MatchedToken[] → number[]` from the
-	 * `token_popularity` table; tokens with no row yet (cold-start) are
-	 * filtered out by the caller before getting here.
+	 * The listing's min-max-normalized view-demand in `[0,1]` (explore-ranking-v3
+	 * PR2). Computed by the refresh worker as the log1p of the listing's
+	 * subject-pooled engagement (distinct 30d viewers + weighted saves + weighted
+	 * cart events), min-max-normalized across the full rankable scan. 0 = the
+	 * least-demanded listing in the scan (collapses to neutral), 1 = the most.
 	 */
-	tokenPHats: ReadonlyArray<number>;
-	/**
-	 * Mean of pHat across all known tokens at this refresh tick — the
-	 * z-score baseline. Recomputed by the refresh worker each tick from the
-	 * full `token_popularity` table.
-	 */
-	mu: number;
-	/**
-	 * Stdev of pHat across all known tokens at this refresh tick. ≤ 0
-	 * collapses the boost to neutral (no signal to amplify).
-	 */
-	sigma: number;
-	titleLen: number;
+	normalizedDemand: number;
 }
 
 /**
- * Per-listing token-popularity boost. Pure function over (matched tokens'
- * pHats, population stats, title length).
+ * Per-listing view-demand multiplier (explore-ranking-v3 PR2, §5.2). Pure
+ * function over the listing's normalized demand.
  *
- *   raw       = 1 + k · (max(tokenPHats) − μ) / σ
- *   clamped   = clamp(raw, [TOKEN_BOOST_MIN, TOKEN_BOOST_MAX])
- *   damped    = clamped · min(1, LONG_TITLE_MAX_CHARS / titleLen)   if matched
- *             = TOKEN_BOOST_MIN                                      if not
+ *   mult = clamp(1 + demandSensitivity · normalizedDemand,
+ *                [TOKEN_BOOST_MIN, DEMAND_MULT_MAX])
  *
- * MAX of tokens (never sum, never mean) is the anti-keyword-stuffing guard —
- * Etsy and eBay converged on this independently (docs §2). The length damper
- * pairs with the additive `longTitlePenalty` on the base score so anyone
- * stuffing 5 hot tokens in a 120-char title pays both penalties; a listing
- * with no matched tokens skips the damper (it's a token-side correction, not
- * a universal long-title penalty — that's what `longTitlePenalty` is for).
+ * Replaces the v2 Empirical-Bayes token-CVR z-score (`computeTokenBoost`),
+ * which was inert at our ~0.18% catalog conversion rate. Demand is a far
+ * stronger signal: a listing real buyers view, save, and cart should rank
+ * above one nobody looks at, regardless of its title tokens. The subject
+ * pooling that produces `normalizedDemand` (done worker-side) lets a fresh
+ * listing of a popular character inherit that character's demand before it
+ * accrues its own — the multiplier itself stays a pure clamp.
+ *
+ * `normalizedDemand` is already clamped to `[0,1]` by the worker's min-max
+ * normalization; the output clamp is the load-bearing one (caps any future
+ * `demandSensitivity` retune).
  */
-export function computeTokenBoost(
-	input: ComputeTokenBoostInput,
+export function computeDemandMultiplier(
+	input: ComputeDemandMultiplierInput,
 	config: RankingConfig,
 ): number {
-	if (input.tokenPHats.length === 0) return TOKEN_BOOST_MIN;
-	if (input.sigma <= 0) return TOKEN_BOOST_MIN;
-
-	let maxPHat = -Infinity;
-	for (const p of input.tokenPHats) {
-		if (p > maxPHat) maxPHat = p;
-	}
-	if (!Number.isFinite(maxPHat)) return TOKEN_BOOST_MIN;
-
-	const z = (maxPHat - input.mu) / input.sigma;
-	const raw = 1 + config.tokenBoostSensitivity * z;
-	const clamped = Math.max(TOKEN_BOOST_MIN, Math.min(TOKEN_BOOST_MAX, raw));
-
-	if (input.titleLen <= 0) return clamped;
-	const lengthMult = Math.min(1, LONG_TITLE_MAX_CHARS / input.titleLen);
-	return clamped * lengthMult;
+	const raw = 1 + config.demandSensitivity * input.normalizedDemand;
+	return Math.max(TOKEN_BOOST_MIN, Math.min(DEMAND_MULT_MAX, raw));
 }
 
 /**
  * Re-exported so callers wiring the refresh worker don't have to import from
- * two different modules to assemble a `computeTokenBoost` call.
+ * two different modules to assemble the matched-token → demand pipeline.
  */
 export type { MatchedToken };
 
