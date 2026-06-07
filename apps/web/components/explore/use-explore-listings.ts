@@ -1,10 +1,10 @@
 "use client";
 
-import type { CategoryKey } from "@nolie/schemas/ai/categories";
 import type {
 	ExploreListingsResponse,
 	ExploreSort,
 } from "@nolie/schemas/explore";
+import type { CategoryKey } from "@nolie/schemas/listing/categories";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { useExploreCategory } from "@/hooks/listings/use-category";
 import { useListingsSort } from "@/hooks/listings/use-sort";

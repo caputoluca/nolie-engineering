@@ -13,8 +13,8 @@
  */
 
 import { prisma } from "@nolie/db";
-import { CATEGORIES } from "@nolie/schemas/ai/categories";
 import type { ExtractedCardFacts } from "@nolie/schemas/ai/listing-extraction";
+import { CATEGORIES } from "@nolie/schemas/listing/categories";
 import { describe, expect, it } from "vitest";
 import { EXTRACTION_MODEL } from "../../../app/lib/ai/listing-extraction.js";
 import { recordListingGeneration } from "../../../app/lib/listings/generation.js";
