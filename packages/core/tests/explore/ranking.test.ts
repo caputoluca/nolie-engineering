@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
 	applyDiversity,
+	computeDemandMultiplier,
 	computeImageDemerit,
 	computePriceMult,
 	computeRankBaseScore,
 	computeRankScore,
-	computeTokenBoost,
 	DEFAULT_RANKING_CONFIG,
+	DEMAND_MULT_MAX,
 	type DiversityCandidate,
 	LONG_TITLE_MAX_CHARS,
 	matchesMerchKeyword,
@@ -14,7 +15,6 @@ import {
 	PLATEAU_HI_USD,
 	PLATEAU_LO_USD,
 	type RankingConfig,
-	TOKEN_BOOST_MAX,
 	TOKEN_BOOST_MIN,
 } from "../../src/explore/ranking.js";
 
@@ -22,7 +22,11 @@ const HOUR_MS = 3_600_000;
 
 const PENALTY = DEFAULT_RANKING_CONFIG.lowEffortPenalty; // 0.12
 const LONG_PENALTY = DEFAULT_RANKING_CONFIG.longTitlePenalty; // 0.04
-const RECENCY_W = DEFAULT_RANKING_CONFIG.weights.recency; // 0.30
+const RECENCY_W = DEFAULT_RANKING_CONFIG.weights.recency; // v3 PR2: 0.20
+// A representative nonzero in-band base for the composition tests below, so the
+// multiplicative demandMult / priceMult factors operate on a realistic additive
+// score rather than 0.
+const FRESH_BASE = 0.45;
 const CART_W = DEFAULT_RANKING_CONFIG.weights.cartAdd; // 0.10
 const TRUST_W = DEFAULT_RANKING_CONFIG.weights.sellerTrust; // 0.05
 // v8: weight is now "max contribution when in the [LO, HI] band" — the plateau
@@ -503,15 +507,15 @@ describe("matchesMerchKeyword", () => {
 describe("computeRankScore", () => {
 	it("scores a newer listing strictly higher than an older one with the same base", () => {
 		const now = new Date("2026-05-21T12:00:00Z");
-		const rankBaseScore = 0;
-		const tokenBoost = TOKEN_BOOST_MIN;
+		const rankBaseScore = FRESH_BASE;
+		const demandMult = TOKEN_BOOST_MIN;
 
 		const newer = computeRankScore(
 			{
 				rankBaseScore,
 				createdAt: new Date(now.getTime() - 1 * HOUR_MS),
 				now,
-				tokenBoost,
+				demandMult,
 			},
 			DEFAULT_RANKING_CONFIG,
 		);
@@ -520,7 +524,7 @@ describe("computeRankScore", () => {
 				rankBaseScore,
 				createdAt: new Date(now.getTime() - 240 * HOUR_MS),
 				now,
-				tokenBoost,
+				demandMult,
 			},
 			DEFAULT_RANKING_CONFIG,
 		);
@@ -528,9 +532,9 @@ describe("computeRankScore", () => {
 		expect(newer).toBeGreaterThan(older);
 	});
 
-	it("halves the recency contribution at exactly one half-life of age (tokenBoost=1)", () => {
+	it("halves the recency contribution at exactly one half-life of age (demandMult=1)", () => {
 		const now = new Date("2026-05-21T12:00:00Z");
-		const rankBaseScore = 0;
+		const rankBaseScore = FRESH_BASE;
 		const { recencyHalfLifeHours } = DEFAULT_RANKING_CONFIG;
 
 		const atHalfLife = computeRankScore(
@@ -538,7 +542,7 @@ describe("computeRankScore", () => {
 				rankBaseScore,
 				createdAt: new Date(now.getTime() - recencyHalfLifeHours * HOUR_MS),
 				now,
-				tokenBoost: TOKEN_BOOST_MIN,
+				demandMult: TOKEN_BOOST_MIN,
 			},
 			DEFAULT_RANKING_CONFIG,
 		);
@@ -550,19 +554,19 @@ describe("computeRankScore", () => {
 
 	it("floors a future-dated createdAt at age 0 (never exceeds the age-0 max)", () => {
 		const now = new Date("2026-05-21T12:00:00Z");
-		const rankBaseScore = 0;
+		const rankBaseScore = FRESH_BASE;
 
 		const future = computeRankScore(
 			{
 				rankBaseScore,
 				createdAt: new Date(now.getTime() + 100 * HOUR_MS),
 				now,
-				tokenBoost: TOKEN_BOOST_MIN,
+				demandMult: TOKEN_BOOST_MIN,
 			},
 			DEFAULT_RANKING_CONFIG,
 		);
 		const ageZero = computeRankScore(
-			{ rankBaseScore, createdAt: now, now, tokenBoost: TOKEN_BOOST_MIN },
+			{ rankBaseScore, createdAt: now, now, demandMult: TOKEN_BOOST_MIN },
 			DEFAULT_RANKING_CONFIG,
 		);
 
@@ -570,29 +574,30 @@ describe("computeRankScore", () => {
 		expect(future).toBe(rankBaseScore + RECENCY_W);
 	});
 
-	it("multiplies the additive score by tokenBoost (composition is multiplicative)", () => {
+	it("multiplies the additive score by demandMult (composition is multiplicative)", () => {
 		const now = new Date("2026-05-21T12:00:00Z");
-		const rankBaseScore = 0;
+		const rankBaseScore = FRESH_BASE;
 		const createdAt = new Date(now.getTime() - 0 * HOUR_MS); // age 0
+		const additive = FRESH_BASE + RECENCY_W; // age 0 → recency 1, qualityGate 1
 
 		const neutral = computeRankScore(
-			{ rankBaseScore, createdAt, now, tokenBoost: TOKEN_BOOST_MIN },
+			{ rankBaseScore, createdAt, now, demandMult: TOKEN_BOOST_MIN },
 			DEFAULT_RANKING_CONFIG,
 		);
 		const boosted = computeRankScore(
-			{ rankBaseScore, createdAt, now, tokenBoost: TOKEN_BOOST_MAX },
+			{ rankBaseScore, createdAt, now, demandMult: DEMAND_MULT_MAX },
 			DEFAULT_RANKING_CONFIG,
 		);
 
-		// Neutral: (0 + 0.30·1) · 1.0 = 0.30
-		expect(neutral).toBeCloseTo(RECENCY_W, 10);
-		// Boosted: (0 + 0.30·1) · 1.30 = 0.39
-		expect(boosted).toBeCloseTo(RECENCY_W * TOKEN_BOOST_MAX, 10);
-		expect(boosted).toBeCloseTo(neutral * TOKEN_BOOST_MAX, 10);
+		// Neutral: (base + 0.20·1) · 1.0
+		expect(neutral).toBeCloseTo(additive, 10);
+		// Boosted: (base + 0.20·1) · 2.0
+		expect(boosted).toBeCloseTo(additive * DEMAND_MULT_MAX, 10);
+		expect(boosted).toBeCloseTo(neutral * DEMAND_MULT_MAX, 10);
 	});
 
-	it("kill-switch: tokenBoost=1.0 collapses the multiplicative form to additive v1-shape", () => {
-		// The doc's invariant: writing tokenBoost=1.0 to every row reproduces
+	it("kill-switch: demandMult=1.0 collapses the multiplicative form to additive v1-shape", () => {
+		// The doc's invariant: writing demandMult=1.0 to every row reproduces
 		// the additive base+recency form exactly. This is what makes the
 		// ENABLE_TOKEN_BOOST kill-switch a clean rollback.
 		const now = new Date("2026-05-21T12:00:00Z");
@@ -600,7 +605,7 @@ describe("computeRankScore", () => {
 		const rankBaseScore = -0.05;
 
 		const withBoost = computeRankScore(
-			{ rankBaseScore, createdAt, now, tokenBoost: TOKEN_BOOST_MIN },
+			{ rankBaseScore, createdAt, now, demandMult: TOKEN_BOOST_MIN },
 			DEFAULT_RANKING_CONFIG,
 		);
 
@@ -612,7 +617,7 @@ describe("computeRankScore", () => {
 		expect(withBoost).toBeCloseTo(expectedAdditive, 10);
 	});
 
-	it("defaults tokenBoost to TOKEN_BOOST_MIN when caller omits it (back-compat)", () => {
+	it("defaults demandMult to TOKEN_BOOST_MIN when caller omits it (back-compat)", () => {
 		const now = new Date("2026-05-21T12:00:00Z");
 		const createdAt = now;
 
@@ -621,7 +626,7 @@ describe("computeRankScore", () => {
 			DEFAULT_RANKING_CONFIG,
 		);
 		const explicit = computeRankScore(
-			{ rankBaseScore: 0.05, createdAt, now, tokenBoost: TOKEN_BOOST_MIN },
+			{ rankBaseScore: 0.05, createdAt, now, demandMult: TOKEN_BOOST_MIN },
 			DEFAULT_RANKING_CONFIG,
 		);
 
@@ -629,154 +634,108 @@ describe("computeRankScore", () => {
 	});
 });
 
-describe("computeTokenBoost", () => {
-	const stats = { mu: 0.1, sigma: 0.05 }; // realistic-ish bucket stats
-	const shortTitleLen = SHORT_TITLE.length;
-
-	it("returns TOKEN_BOOST_MIN (neutral) when no tokens matched", () => {
-		const boost = computeTokenBoost(
-			{ tokenPHats: [], ...stats, titleLen: shortTitleLen },
+describe("computeDemandMultiplier", () => {
+	it("returns TOKEN_BOOST_MIN (neutral 1.0) at zero normalized demand", () => {
+		// The least-demanded listing in the scan (and the kill-switch path,
+		// which feeds 0) collapses to the additive form.
+		const mult = computeDemandMultiplier(
+			{ normalizedDemand: 0 },
 			DEFAULT_RANKING_CONFIG,
 		);
-		expect(boost).toBe(TOKEN_BOOST_MIN);
+		expect(mult).toBe(TOKEN_BOOST_MIN);
 	});
 
-	it("returns TOKEN_BOOST_MIN when sigma is zero (no signal to amplify)", () => {
-		const boost = computeTokenBoost(
-			{
-				tokenPHats: [0.5, 0.6],
-				mu: 0.1,
-				sigma: 0,
-				titleLen: shortTitleLen,
-			},
+	it("returns DEMAND_MULT_MAX at full normalized demand (default sensitivity 1.0)", () => {
+		// 1 + 1.0·1 = 2.0 = DEMAND_MULT_MAX — the most-demanded listing earns
+		// the full ceiling.
+		const mult = computeDemandMultiplier(
+			{ normalizedDemand: 1 },
 			DEFAULT_RANKING_CONFIG,
 		);
-		expect(boost).toBe(TOKEN_BOOST_MIN);
+		expect(mult).toBe(DEMAND_MULT_MAX);
 	});
 
-	it("clamps the boost to [TOKEN_BOOST_MIN, TOKEN_BOOST_MAX]", () => {
-		// Hugely above-average token (z = 100) should clamp at MAX.
-		const hot = computeTokenBoost(
-			{
-				tokenPHats: [stats.mu + 100 * stats.sigma],
-				...stats,
-				titleLen: shortTitleLen,
-			},
-			DEFAULT_RANKING_CONFIG,
-		);
-		// Hugely below-average token (z = -100) should clamp at MIN.
-		const cold = computeTokenBoost(
-			{
-				tokenPHats: [stats.mu - 100 * stats.sigma],
-				...stats,
-				titleLen: shortTitleLen,
-			},
-			DEFAULT_RANKING_CONFIG,
-		);
-
-		expect(hot).toBe(TOKEN_BOOST_MAX);
-		expect(cold).toBe(TOKEN_BOOST_MIN);
+	it("scales linearly between the floor and ceiling", () => {
+		// At the default sensitivity 1.0, mult = 1 + normalizedDemand.
+		expect(
+			computeDemandMultiplier(
+				{ normalizedDemand: 0.25 },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBeCloseTo(1.25, 10);
+		expect(
+			computeDemandMultiplier(
+				{ normalizedDemand: 0.5 },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBeCloseTo(1.5, 10);
+		expect(
+			computeDemandMultiplier(
+				{ normalizedDemand: 0.8 },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBeCloseTo(1.8, 10);
 	});
 
-	it("takes the MAX of matched tokens — never the sum (anti-stuffing guard)", () => {
-		// Four matched tokens with the same hot pHat should give exactly the
-		// SAME boost as a single matched token with that pHat. This is the
-		// single most important anti-keyword-stuffing decision (docs §2).
-		const hotP = stats.mu + 1.5 * stats.sigma;
-		const oneHot = computeTokenBoost(
-			{ tokenPHats: [hotP], ...stats, titleLen: shortTitleLen },
+	it("is monotonic: more demand never lowers the multiplier", () => {
+		const low = computeDemandMultiplier(
+			{ normalizedDemand: 0.1 },
 			DEFAULT_RANKING_CONFIG,
 		);
-		const fourHot = computeTokenBoost(
-			{
-				tokenPHats: [hotP, hotP, hotP, hotP],
-				...stats,
-				titleLen: shortTitleLen,
-			},
+		const mid = computeDemandMultiplier(
+			{ normalizedDemand: 0.5 },
 			DEFAULT_RANKING_CONFIG,
 		);
-		// And the max wins even when paired with lukewarm tokens.
-		const maxOfMixed = computeTokenBoost(
-			{
-				tokenPHats: [stats.mu, stats.mu - stats.sigma, hotP],
-				...stats,
-				titleLen: shortTitleLen,
-			},
+		const high = computeDemandMultiplier(
+			{ normalizedDemand: 0.9 },
 			DEFAULT_RANKING_CONFIG,
 		);
-
-		expect(fourHot).toBe(oneHot);
-		expect(maxOfMixed).toBe(oneHot);
+		expect(mid).toBeGreaterThan(low);
+		expect(high).toBeGreaterThan(mid);
 	});
 
-	it("applies the length damper when title exceeds LONG_TITLE_MAX_CHARS", () => {
-		const hotP = stats.mu + 100 * stats.sigma; // forces clamp to MAX
-		const fits = computeTokenBoost(
-			{ tokenPHats: [hotP], ...stats, titleLen: LONG_TITLE_MAX_CHARS },
-			DEFAULT_RANKING_CONFIG,
-		);
-		const doubled = computeTokenBoost(
-			{ tokenPHats: [hotP], ...stats, titleLen: LONG_TITLE_MAX_CHARS * 2 },
-			DEFAULT_RANKING_CONFIG,
-		);
-
-		// At exactly LONG_TITLE_MAX_CHARS: damper is min(1, 60/60)=1, no penalty.
-		expect(fits).toBe(TOKEN_BOOST_MAX);
-		// At 2× the cap: damper is 60/120 = 0.5; boost halved.
-		expect(doubled).toBeCloseTo(TOKEN_BOOST_MAX * 0.5, 10);
+	it("clamps to [TOKEN_BOOST_MIN, DEMAND_MULT_MAX] for out-of-range inputs", () => {
+		// Defensive: the worker normalizes into [0,1], but a negative or
+		// >1 input must never escape the clamp.
+		expect(
+			computeDemandMultiplier({ normalizedDemand: -5 }, DEFAULT_RANKING_CONFIG),
+		).toBe(TOKEN_BOOST_MIN);
+		expect(
+			computeDemandMultiplier({ normalizedDemand: 5 }, DEFAULT_RANKING_CONFIG),
+		).toBe(DEMAND_MULT_MAX);
 	});
 
-	it("length damper does NOT fire for unmatched listings (preserves neutrality)", () => {
-		// A 120-char title with NO matching tokens should still return MIN —
-		// the damper is a *token-boost* correction, not a universal long-title
-		// penalty (that's longTitlePenalty's job at the base-score level).
-		const boost = computeTokenBoost(
-			{ tokenPHats: [], ...stats, titleLen: 120 },
-			DEFAULT_RANKING_CONFIG,
-		);
-		expect(boost).toBe(TOKEN_BOOST_MIN);
-	});
-
-	it("a stuffer (5 hot tokens, 120-char title) pays the damper more than they gain", () => {
-		// The composite outcome that motivates pairing the damper with the
-		// MAX guard: even with 5 maximally-hot tokens, the 120-char title
-		// drags the boost below TOKEN_BOOST_MAX.
-		const hotP = stats.mu + 100 * stats.sigma;
-		const boost = computeTokenBoost(
-			{
-				tokenPHats: [hotP, hotP, hotP, hotP, hotP],
-				...stats,
-				titleLen: 120,
-			},
-			DEFAULT_RANKING_CONFIG,
-		);
-
-		expect(boost).toBeLessThan(TOKEN_BOOST_MAX);
-		expect(boost).toBeCloseTo(TOKEN_BOOST_MAX * 0.5, 10);
-	});
-
-	it("respects the configured sensitivity (tokenBoostSensitivity tunes the slope)", () => {
-		const hotP = stats.mu + 1.0 * stats.sigma; // exactly +1σ
-
-		const defaultK = computeTokenBoost(
-			{ tokenPHats: [hotP], ...stats, titleLen: shortTitleLen },
-			DEFAULT_RANKING_CONFIG,
-		);
-		const doubledK: RankingConfig = {
+	it("respects the configured demandSensitivity (tunes the slope)", () => {
+		const halfK: RankingConfig = {
 			...DEFAULT_RANKING_CONFIG,
-			tokenBoostSensitivity: DEFAULT_RANKING_CONFIG.tokenBoostSensitivity * 2,
+			demandSensitivity: 0.5,
 		};
-		const doubledOut = computeTokenBoost(
-			{ tokenPHats: [hotP], ...stats, titleLen: shortTitleLen },
-			doubledK,
-		);
-
-		// 1 + 0.20·1 = 1.20 with default; 1 + 0.40·1 = 1.40 with 2× → clamped 1.30.
-		expect(defaultK).toBeCloseTo(
-			1 + DEFAULT_RANKING_CONFIG.tokenBoostSensitivity,
+		// 1 + 0.5·1 = 1.5 at full demand with half sensitivity.
+		expect(computeDemandMultiplier({ normalizedDemand: 1 }, halfK)).toBeCloseTo(
+			1.5,
 			10,
 		);
-		expect(doubledOut).toBe(TOKEN_BOOST_MAX);
+		// A sensitivity above the headroom still clamps at the ceiling.
+		const bigK: RankingConfig = {
+			...DEFAULT_RANKING_CONFIG,
+			demandSensitivity: 3,
+		};
+		expect(computeDemandMultiplier({ normalizedDemand: 1 }, bigK)).toBe(
+			DEMAND_MULT_MAX,
+		);
+	});
+
+	it("the demandSensitivity knob is fully reversible (0 ⇒ always neutral)", () => {
+		const off: RankingConfig = {
+			...DEFAULT_RANKING_CONFIG,
+			demandSensitivity: 0,
+		};
+		expect(computeDemandMultiplier({ normalizedDemand: 1 }, off)).toBe(
+			TOKEN_BOOST_MIN,
+		);
+		expect(computeDemandMultiplier({ normalizedDemand: 0.5 }, off)).toBe(
+			TOKEN_BOOST_MIN,
+		);
 	});
 });
 
@@ -885,14 +844,14 @@ describe("computePriceMult", () => {
 });
 
 describe("computeRankScore with priceMult", () => {
-	it("priceMult multiplies the full (base + recency)·tokenBoost score", async () => {
+	it("priceMult multiplies the full (base + recency)·demandMult score", async () => {
 		const now = new Date("2026-05-21T12:00:00Z");
-		// Fresh listing, no base score, neutral tokenBoost → score = 0.30 · 1 · priceMult.
+		// Fresh listing, no base score, neutral demandMult → score = 0.20 · 1 · priceMult.
 		const fresh = {
-			rankBaseScore: 0,
+			rankBaseScore: FRESH_BASE,
 			createdAt: now,
 			now,
-			tokenBoost: 1.0,
+			demandMult: 1.0,
 		};
 		const neutral = computeRankScore(
 			{ ...fresh, priceMult: 1.0 },
@@ -906,15 +865,16 @@ describe("computeRankScore with priceMult", () => {
 			{ ...fresh, priceMult: 0.85 },
 			DEFAULT_RANKING_CONFIG,
 		);
-		expect(neutral).toBeCloseTo(RECENCY_W, 10);
-		expect(lifted).toBeCloseTo(RECENCY_W * 1.1, 10);
-		expect(demoted).toBeCloseTo(RECENCY_W * 0.85, 10);
+		const additive = FRESH_BASE + RECENCY_W; // age 0 → recency 1, qualityGate 1
+		expect(neutral).toBeCloseTo(additive, 10);
+		expect(lifted).toBeCloseTo(additive * 1.1, 10);
+		expect(demoted).toBeCloseTo(additive * 0.85, 10);
 	});
 
 	it("defaults priceMult to 1.0 — back-compat for callers that don't supply it", () => {
 		const now = new Date("2026-05-21T12:00:00Z");
 		const withDefault = computeRankScore(
-			{ rankBaseScore: 0, createdAt: now, now, tokenBoost: 1.0 },
+			{ rankBaseScore: 0, createdAt: now, now, demandMult: 1.0 },
 			DEFAULT_RANKING_CONFIG,
 		);
 		const withExplicit1 = computeRankScore(
@@ -922,7 +882,7 @@ describe("computeRankScore with priceMult", () => {
 				rankBaseScore: 0,
 				createdAt: now,
 				now,
-				tokenBoost: 1.0,
+				demandMult: 1.0,
 				priceMult: 1.0,
 			},
 			DEFAULT_RANKING_CONFIG,
@@ -930,19 +890,20 @@ describe("computeRankScore with priceMult", () => {
 		expect(withDefault).toBe(withExplicit1);
 	});
 
-	it("composes tokenBoost and priceMult multiplicatively (1.20 × 0.90 = 1.08)", () => {
+	it("composes demandMult and priceMult multiplicatively (1.50 × 0.90 = 1.35)", () => {
 		const now = new Date("2026-05-21T12:00:00Z");
 		const score = computeRankScore(
 			{
-				rankBaseScore: 0,
+				rankBaseScore: FRESH_BASE,
 				createdAt: now,
 				now,
-				tokenBoost: 1.2,
+				demandMult: 1.5,
 				priceMult: 0.9,
 			},
 			DEFAULT_RANKING_CONFIG,
 		);
-		expect(score).toBeCloseTo(RECENCY_W * 1.2 * 0.9, 10);
+		// (FRESH_BASE + RECENCY_W·1) · 1.5 · 0.9
+		expect(score).toBeCloseTo((FRESH_BASE + RECENCY_W) * 1.5 * 0.9, 10);
 	});
 });
 
