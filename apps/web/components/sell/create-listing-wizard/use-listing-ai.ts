@@ -47,13 +47,18 @@ export interface ListingAiApi {
 
 interface UseListingAiArgs {
 	imageKeys: string[];
+	/** Wizard-session id (NL-349) — forwarded to the generation request. */
+	sessionId?: string;
 }
 
 function differsMaterially(a: string, b: string): boolean {
 	return a.trim().toLowerCase() !== b.trim().toLowerCase();
 }
 
-export function useListingAi({ imageKeys }: UseListingAiArgs): ListingAiApi {
+export function useListingAi({
+	imageKeys,
+	sessionId,
+}: UseListingAiArgs): ListingAiApi {
 	const [debouncedKeys, debouncedControls] = useDebounce(
 		imageKeys,
 		DEBOUNCE_MS,
@@ -63,7 +68,10 @@ export function useListingAi({ imageKeys }: UseListingAiArgs): ListingAiApi {
 		},
 	);
 
-	const query = useGenerateListingFromPhotos({ imageKeys: debouncedKeys });
+	const query = useGenerateListingFromPhotos({
+		imageKeys: debouncedKeys,
+		sessionId,
+	});
 
 	// Controlled input values. Initialized empty; populated when the first
 	// successful result arrives (or kept empty on first failure).

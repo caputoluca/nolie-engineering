@@ -6,6 +6,13 @@ import { browser } from "@/lib/http/browser";
 
 interface UseGenerateListingFromPhotosArgs {
 	imageKeys: string[];
+	/**
+	 * Wizard-session id (NL-349). Sent with every generation so the server can
+	 * group a seller's re-rolls in the generation log. Deliberately NOT part of
+	 * the query key — it's stable for the wizard's lifetime, and a re-roll
+	 * (hero swap) should reuse it, not invalidate the cache.
+	 */
+	sessionId?: string;
 }
 
 /**
@@ -18,6 +25,7 @@ interface UseGenerateListingFromPhotosArgs {
  */
 export function useGenerateListingFromPhotos({
 	imageKeys,
+	sessionId,
 }: UseGenerateListingFromPhotosArgs) {
 	const signature = imageKeys[0] ?? "";
 
@@ -33,7 +41,7 @@ export function useGenerateListingFromPhotos({
 		queryFn: async ({ signal }) => {
 			const res = await browser.post<GenerateListingFromPhotoResponse>(
 				"/listings/generate",
-				{ imageKeys },
+				{ imageKeys, ...(sessionId && { sessionId }) },
 				{ signal },
 			);
 			return res.data;

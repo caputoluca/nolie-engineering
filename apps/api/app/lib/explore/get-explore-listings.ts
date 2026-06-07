@@ -1,4 +1,8 @@
-import type { CacheOf } from "@nolie/cache";
+import type {
+	CacheOf,
+	ExploreSnapshot,
+	ExploreSnapshotEntry,
+} from "@nolie/cache";
 import {
 	applyDiversity,
 	compareForSnapshot,
@@ -213,6 +217,12 @@ interface ExploreCursor {
 	 * that one continuation — no crash, self-heals on the next fresh page 0.
 	 */
 	q?: string;
+	/**
+	 * Category filter the sublist was frozen under (NL-349). Absent on the
+	 * "All" feed; carried forward so every page of a category scroll filters
+	 * the same frozen list (and `o` indexes into that filtered sublist).
+	 */
+	c?: string;
 }
 
 function encodeCursor(c: ExploreCursor): string {
@@ -223,7 +233,12 @@ function decodeCursor(raw: string): ExploreCursor | null {
 	try {
 		const c = JSON.parse(Buffer.from(raw, "base64url").toString());
 		if (typeof c?.e === "number" && typeof c?.o === "number") {
-			return { e: c.e, o: c.o, q: typeof c?.q === "string" ? c.q : undefined };
+			return {
+				e: c.e,
+				o: c.o,
+				q: typeof c?.q === "string" ? c.q : undefined,
+				c: typeof c?.c === "string" ? c.c : undefined,
+			};
 		}
 	} catch {
 		// Malformed/foreign cursor (e.g. a legacy id-cursor after a kill-switch
@@ -255,7 +270,16 @@ interface SnapshotBuildLog {
 export async function selectRankedCandidateIds(
 	db: DbClient,
 	candidateLimit: number,
-): Promise<{ orderedIds: string[]; candidateCount: number }> {
+): Promise<{
+	orderedIds: string[];
+	candidateCount: number;
+	/**
+	 * id → categoryId for the candidate set (NL-349). The snapshot build zips
+	 * this onto the ordered ids so the category filter is an in-memory pass.
+	 * The Klaviyo trending consumer ignores it (id-only), so it stays free.
+	 */
+	categoryById: Map<string, string | null>;
+}> {
 	const rows = await db.listing.findMany({
 		where: buildExploreWhere(),
 		select: {
@@ -265,6 +289,7 @@ export async function selectRankedCandidateIds(
 			sortPriority: true,
 			sortTimeMs: true,
 			rankScore: true,
+			categoryId: true,
 		},
 		orderBy: [{ sortPriority: "asc" }, { rankScore: "desc" }, { id: "asc" }],
 		take: candidateLimit,
@@ -273,23 +298,24 @@ export async function selectRankedCandidateIds(
 	return {
 		orderedIds: applyDiversity(rows, DEFAULT_RANKING_CONFIG),
 		candidateCount: rows.length,
+		categoryById: new Map(rows.map((r) => [r.id, r.categoryId ?? null])),
 	};
 }
 
-async function buildSnapshotIds(
+async function buildSnapshotEntries(
 	db: DbClient,
 	rankEpoch: number,
-): Promise<string[]> {
+): Promise<ExploreSnapshotEntry[]> {
 	const start = Date.now();
-	const { orderedIds, candidateCount } = await selectRankedCandidateIds(
-		db,
-		EXPLORE_CANDIDATE_LIMIT,
-	);
-	const ids = orderedIds.slice(0, EXPLORE_SNAPSHOT_DEPTH);
+	const { orderedIds, candidateCount, categoryById } =
+		await selectRankedCandidateIds(db, EXPLORE_CANDIDATE_LIMIT);
+	const entries = orderedIds
+		.slice(0, EXPLORE_SNAPSHOT_DEPTH)
+		.map((id) => ({ id, categoryId: categoryById.get(id) ?? null }));
 
 	const log: SnapshotBuildLog = {
 		candidateCount,
-		keptCount: ids.length,
+		keptCount: entries.length,
 		rankEpoch,
 		buildMs: Date.now() - start,
 	};
@@ -297,7 +323,7 @@ async function buildSnapshotIds(
 		{ event: "explore_snapshot_build", ...log },
 		"explore snapshot built",
 	);
-	return ids;
+	return entries;
 }
 
 interface HydratedWindow {
@@ -359,10 +385,14 @@ async function loadRankedExploreListings(
 	// recovers it from the cursor. So all pages of one scroll — and the actions
 	// taken on them — attribute under one id and join cleanly.
 	const queryId = parsed?.q ?? requestQueryId;
+	// Category the sublist is frozen under: minted from the request on page 0,
+	// recovered from the cursor on every later page so a category scroll keeps
+	// filtering the same frozen list even if the request param drifts.
+	const category = parsed?.c ?? query.category;
 
 	const loadSnapshot = (epoch: number) =>
 		snapshotCache.get(`${epoch}`, {
-			load: async () => ({ ids: await buildSnapshotIds(db, epoch) }),
+			load: async () => ({ entries: await buildSnapshotEntries(db, epoch) }),
 		});
 
 	// Continuing a scroll whose epoch has since rolled: prefer the snapshot
@@ -370,7 +400,7 @@ async function loadRankedExploreListings(
 	// expired, fall forward to the current epoch and skip ahead by the offset
 	// (rare boundary dup — the documented industry tradeoff, §8).
 	let effectiveEpoch = currentEpoch;
-	let frozen: { ids: string[] } | null = null;
+	let frozen: ExploreSnapshot | null = null;
 	if (parsed && parsed.e !== currentEpoch) {
 		const stable = await snapshotCache.get(`${parsed.e}`);
 		if (stable) {
@@ -380,7 +410,16 @@ async function loadRankedExploreListings(
 	}
 	const snap = frozen ?? (await loadSnapshot(currentEpoch));
 
-	const window = snap.ids.slice(offset, offset + limit);
+	// Category filter (NL-349): one global snapshot, filtered in memory. "All"
+	// (no category) keeps the full frozen list; a category narrows it, with
+	// `offset` indexing into the FILTERED sublist so the page math + rank
+	// positions stay exact. Untagged rows (categoryId null) match no category
+	// and surface only in "All".
+	const entries = category
+		? snap.entries.filter((e) => e.categoryId === category)
+		: snap.entries;
+
+	const window = entries.slice(offset, offset + limit).map((e) => e.id);
 	const { listings, impressions } = await hydrateWindow(
 		db,
 		window,
@@ -389,8 +428,13 @@ async function loadRankedExploreListings(
 	);
 	const nextOffset = offset + limit;
 	const nextCursor =
-		nextOffset < snap.ids.length
-			? encodeCursor({ e: effectiveEpoch, o: nextOffset, q: queryId })
+		nextOffset < entries.length
+			? encodeCursor({
+					e: effectiveEpoch,
+					o: nextOffset,
+					q: queryId,
+					...(category ? { c: category } : {}),
+				})
 			: null;
 
 	return { listings, nextCursor, impressions, queryId };
