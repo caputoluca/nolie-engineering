@@ -16,7 +16,7 @@ const KEY_PREFIX = `${getFolder(Upload.auctionAsset)}/`;
 export const EXTRACTION_MODEL = "claude-haiku-4-5-20251001";
 
 // Versioned provenance (NL-349): bump when the prompt or the structured-output
-// schema changes so a recorded `ListingAiExtraction` row can be reproduced /
+// schema changes so a recorded `ListingGeneration` row can be reproduced /
 // evaluated against the exact extraction code that produced it.
 export const EXTRACTION_PROMPT_VERSION = 1;
 export const EXTRACTION_SCHEMA_VERSION = 1;
