@@ -13,7 +13,13 @@ import { getBucket, getFolder, getPresignedReadURL } from "../uploads.js";
 
 const KEY_PREFIX = `${getFolder(Upload.auctionAsset)}/`;
 
-const MODEL = "claude-haiku-4-5-20251001";
+export const EXTRACTION_MODEL = "claude-haiku-4-5-20251001";
+
+// Versioned provenance (NL-349): bump when the prompt or the structured-output
+// schema changes so a recorded `ListingAiExtraction` row can be reproduced /
+// evaluated against the exact extraction code that produced it.
+export const EXTRACTION_PROMPT_VERSION = 1;
+export const EXTRACTION_SCHEMA_VERSION = 1;
 
 const PROMPT = dedent`
 You are extracting structured identifiers from a photo of a collectible card.
@@ -122,7 +128,7 @@ export async function extractCardFacts({
 
 	const startedAt = Date.now();
 	const response = await ai.claude.messages.parse({
-		model: MODEL,
+		model: EXTRACTION_MODEL,
 		max_tokens: 1024,
 		messages: [
 			{
