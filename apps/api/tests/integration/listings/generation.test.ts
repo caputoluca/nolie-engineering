@@ -16,6 +16,7 @@ import { prisma } from "@nolie/db";
 import { CATEGORIES } from "@nolie/schemas/ai/categories";
 import type { ExtractedCardFacts } from "@nolie/schemas/ai/listing-extraction";
 import { describe, expect, it } from "vitest";
+import { EXTRACTION_MODEL } from "../../../app/lib/ai/listing-extraction.js";
 import { recordListingGeneration } from "../../../app/lib/listings/generation.js";
 import {
 	assertResponse,
@@ -125,7 +126,7 @@ describe("listing generation log + category linkage (NL-349)", () => {
 			listingId: id,
 			predictedCategory: "pokemon",
 			sellerFinalCategory: "pokemon",
-			modelId: "claude-haiku-4-5-20251001",
+			modelId: EXTRACTION_MODEL,
 		});
 		// Derived delta: predicted === final → not corrected.
 		expect(generation.predictedCategory).toBe(generation.sellerFinalCategory);
@@ -227,6 +228,50 @@ describe("listing generation log + category linkage (NL-349)", () => {
 		});
 		expect(generation.listingId).toBeNull();
 		expect(generation.sellerFinalCategory).toBeNull();
+	});
+
+	it("links a generation once — a second listing from the same id can't relink it", async () => {
+		// The `listingId: null` guard on the link's updateMany is what makes it
+		// idempotent (re-roll, double-submit, or a stale generationId reused on a
+		// later listing). The first listing wins; a second create echoing the same
+		// generationId must not re-point the label.
+		// Arrange
+		const seller = await createTestSellerUser({ onboarded: true });
+		const api = createApiClient(seller);
+		const generationId = await seedGeneration(seller.user.id, POKEMON_FACTS);
+
+		// Act — listing A claims the generation, listing B reuses the same id
+		const responseA = await createListing(
+			api,
+			binData({ generationId, categoryId: "pokemon" }),
+		);
+		const { id: listingA } = await assertResponse<{ id: string }>(
+			responseA,
+			201,
+		);
+		const responseB = await createListing(
+			api,
+			binData({ generationId, categoryId: "magic" }),
+		);
+		const { id: listingB } = await assertResponse<{ id: string }>(
+			responseB,
+			201,
+		);
+
+		// Assert — B is a valid listing with its own category...
+		expect(listingB).not.toBe(listingA);
+		const bRow = await prisma.listing.findUniqueOrThrow({
+			where: { id: listingB },
+			select: { categoryId: true },
+		});
+		expect(bRow.categoryId).toBe("magic");
+
+		// ...but the generation stays linked to A, label unchanged.
+		const generation = await prisma.listingGeneration.findUniqueOrThrow({
+			where: { id: generationId },
+		});
+		expect(generation.listingId).toBe(listingA);
+		expect(generation.sellerFinalCategory).toBe("pokemon");
 	});
 
 	it("seeds the category taxonomy from the code constant", async () => {
