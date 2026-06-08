@@ -13,7 +13,13 @@ import { getBucket, getFolder, getPresignedReadURL } from "../uploads.js";
 
 const KEY_PREFIX = `${getFolder(Upload.auctionAsset)}/`;
 
-const MODEL = "claude-haiku-4-5-20251001";
+export const EXTRACTION_MODEL = "claude-haiku-4-5-20251001";
+
+// Versioned provenance (NL-349): bump when the prompt or the structured-output
+// schema changes so a recorded `ListingGeneration` row can be reproduced /
+// evaluated against the exact extraction code that produced it.
+export const EXTRACTION_PROMPT_VERSION = 1;
+export const EXTRACTION_SCHEMA_VERSION = 1;
 
 const PROMPT = dedent`
 You are extracting structured identifiers from a photo of a collectible card.
@@ -87,6 +93,73 @@ Use ISO 639-1 codes for language: "EN" (English), "JA" (Japanese), "KO" (Korean)
 	<bad>certNumber: "12345678"  (best-guess fabrication)</bad>
 	<good>certNumber: ""</good>
 </cert_extraction_examples>
+
+---
+
+Finally, classify the item's GAME and buyer-facing CATEGORY. This is separate
+from everything above and must not change any field you already extracted.
+
+game: the franchise as printed or recognizable — "Pokemon", "Magic: The
+Gathering", "One Piece", "Yu-Gi-Oh!", "Disney Lorcana", "Dragon Ball", and so
+on. Report it even for sealed product, accessories, or art. Use "" only if you
+genuinely cannot tell.
+
+category: apply the FIRST rule that matches, top to bottom, then stop:
+1. A sealed / unopened product of any game (booster box, ETB, booster pack,
+   sealed tin) -> "sealed"
+2. An accessory (card sleeves, playmat, deck box, binder, toploader) -> "accessories"
+3. A standalone print, poster, or piece of artwork that is NOT a playable
+   card -> "art"
+4. A single playable card, raw or graded -> its game: "pokemon", "magic",
+   "onepiece", "yugioh", "lorcana", or "dragonball"
+5. The item or its game cannot be identified -> "unknown"
+
+Rules that prevent the common mistakes:
+- Alt-art, full-art, special-illustration, and illustration-rare cards are
+  still CARDS. Classify them by game (rule 4). NEVER "art".
+- "art" is only for items that are not cards at all (a framed print, an
+  artist's poster). If you can see card text, HP, mana, or a card number, it is
+  a card, not art.
+- A graded slab is still a single card -> classify by the game inside the slab.
+- A game not listed in rule 4 (Digimon, Flesh & Blood, a sports card) has no
+  category here: set category to "unknown" but still report what you can in game.
+- category is independent of kind: a sealed box is kind "other" but category
+  "sealed"; a slab is kind "slab" but category is its game.
+
+<category_examples>
+	<example>
+		<item>Raw Charizard single, Pokemon</item>
+		<game>Pokemon</game>
+		<category>pokemon</category>
+	</example>
+	<example>
+		<item>Pokemon Elite Trainer Box, shrink-wrapped</item>
+		<game>Pokemon</game>
+		<category>sealed</category>
+		<why>Rule 1 — a sealed product wins over the game.</why>
+	</example>
+	<example>
+		<item>Umbreon VMAX alternate-art card</item>
+		<game>Pokemon</game>
+		<category>pokemon</category>
+		<why>An alt-art CARD is a card. Rule 4, never "art".</why>
+	</example>
+	<example>
+		<item>One Piece TCG playmat</item>
+		<game>One Piece</game>
+		<category>accessories</category>
+	</example>
+	<example>
+		<item>Raw Magic: The Gathering dual-land single</item>
+		<game>Magic: The Gathering</game>
+		<category>magic</category>
+	</example>
+	<example>
+		<item>Unlabeled mixed lot, item unclear from the photo</item>
+		<game></game>
+		<category>unknown</category>
+	</example>
+</category_examples>
 `;
 
 export async function extractCardFacts({
@@ -122,7 +195,7 @@ export async function extractCardFacts({
 
 	const startedAt = Date.now();
 	const response = await ai.claude.messages.parse({
-		model: MODEL,
+		model: EXTRACTION_MODEL,
 		max_tokens: 1024,
 		messages: [
 			{
@@ -139,6 +212,8 @@ export async function extractCardFacts({
 		kind: "other" as const,
 		confidence: 0,
 		fields: {},
+		game: "",
+		category: "unknown" as const,
 	};
 	logger.debug(
 		{
