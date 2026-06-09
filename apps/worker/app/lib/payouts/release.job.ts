@@ -804,21 +804,15 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		// NL-263: the transfer just landed earnings on the seller's connect
 		// balance, so refresh the wallet-balance cache now — the payouts page reads
 		// SellerBalance.availableCents (not live Stripe per load), so without this a
-		// released sale wouldn't show as available until the nightly pass.
-		// Fire-and-forget: a refresh blip is self-healed by the next event / nightly.
-		void refreshSellerBalance(
+		// released sale wouldn't show as available until the nightly pass. AWAITED
+		// (not fire-and-forget): release is a background job so the getBalance
+		// latency is fine, and awaiting keeps the cache write inside the job rather
+		// than leaking it. refreshSellerBalance is best-effort/non-throwing, so a
+		// refresh blip can't fail the release — the next event / nightly self-heals.
+		await refreshSellerBalance(
 			{ prisma: ctx.prisma, payments: ctx.payments },
 			{ sellerProfileId: earning.sellerProfileId, connectAccountId },
-		).catch((err) => {
-			reportError(err, {
-				operation: "release_refresh_seller_balance",
-				extra: { earningId, sellerProfileId: earning.sellerProfileId },
-			});
-			logger.warn(
-				{ err, earningId },
-				"payout.release: failed to refresh seller balance cache",
-			);
-		});
+		);
 
 		if (orderIdForNotification) {
 			void ctx.queues.notifications
