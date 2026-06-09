@@ -19,6 +19,7 @@ import {
 	markPayoutAsFailed,
 	reschedulePayoutForInsufficientFunds,
 } from "./release-utils.js";
+import { refreshSellerBalance } from "./seller-balance.js";
 import { finalizeReleasedTransfer } from "./transfer-reconcile.js";
 import type { PayoutJob } from "./types.js";
 
@@ -798,6 +799,25 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 					destinationPaymentId: result.destinationPaymentId,
 				},
 			});
+		});
+
+		// NL-263: the transfer just landed earnings on the seller's connect
+		// balance, so refresh the wallet-balance cache now — the payouts page reads
+		// SellerBalance.availableCents (not live Stripe per load), so without this a
+		// released sale wouldn't show as available until the nightly pass.
+		// Fire-and-forget: a refresh blip is self-healed by the next event / nightly.
+		void refreshSellerBalance(
+			{ prisma: ctx.prisma, payments: ctx.payments },
+			{ sellerProfileId: earning.sellerProfileId, connectAccountId },
+		).catch((err) => {
+			reportError(err, {
+				operation: "release_refresh_seller_balance",
+				extra: { earningId, sellerProfileId: earning.sellerProfileId },
+			});
+			logger.warn(
+				{ err, earningId },
+				"payout.release: failed to refresh seller balance cache",
+			);
 		});
 
 		if (orderIdForNotification) {
