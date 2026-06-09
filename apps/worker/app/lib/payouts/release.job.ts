@@ -3,13 +3,13 @@ import {
 	isPrismaRecordNotFoundError,
 	isPrismaUniqueError,
 	PayoutStatus,
-	type Prisma,
 } from "@nolie/db";
 import { PaymentErrorCode } from "@nolie/payments";
 import { config } from "../../config.js";
 import { logger } from "../../logger.js";
 import { RetryableError } from "../../retryable-error.js";
 import { reportError, reportWarning } from "../observability/sentry/report.js";
+import { finalizeReleasedTransfer } from "../webhooks/stripe-connect/_reconcile.js";
 import type { PayoutsContext } from "./context.js";
 import {
 	abandonFeeNettedTransfer,
@@ -752,51 +752,51 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 
 	try {
 		await ctx.prisma.$transaction(async (tx) => {
-			// 1. Update the PayoutTransfer row with the Stripe IDs. Status
-			//    stays `pending` — flips to `succeeded` when payout.paid
-			//    webhook lands.
-			await tx.payoutTransfer.update({
-				where: { id: payoutTransferId },
-				data: {
-					stripeTransferId: result.transferId,
-					stripeDestinationPaymentId: result.destinationPaymentId,
-				},
-			});
-
-			// 2. Flip the lines this transfer claimed in Phase 1 to paid.
-			//    payoutTransferId was set under the claim mutex already;
-			//    here we only stamp paidAt. Orphan shim has no lines.
-			if (!isOrphan) {
-				await tx.earningLine.updateMany({
-					where: { payoutTransferId, paidAt: null },
-					data: { paidAt: now },
+			// Legacy dual-write on the FIRST transfer only: record the single-
+			// Transfer fields on the Earning so (a) the orphan-shim rollup can
+			// follow `Earning.stripeTransferId` (orphans have no EarningLines) and
+			// (b) any old webhook handler still mid-deploy can find this Earning.
+			// MUST precede `finalizeReleasedTransfer` so the orphan rollup it runs
+			// sees the dual-written id. `updateMany` (not `update`) + the
+			// non-terminal guard: a concurrent refund flipping the Earning terminal
+			// in this window just no-ops the write rather than aborting the whole
+			// tx — the Stripe transfer already moved money and must be finalized
+			// regardless (the rollup below skips terminal earnings).
+			if (earning.stripeTransferId === null) {
+				await tx.earning.updateMany({
+					where: {
+						id: earningId,
+						payoutStatus: {
+							in: [
+								PayoutStatus.in_review,
+								PayoutStatus.pending,
+								PayoutStatus.succeeded,
+							],
+						},
+					},
+					data: {
+						stripeTransferId: result.transferId,
+						stripeDestinationPaymentId: result.destinationPaymentId,
+					},
 				});
 			}
 
-			// 3. Update Earning aggregate. Dual-write the legacy single-
-			//    Transfer fields ON THE FIRST TRANSFER ONLY so the old
-			//    webhook handler (still running on some pods during the
-			//    deploy window) can find this Earning. Subsequent partial
-			//    transfers are tracked only via PayoutTransfer.
-			const earningUpdate: Prisma.EarningUpdateInput = {
-				payoutStatus: PayoutStatus.pending,
-			};
-			if (earning.stripeTransferId === null) {
-				earningUpdate.stripeTransferId = result.transferId;
-				earningUpdate.stripeDestinationPaymentId = result.destinationPaymentId;
-			}
-			await tx.earning.update({
-				where: {
-					id: earningId,
-					payoutStatus: {
-						in: [
-							PayoutStatus.in_review,
-							PayoutStatus.pending,
-							PayoutStatus.succeeded,
-						],
-					},
+			// NL-263: the transfer LANDED on the seller's connect balance — that
+			// IS the release under the wallet model. Finalize the PayoutTransfer
+			// to `succeeded` + stamp its lines paid + roll the Earning up now, off
+			// the `transfers.create` response, instead of waiting for a
+			// `payout.paid` webhook (none follows under manual payout scheduling).
+			// The reconcile transfer sweep is the crash-recovery backstop.
+			await finalizeReleasedTransfer({
+				tx,
+				payoutTransferId,
+				earningId,
+				markLinesPaid: !isOrphan,
+				now,
+				stripeIds: {
+					transferId: result.transferId,
+					destinationPaymentId: result.destinationPaymentId,
 				},
-				data: earningUpdate,
 			});
 		});
 
