@@ -33,7 +33,6 @@ interface PayoutDestination {
 interface SellerForWithdrawal {
 	id: string;
 	connectAccountId: string;
-	availableCents: number;
 	payoutAccounts: PayoutDestination[];
 }
 
@@ -85,7 +84,6 @@ async function loadSellerForWithdrawal(
 			id: true,
 			connectAccountId: true,
 			payoutsEnabled: true,
-			sellerBalance: { select: { availableCents: true } },
 			payoutAccounts: {
 				select: {
 					stripeExternalAccountId: true,
@@ -108,7 +106,6 @@ async function loadSellerForWithdrawal(
 	return {
 		id: seller.id,
 		connectAccountId: seller.connectAccountId,
-		availableCents: seller.sellerBalance?.availableCents ?? 0,
 		payoutAccounts: seller.payoutAccounts,
 	};
 }
@@ -146,21 +143,6 @@ function resolveDestination(
 		});
 	}
 	return fallback;
-}
-
-/** Sum of the seller's in-flight withdrawals (already debiting the balance). */
-async function inFlightWithdrawalCents(
-	db: PrismaClient,
-	sellerProfileId: string,
-): Promise<number> {
-	const agg = await db.withdrawal.aggregate({
-		where: {
-			sellerProfileId,
-			status: { in: ["requested", "submitted"] },
-		},
-		_sum: { amountCents: true },
-	});
-	return agg._sum.amountCents ?? 0;
 }
 
 /**
@@ -275,15 +257,10 @@ export async function requestWithdrawal(
 		);
 	}
 
-	const inFlight = await inFlightWithdrawalCents(db, seller.id);
-	const availableCents = seller.availableCents - inFlight;
-
-	if (amountCents > availableCents) {
-		throw errors.badRequest("Amount exceeds your available balance", {
-			code: "INSUFFICIENT_BALANCE",
-		});
-	}
-
+	// We deliberately do NOT pre-check the STANDARD available balance: nothing
+	// populates the SellerBalance cache in PR3 (it's the PR4 page's concern), and
+	// payouts.create gates standard precisely (balance_insufficient → the accurate
+	// "amount exceeds available" below). Stripe is the authoritative gate.
 	if (method === "instant") {
 		if (!destination.instantEligible) {
 			throw errors.badRequest(
@@ -297,10 +274,14 @@ export async function requestWithdrawal(
 				{ code: "INSTANT_LIMIT_EXCEEDED" },
 			);
 		}
-		// Live per-destination gate: net_available can be tighter than the general
-		// balance (instant fee netting, the ~24h window), and Stripe hard-rejects an
-		// over-balance instant payout. A read failure isn't fatal — proceed and let
-		// payouts.create be the gate (it maps any instant rejection to a typed error).
+		// Live per-destination instant gate. Worth a Stripe read for instant
+		// (premium, low volume) because Stripe has NO instant-specific
+		// insufficient code: an instant payout over net_available but under the
+		// general available balance comes back as generic `balance_insufficient`,
+		// which would mislead the seller with "amount exceeds available" when they
+		// DO have it (just not instantly). This is the only way to give the correct
+		// "instant unavailable for this amount, use standard" message + fallback.
+		// Best-effort: a read failure proceeds and lets payouts.create be the gate.
 		const netAvailable = await readInstantNetAvailable(
 			payments,
 			seller.connectAccountId,
