@@ -9,7 +9,6 @@ import { config } from "../../config.js";
 import { logger } from "../../logger.js";
 import { RetryableError } from "../../retryable-error.js";
 import { reportError, reportWarning } from "../observability/sentry/report.js";
-import { finalizeReleasedTransfer } from "../webhooks/stripe-connect/_reconcile.js";
 import type { PayoutsContext } from "./context.js";
 import {
 	abandonFeeNettedTransfer,
@@ -20,6 +19,7 @@ import {
 	markPayoutAsFailed,
 	reschedulePayoutForInsufficientFunds,
 } from "./release-utils.js";
+import { finalizeReleasedTransfer } from "./transfer-reconcile.js";
 import type { PayoutJob } from "./types.js";
 
 /**
