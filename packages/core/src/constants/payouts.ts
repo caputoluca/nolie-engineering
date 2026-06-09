@@ -100,3 +100,43 @@ export const LETTER_DEEMED_DELIVERED_BUSINESS_DAYS =
 export function getLetterDeemedDeliveredAt(now: Date = new Date()): Date {
 	return getDeemedDeliveredAt(now);
 }
+
+// ─────────────────────────────────────────────────────────────
+//  Seller wallet withdrawals (NL-263)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Minimum cents per withdrawal — Stripe's own floor for a payout. Applies to
+ * both standard and instant.
+ */
+export const WITHDRAWAL_MIN_CENTS = 50;
+
+/**
+ * Maximum cents per INSTANT withdrawal ($9,999). Stripe caps a single instant
+ * payout; over this the seller uses the free standard lane. Standard has no
+ * per-payout cap of ours.
+ */
+export const INSTANT_WITHDRAWAL_MAX_CENTS = 999_900;
+
+/**
+ * Instant withdrawal fee: 1.75% with a $0.50 floor and NO cap (Stripe's instant
+ * cost is a flat uncapped 1%, so a low cap would lose money on large payouts;
+ * the free standard lane is the escape valve). Configured for real in the Stripe
+ * Platform Pricing Tool — Stripe collects it automatically. These mirror that
+ * config so we can quote the seller and record `feeChargedCents`/`platformFeeCents`.
+ */
+export const INSTANT_WITHDRAWAL_FEE_BPS = 175;
+export const INSTANT_WITHDRAWAL_FEE_MIN_CENTS = 50;
+
+/**
+ * The fee a seller pays for an instant withdrawal of `amountCents`. Half-up
+ * integer math (BigInt) so we never drift a cent against Stripe's own rounding,
+ * then the $0.50 floor. Stripe's ~1% cost is recorded separately as the cost
+ * basis; this is what the seller is charged (== our gross take).
+ */
+export function computeInstantWithdrawalFeeCents(amountCents: number): number {
+	const proportional = Number(
+		(BigInt(INSTANT_WITHDRAWAL_FEE_BPS) * BigInt(amountCents) + 5000n) / 10000n,
+	);
+	return Math.max(INSTANT_WITHDRAWAL_FEE_MIN_CENTS, proportional);
+}
