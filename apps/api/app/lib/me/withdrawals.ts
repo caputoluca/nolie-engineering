@@ -5,7 +5,11 @@ import {
 	INSTANT_WITHDRAWAL_MAX_CENTS,
 	WITHDRAWAL_MIN_CENTS,
 } from "@nolie/core/constants/payouts";
-import { isPrismaUniqueError, type PrismaClient } from "@nolie/db";
+import {
+	isPrismaUniqueError,
+	type PrismaClient,
+	WithdrawalStatus,
+} from "@nolie/db";
 import { errors } from "@nolie/errors/http";
 import {
 	PaymentErrorCode,
@@ -68,7 +72,12 @@ function toResponse(row: WithdrawalRow): RequestWithdrawalResponse {
 		amountCents: row.amountCents,
 		method: row.method,
 		feeCents: row.feeChargedCents,
-		estimatedReceiveCents: row.amountCents - row.feeChargedCents,
+		// The seller receives the FULL amount: Stripe's payout `amount` is what
+		// lands in the bank, and we pass the entered amount (already capped at
+		// `instant_available.net_available`, which is net of our fee). The instant
+		// fee is collected separately from the connect balance — NOT subtracted from
+		// the payout — so receive == amount, never amount − fee.
+		estimatedReceiveCents: row.amountCents,
 		stripePayoutId: row.stripePayoutId,
 		arrivalDate: row.arrivalDate?.toISOString() ?? null,
 	};
@@ -169,6 +178,43 @@ async function readInstantNetAvailable(
 	return match?.netAvailableCents ?? null;
 }
 
+/**
+ * The seller's withdrawable balance from the cached Stripe snapshot, minus the
+ * in-flight withdrawals that snapshot doesn't yet reflect — the SAME math the
+ * payouts page renders (`getPayoutsView`). Returns null when the cache was never
+ * materialized (`syncedAt` null): we then have no trustworthy local figure and
+ * defer entirely to Stripe's own balance gate. Not race-free for two SIMULTANEOUS
+ * requests (both read before either inserts); Stripe's atomic check is the final
+ * backstop. This closes the common case: a second withdrawal while an earlier one
+ * is still in flight.
+ */
+async function getEffectiveAvailableCents(
+	db: PrismaClient,
+	sellerProfileId: string,
+): Promise<number | null> {
+	const cache = await db.sellerBalance.findUnique({
+		where: { sellerProfileId },
+		select: { availableCents: true, syncedAt: true },
+	});
+	if (!cache?.syncedAt) return null;
+
+	const inflight = await db.withdrawal.aggregate({
+		where: {
+			sellerProfileId,
+			status: {
+				in: [
+					WithdrawalStatus.requested,
+					WithdrawalStatus.submitted,
+					WithdrawalStatus.paid,
+				],
+			},
+			OR: [{ submittedAt: null }, { submittedAt: { gte: cache.syncedAt } }],
+		},
+		_sum: { amountCents: true },
+	});
+	return cache.availableCents - (inflight._sum.amountCents ?? 0);
+}
+
 /** Map a Stripe payout failure to the typed, seller-facing HTTP error. */
 function withdrawalFailureError(
 	error: PaymentErrorCodeType,
@@ -262,10 +308,19 @@ export async function requestWithdrawal(
 		);
 	}
 
-	// We deliberately do NOT pre-check the STANDARD available balance: nothing
-	// populates the SellerBalance cache in PR3 (it's the PR4 page's concern), and
-	// payouts.create gates standard precisely (balance_insufficient → the accurate
-	// "amount exceeds available" below). Stripe is the authoritative gate.
+	// Pre-check against the cached Stripe balance, netting in-flight withdrawals
+	// the cache hasn't absorbed (the payouts-page math). Fails fast with an
+	// accurate message and closes the common double-withdraw instead of minting a
+	// payout Stripe then rejects. Best-effort: null = no materialized cache, so
+	// Stripe stays the authoritative gate. The live instant `net_available` gate
+	// below is the tighter, authoritative check for instant.
+	const effectiveAvailable = await getEffectiveAvailableCents(db, seller.id);
+	if (effectiveAvailable !== null && amountCents > effectiveAvailable) {
+		throw errors.badRequest("Amount exceeds your available balance", {
+			code: "INSUFFICIENT_BALANCE",
+		});
+	}
+
 	if (method === "instant") {
 		if (!destination.instantEligible) {
 			throw errors.badRequest(
@@ -390,7 +445,9 @@ export async function requestWithdrawal(
 		amountCents,
 		method,
 		feeCents: feeChargedCents,
-		estimatedReceiveCents: amountCents - feeChargedCents,
+		// Receive == amount (see toResponse): the instant fee is separate from the
+		// payout, already baked into the net_available ceiling the amount is capped to.
+		estimatedReceiveCents: amountCents,
 		stripePayoutId: result.payoutId,
 		arrivalDate: result.arrivalDate?.toISOString() ?? null,
 	};
