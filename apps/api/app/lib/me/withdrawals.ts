@@ -429,6 +429,10 @@ export async function getWithdrawalContext(input: {
 			bps: INSTANT_WITHDRAWAL_FEE_BPS,
 			minCents: INSTANT_WITHDRAWAL_FEE_MIN_CENTS,
 		},
+		limits: {
+			minCents: WITHDRAWAL_MIN_CENTS,
+			instantMaxCents: INSTANT_WITHDRAWAL_MAX_CENTS,
+		},
 		balance: {
 			availableCents: balance.availableCents,
 			perDestinationInstant: balance.instantAvailableByDestination.map((d) => ({
