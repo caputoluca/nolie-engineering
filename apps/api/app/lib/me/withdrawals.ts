@@ -1,5 +1,6 @@
 import {
 	computeInstantWithdrawalFeeCents,
+	computeStripeInstantCostCents,
 	INSTANT_WITHDRAWAL_FEE_BPS,
 	INSTANT_WITHDRAWAL_FEE_MIN_CENTS,
 	INSTANT_WITHDRAWAL_MAX_CENTS,
@@ -422,11 +423,15 @@ export async function requestWithdrawal(
 	// submitted to Stripe). Equals the entered gross whenever the estimate was exact.
 	const recordedFeeCents = result.applicationFeeCents ?? feeChargedCents;
 	const grossDebitedCents = receiveCents + recordedFeeCents;
+	// Stripe's ~1% instant-payout cost to US (distinct from the markup we charge the
+	// seller). Stripe bills the PLATFORM, not the connected-account payout, so it's
+	// not readable from the payout object — record Stripe's documented flat 1% of
+	// the payout amount as the cost basis (0 for the free standard lane). The exact
+	// figure lives in Stripe's platform fee reporting; margin ≈ platformFee − this.
+	const stripeCostCents =
+		method === "instant" ? computeStripeInstantCostCents(receiveCents) : 0;
 
 	// Write-once submit CAS (status = requested); the webhook never writes these.
-	// stripeCostCents (Stripe's ~1% cost to US, distinct from the markup we charge
-	// the seller) isn't exposed on the payout — capturing it from the application
-	// fee's balance_transaction is a follow-up, so it stays 0 for now.
 	await db.withdrawal.updateMany({
 		where: { id: withdrawalId, status: "requested" },
 		data: {
@@ -437,7 +442,7 @@ export async function requestWithdrawal(
 			amountCents: grossDebitedCents,
 			feeChargedCents: recordedFeeCents,
 			platformFeeCents: recordedFeeCents,
-			stripeCostCents: 0,
+			stripeCostCents,
 			submittedAt: now,
 			...(status === "paid" ? { paidAt: now } : {}),
 			...(status === "failed" || status === "canceled"

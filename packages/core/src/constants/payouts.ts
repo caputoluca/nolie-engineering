@@ -140,3 +140,23 @@ export function computeInstantWithdrawalFeeCents(amountCents: number): number {
 	);
 	return Math.max(INSTANT_WITHDRAWAL_FEE_MIN_CENTS, proportional);
 }
+
+/**
+ * Stripe's own instant-payout cost to US: a flat, uncapped 1% of the payout
+ * amount. Stripe bills the PLATFORM for this (separately from the markup we
+ * collect from the seller), so it is NOT exposed on the connected-account payout
+ * object — we record this computed cost basis for margin reporting. The exact
+ * figure lives in Stripe's platform fee reporting; net margin ≈ our fee − this.
+ */
+export const STRIPE_INSTANT_PAYOUT_COST_BPS = 100; // 1%
+
+export function computeStripeInstantCostCents(
+	payoutAmountCents: number,
+): number {
+	// Half-up integer math (BigInt) to mirror the fee helper above.
+	return Number(
+		(BigInt(STRIPE_INSTANT_PAYOUT_COST_BPS) * BigInt(payoutAmountCents) +
+			5000n) /
+			10000n,
+	);
+}
