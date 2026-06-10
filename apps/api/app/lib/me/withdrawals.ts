@@ -69,12 +69,11 @@ function toResponse(row: WithdrawalRow): RequestWithdrawalResponse {
 		amountCents: row.amountCents,
 		method: row.method,
 		feeCents: row.feeChargedCents,
-		// The seller receives the FULL amount: Stripe's payout `amount` is what
-		// lands in the bank, and we pass the entered amount (already capped at
-		// `instant_available.net_available`, which is net of our fee). The instant
-		// fee is collected separately from the connect balance — NOT subtracted from
-		// the payout — so receive == amount, never amount − fee.
-		estimatedReceiveCents: row.amountCents,
+		// The seller enters the GROSS to transfer (what leaves their balance); they
+		// receive that minus the instant fee. We pass the net to Stripe as the
+		// payout `amount`, so the fee is collected on top and the full gross is
+		// debited from the connect balance.
+		estimatedReceiveCents: row.amountCents - row.feeChargedCents,
 		stripePayoutId: row.stripePayoutId,
 		arrivalDate: row.arrivalDate?.toISOString() ?? null,
 	};
@@ -286,9 +285,20 @@ export async function requestWithdrawal(
 		externalAccountId,
 	);
 
-	if (amountCents < WITHDRAWAL_MIN_CENTS) {
+	// The seller enters the GROSS amount to transfer — what leaves their connect
+	// balance. For instant they receive that minus the fee; standard is free
+	// (receive == amount). Stripe's payout `amount` is the RECEIVED figure, so we
+	// pass `receiveCents` below and the fee is collected on top, debiting the full
+	// `amountCents` from the balance. Each gate is on the figure it actually
+	// bounds: `amountCents` for the balance, `receiveCents` for Stripe's payout
+	// min/max + net_available.
+	const feeChargedCents =
+		method === "instant" ? computeInstantWithdrawalFeeCents(amountCents) : 0;
+	const receiveCents = amountCents - feeChargedCents;
+
+	if (receiveCents < WITHDRAWAL_MIN_CENTS) {
 		throw errors.badRequest(
-			`Minimum withdrawal is ${WITHDRAWAL_MIN_CENTS} cents`,
+			`You need to receive at least $${(WITHDRAWAL_MIN_CENTS / 100).toFixed(2)} after fees`,
 			{ code: "AMOUNT_BELOW_MIN" },
 		);
 	}
@@ -313,9 +323,9 @@ export async function requestWithdrawal(
 				{ code: "INSTANT_NOT_AVAILABLE" },
 			);
 		}
-		if (amountCents > INSTANT_WITHDRAWAL_MAX_CENTS) {
+		if (receiveCents > INSTANT_WITHDRAWAL_MAX_CENTS) {
 			throw errors.badRequest(
-				`Instant transfers are capped at ${INSTANT_WITHDRAWAL_MAX_CENTS} cents`,
+				`Instant transfers are capped at $${(INSTANT_WITHDRAWAL_MAX_CENTS / 100).toFixed(2)}`,
 				{ code: "INSTANT_LIMIT_EXCEEDED" },
 			);
 		}
@@ -332,7 +342,7 @@ export async function requestWithdrawal(
 			seller.connectAccountId,
 			destination.stripeExternalAccountId,
 		).catch(() => null);
-		if (netAvailable !== null && amountCents > netAvailable) {
+		if (netAvailable !== null && receiveCents > netAvailable) {
 			throw errors.badRequest(
 				"Instant transfer isn't available for this amount right now. You can use a standard transfer instead.",
 				{ code: "INSTANT_NOT_AVAILABLE" },
@@ -369,14 +379,15 @@ export async function requestWithdrawal(
 	}
 
 	const withdrawalId = withdrawal.id;
-	const feeChargedCents =
-		method === "instant" ? computeInstantWithdrawalFeeCents(amountCents) : 0;
 
 	let result: Awaited<ReturnType<PaymentsClient["seller"]["withdraw"]>>;
 	try {
 		result = await payments.seller.withdraw({
 			connectAccountId: seller.connectAccountId,
-			amountCents,
+			// Stripe's payout `amount` is what LANDS in the bank — the net. The fee
+			// is collected on top, so the connect balance is debited the full gross
+			// `amountCents`.
+			amountCents: receiveCents,
 			method,
 			destinationExternalAccountId: destination.stripeExternalAccountId,
 			idempotencyKey: withdrawalId,
@@ -430,9 +441,8 @@ export async function requestWithdrawal(
 		amountCents,
 		method,
 		feeCents: feeChargedCents,
-		// Receive == amount (see toResponse): the instant fee is separate from the
-		// payout, already baked into the net_available ceiling the amount is capped to.
-		estimatedReceiveCents: amountCents,
+		// What lands in the bank — the gross they entered minus the instant fee.
+		estimatedReceiveCents: receiveCents,
 		stripePayoutId: result.payoutId,
 		arrivalDate: result.arrivalDate?.toISOString() ?? null,
 	};
