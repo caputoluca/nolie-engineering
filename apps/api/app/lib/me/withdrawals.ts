@@ -1,5 +1,7 @@
 import {
 	computeInstantWithdrawalFeeCents,
+	INSTANT_WITHDRAWAL_FEE_BPS,
+	INSTANT_WITHDRAWAL_FEE_MIN_CENTS,
 	INSTANT_WITHDRAWAL_MAX_CENTS,
 	WITHDRAWAL_MIN_CENTS,
 } from "@nolie/core/constants/payouts";
@@ -13,6 +15,7 @@ import {
 } from "@nolie/payments";
 import type {
 	RequestWithdrawalResponse,
+	WithdrawalContextResponse,
 	WithdrawalMethod,
 } from "@nolie/schemas/me/withdrawals";
 
@@ -23,6 +26,7 @@ import type {
  */
 interface PayoutDestination {
 	stripeExternalAccountId: string;
+	type: "bank_account" | "card";
 	instantEligible: boolean;
 	defaultForCurrency: boolean;
 	last4: string | null;
@@ -87,6 +91,7 @@ async function loadSellerForWithdrawal(
 			payoutAccounts: {
 				select: {
 					stripeExternalAccountId: true,
+					type: true,
 					instantEligible: true,
 					defaultForCurrency: true,
 					last4: true,
@@ -388,6 +393,49 @@ export async function requestWithdrawal(
 		estimatedReceiveCents: amountCents - feeChargedCents,
 		stripePayoutId: result.payoutId,
 		arrivalDate: result.arrivalDate?.toISOString() ?? null,
+	};
+}
+
+/**
+ * The transfer-flow read surface (NL-263 PR4): the seller's payout destinations,
+ * the instant fee params (for the live client estimate), and the LIVE Stripe
+ * balance (available + per-destination instant `net_available`). This is the one
+ * payouts read that hits Stripe per request — it backs the fullscreen transfer
+ * flow where the seller is about to move money, so the figures are authoritative
+ * rather than the cached page-load snapshot. Shares the `loadSellerForWithdrawal`
+ * gate, so a payouts-disabled seller gets the same typed error as the submit.
+ */
+export async function getWithdrawalContext(input: {
+	db: PrismaClient;
+	payments: PaymentsClient;
+	userId: string;
+}): Promise<WithdrawalContextResponse> {
+	const { db, payments, userId } = input;
+	const seller = await loadSellerForWithdrawal(db, userId);
+
+	const balance = await payments.seller.getBalance(seller.connectAccountId);
+
+	return {
+		accounts: seller.payoutAccounts.map((a) => ({
+			externalAccountId: a.stripeExternalAccountId,
+			type: a.type,
+			last4: a.last4,
+			brand: a.brand,
+			bankName: a.bankName,
+			instantEligible: a.instantEligible,
+			isDefault: a.defaultForCurrency,
+		})),
+		fee: {
+			bps: INSTANT_WITHDRAWAL_FEE_BPS,
+			minCents: INSTANT_WITHDRAWAL_FEE_MIN_CENTS,
+		},
+		balance: {
+			availableCents: balance.availableCents,
+			perDestinationInstant: balance.instantAvailableByDestination.map((d) => ({
+				externalAccountId: d.externalAccountId,
+				netAvailableCents: d.netAvailableCents,
+			})),
+		},
 	};
 }
 
