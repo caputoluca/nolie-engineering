@@ -5,11 +5,7 @@ import {
 	INSTANT_WITHDRAWAL_MAX_CENTS,
 	WITHDRAWAL_MIN_CENTS,
 } from "@nolie/core/constants/payouts";
-import {
-	isPrismaUniqueError,
-	type PrismaClient,
-	WithdrawalStatus,
-} from "@nolie/db";
+import { isPrismaUniqueError, type PrismaClient } from "@nolie/db";
 import { errors } from "@nolie/errors/http";
 import {
 	PaymentErrorCode,
@@ -22,6 +18,7 @@ import type {
 	WithdrawalContextResponse,
 	WithdrawalMethod,
 } from "@nolie/schemas/me/withdrawals";
+import { sumUncachedWithdrawalCents } from "./payouts.js";
 
 /**
  * One linked payout destination, as the withdrawal flow needs it. `instantEligible`
@@ -197,22 +194,10 @@ async function getEffectiveAvailableCents(
 		select: { availableCents: true, syncedAt: true },
 	});
 	if (!cache?.syncedAt) return null;
-
-	const inflight = await db.withdrawal.aggregate({
-		where: {
-			sellerProfileId,
-			status: {
-				in: [
-					WithdrawalStatus.requested,
-					WithdrawalStatus.submitted,
-					WithdrawalStatus.paid,
-				],
-			},
-			OR: [{ submittedAt: null }, { submittedAt: { gte: cache.syncedAt } }],
-		},
-		_sum: { amountCents: true },
-	});
-	return cache.availableCents - (inflight._sum.amountCents ?? 0);
+	return (
+		cache.availableCents -
+		(await sumUncachedWithdrawalCents(db, sellerProfileId, cache.syncedAt))
+	);
 }
 
 /** Map a Stripe payout failure to the typed, seller-facing HTTP error. */
