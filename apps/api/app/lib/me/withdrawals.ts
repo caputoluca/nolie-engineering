@@ -413,10 +413,20 @@ export async function requestWithdrawal(
 	const terminal = stripePayoutStatusToTerminal(result.status);
 	const status = terminal ?? "submitted";
 
-	// Write-once submit CAS (status = requested). Fee columns land HERE, once;
-	// the webhook never writes them. stripeCostCents (Stripe's ~1% cost basis) is
-	// left 0 and trued up against the payout's balance_transaction by the nightly
-	// assertion. Mirrors the worker sweep's recovery flip.
+	// Record the fee Stripe ACTUALLY collected (the Pricing-Tool application fee on
+	// the payout) so platformFeeCents reconciles against Stripe rather than trusting
+	// our pre-submit estimate. Falls back to the estimate for standard payouts (no
+	// fee) or if Stripe hasn't attached the fee yet. The connect balance is debited
+	// `receiveCents + fee`, so we store THAT as amountCents — keeping the invariant
+	// amountCents − feeChargedCents == the amount the seller received (== what we
+	// submitted to Stripe). Equals the entered gross whenever the estimate was exact.
+	const recordedFeeCents = result.applicationFeeCents ?? feeChargedCents;
+	const grossDebitedCents = receiveCents + recordedFeeCents;
+
+	// Write-once submit CAS (status = requested); the webhook never writes these.
+	// stripeCostCents (Stripe's ~1% cost to US, distinct from the markup we charge
+	// the seller) isn't exposed on the payout — capturing it from the application
+	// fee's balance_transaction is a follow-up, so it stays 0 for now.
 	await db.withdrawal.updateMany({
 		where: { id: withdrawalId, status: "requested" },
 		data: {
@@ -424,8 +434,9 @@ export async function requestWithdrawal(
 			stripePayoutId: result.payoutId,
 			stripeBalanceTransactionId: result.balanceTransactionId,
 			arrivalDate: result.arrivalDate,
-			feeChargedCents,
-			platformFeeCents: feeChargedCents,
+			amountCents: grossDebitedCents,
+			feeChargedCents: recordedFeeCents,
+			platformFeeCents: recordedFeeCents,
 			stripeCostCents: 0,
 			submittedAt: now,
 			...(status === "paid" ? { paidAt: now } : {}),
@@ -438,9 +449,9 @@ export async function requestWithdrawal(
 	return {
 		withdrawalId,
 		status,
-		amountCents,
+		amountCents: grossDebitedCents,
 		method,
-		feeCents: feeChargedCents,
+		feeCents: recordedFeeCents,
 		// What lands in the bank — the gross they entered minus the instant fee.
 		estimatedReceiveCents: receiveCents,
 		stripePayoutId: result.payoutId,
