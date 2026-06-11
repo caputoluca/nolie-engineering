@@ -60,6 +60,42 @@ describe("Payout Release", () => {
 	});
 
 	// =========================================================================
+	// NL-263: finalize at transfer-landing. The `transfers.create` success
+	// response IS the release — the PayoutTransfer is `succeeded` and the Earning
+	// rolls up immediately, with NO payout webhook (none follows under the manual
+	// payout schedule the wallet model puts sellers on).
+	// =========================================================================
+	it("finalizes the PayoutTransfer and Earning to succeeded at transfer-landing (no payout webhook)", async () => {
+		const { earning, seller } = await createPendingPayout();
+		const { ctx } = createTestPayoutsContext();
+
+		await release(createMockJob({ earningId: earning.id }), ctx);
+
+		// Terminal-success the instant it lands — not deferred to a payout.paid.
+		const transfer = await prisma.payoutTransfer.findFirstOrThrow({
+			where: { sellerProfileId: seller.id },
+		});
+		expect(transfer.status).toBe("succeeded");
+		expect(transfer.paidAt).not.toBeNull();
+		expect(transfer.stripeTransferId).toBeTruthy();
+
+		// The Earning rolls up in the same tx: its single line is paid and its
+		// only transfer succeeded.
+		const updatedEarning = await prisma.earning.findUniqueOrThrow({
+			where: { id: earning.id },
+		});
+		expect(updatedEarning.payoutStatus).toBe(PayoutStatus.succeeded);
+		// No payout id on the Earning — the release is pool-level, not driven by a
+		// payout (that's the separate Withdrawal leg).
+		expect(updatedEarning.stripePayoutId).toBeNull();
+
+		const lines = await prisma.earningLine.findMany({
+			where: { earningId: earning.id },
+		});
+		expect(lines.every((l) => l.paidAt !== null)).toBe(true);
+	});
+
+	// =========================================================================
 	// TEST 2: Idempotency - already paid
 	// =========================================================================
 	it("skips payout when earning already has stripeTransferId (idempotent)", async () => {
@@ -363,7 +399,10 @@ describe("Payout Release", () => {
 			expect(transfers).toHaveLength(1);
 			expect(transfers[0]).toMatchObject({
 				amountCents: lineA.netCents,
-				status: "pending",
+				// NL-263: the transfer is finalized to `succeeded` the moment it
+				// lands (the `transfers.create` response), not on a payout webhook.
+				status: "succeeded",
+				paidAt: expect.any(Date),
 				stripeTransferId: expect.any(String),
 				stripeDestinationPaymentId: expect.any(String),
 			});
