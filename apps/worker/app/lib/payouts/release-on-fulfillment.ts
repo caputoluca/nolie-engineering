@@ -29,13 +29,24 @@ type Ctx = Pick<WorkerContextBase, "prisma" | "queues">;
  * Transition an Earning from `requires_action` to `in_review` and
  * schedule its payout release. Shared core for the parcel `delivered`
  * webhook and the letter-mail clock-based reconciler — anywhere "the
- * fulfillment moment has arrived for this order".
+ * payout moment has arrived for this order".
+ *
+ * **Payout-only (NL-263).** This advances the *payout* clock and nothing
+ * else. The *fulfillment* clock — `markedAsFulfilledAt` (the dispute
+ * window anchor), buyer comms, and `referrals.qualify` — is now stamped
+ * separately at the actual delivery anchor via `markFulfilled`. The two
+ * used to be welded into this one CAS; fast payout releases the payout
+ * early (at label purchase, before delivery), so a fast-paid earning
+ * reaches delivery already `in_review` and this CAS no-ops (`"raced"`).
+ * Keeping `markedAsFulfilledAt` here would mean the dispute clock never
+ * started on exactly the fast-paid orders. See docs/fast-payouts.md §2.
  *
  * **Race safety.** The `WHERE` guard pins the transition to
  * `requires_action + stripeTransferId=null`. A concurrent caller (e.g.
  * the parcel webhook firing while the letter reconciler is mid-tick on
- * the same order, or two reconciler ticks back-to-back) that already
- * advanced this earning gets `result: "raced"` with no side effects.
+ * the same order, or two reconciler ticks back-to-back, or the
+ * fast-payout early-release having already advanced it) gets
+ * `result: "raced"` with no side effects.
  *
  * **Hold.** An admin/manual payout hold (`Earning.payoutHoldAt`) also
  * fails the guard; the caller gets `result: "held"` (distinct from
@@ -44,12 +55,9 @@ type Ctx = Pick<WorkerContextBase, "prisma" | "queues">;
  * the authoritative gate — this just avoids needless enqueue churn.
  *
  * **Dispute interaction.** A pending or refunded `FulfillmentDispute`
- * does NOT block the earning transition — `markedAsFulfilledAt`
- * reflects "we believe fulfillment landed", which is true even if the
- * buyer is disputing it. Per NL-183, the dispute also does NOT block
- * the payout enqueue: the release.job is per-line aware and decides
- * what to actually pay at execution time. Caller-side gating only
- * duplicates the worker's gate and risks drift.
+ * does NOT block the payout enqueue: the release.job is per-line aware
+ * and decides what to actually pay at execution time. Caller-side
+ * gating only duplicates the worker's gate and risks drift.
  *
  * **Rollback.** If the `payout.release` enqueue throws, the earning is
  * rolled back to `requires_action` so a follow-up tick / webhook
@@ -79,7 +87,6 @@ export async function releaseEarningOnFulfillment(
 		},
 		data: {
 			payoutStatus: PayoutStatus.in_review,
-			markedAsFulfilledAt: new Date(),
 		},
 	});
 
@@ -101,23 +108,6 @@ export async function releaseEarningOnFulfillment(
 			{ earningId },
 			delayMs != null ? { delay: delayMs } : undefined,
 		);
-		// NL-270: kick off the referral qualify pipeline. Single hook here
-		// rather than per-rail so letter, parcel, pickup, and manual
-		// confirm all benefit. Fire-and-forget: a queue blip must never
-		// roll back the earning transition — the qualify job is
-		// idempotent and the next dispute-resolution re-fire of this
-		// helper would re-enqueue anyway. Held earnings never reach this
-		// branch (they short-circuit above with result=`held`), which is
-		// correct — a parked payout means a parked referral too.
-		void ctx.queues.referrals
-			.qualify({ orderId }, { delay: REFERRAL_QUALIFY_DELAY_MS })
-			.catch((err: unknown) => {
-				reportError(err, {
-					operation: "queue_referral_qualification",
-					level: "warning",
-					extra: { orderId, earningId },
-				});
-			});
 		return { result: "released" };
 	} catch (scheduleError) {
 		reportError(scheduleError, {
@@ -129,7 +119,6 @@ export async function releaseEarningOnFulfillment(
 				where: { id: earningId, payoutStatus: PayoutStatus.in_review },
 				data: {
 					payoutStatus: PayoutStatus.requires_action,
-					markedAsFulfilledAt: null,
 				},
 			});
 		} catch (rollbackError) {
@@ -141,4 +130,53 @@ export async function releaseEarningOnFulfillment(
 		}
 		return { result: "failed" };
 	}
+}
+
+/**
+ * Stamp the *fulfillment* clock for an order — the delivery-anchored
+ * counterpart to `releaseEarningOnFulfillment`'s payout clock (NL-263).
+ * Idempotent and single-fire via the `markedAsFulfilledAt IS NULL` latch
+ * (the column self-guards — no dependency on payout state), so it's safe
+ * to call from every real/deemed delivery anchor (parcel `delivered`
+ * webhook, the `promoteStaleOrders` deemed-delivered cron for both
+ * rails); the first writer wins and the rest no-op.
+ *
+ * On the stamping write (and only then) it kicks off `referrals.qualify`,
+ * delayed by the dispute window so a referral can't qualify on an order
+ * that's still inside its dispute period. Fire-and-forget: a queue blip
+ * must not unwind the fulfillment stamp — the qualify job is idempotent
+ * and re-fires are harmless.
+ *
+ * Callers gate this themselves (e.g. skip on a `held` payout) — it makes
+ * no payout-state decisions of its own.
+ */
+export async function markFulfilled(
+	ctx: Ctx,
+	input: { earningId: string; orderId: string },
+): Promise<{ stamped: boolean }> {
+	const { earningId, orderId } = input;
+
+	const updated = await ctx.prisma.earning.updateMany({
+		where: { id: earningId, markedAsFulfilledAt: null },
+		data: { markedAsFulfilledAt: new Date() },
+	});
+
+	if (updated.count === 0) {
+		return { stamped: false };
+	}
+
+	// NL-270: single referral hook, fired once at the genuine fulfillment
+	// moment (not per-rail) so letter, parcel, and the deemed-delivered
+	// cron all qualify referrals the same way.
+	void ctx.queues.referrals
+		.qualify({ orderId }, { delay: REFERRAL_QUALIFY_DELAY_MS })
+		.catch((err: unknown) => {
+			reportError(err, {
+				operation: "queue_referral_qualification",
+				level: "warning",
+				extra: { orderId, earningId },
+			});
+		});
+
+	return { stamped: true };
 }
