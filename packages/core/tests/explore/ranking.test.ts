@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { SortPriority } from "../../src/auctions/sort.js";
 import {
 	applyDiversity,
 	computeDemandMultiplier,
@@ -976,10 +977,11 @@ describe("applyDiversity", () => {
 		title = id,
 	): DiversityCandidate => ({ id, sellerProfileId, title });
 
-	it("demotes a seller's items past the cap to the tail without dropping anything", () => {
-		// perSellerCap = 2 (§5.1.6): seller A keeps its top 2 in rank order;
-		// the 3rd and 4th demote to the tail (preserving their relative order),
-		// and the lower-ranked C/D sellers slide up into the kept body.
+	it("defers a seller's over-cap items behind the next-ranked sellers, never drops or exiles them", () => {
+		// perSellerCap = 2 in any perSellerWindow stretch: A's 3rd and 4th
+		// items wait while lower-ranked C/D sellers slide up, then re-enter as
+		// soon as the catalog allows (here: immediately after, since only A
+		// remains — the cap yields rather than leave gaps).
 		const ordered: DiversityCandidate[] = [
 			cand("a1", "A", "alpha"),
 			cand("b1", "B", "beta"),
@@ -994,10 +996,67 @@ describe("applyDiversity", () => {
 
 		expect(result).toHaveLength(ordered.length);
 		expect(new Set(result)).toEqual(new Set(ordered.map((c) => c.id)));
-		// Kept body: A capped at 2, everyone else in rank order.
+		// Body: A capped at 2, everyone else in rank order.
 		expect(result.slice(0, 5)).toEqual(["a1", "b1", "a2", "c1", "d1"]);
-		// Tail: A's overflow, original relative order preserved.
+		// A's overflow follows in original relative order.
 		expect(result.slice(5)).toEqual(["a3", "a4"]);
+	});
+
+	it("lets over-cap items re-enter within the FOLLOWING window instead of the feed tail", () => {
+		// 20 items from seller A interleaved with 20 single-listing sellers.
+		// The old global cap kept a1/a2 and exiled the other 18 behind the
+		// whole feed; the sliding window must space them ~2 per page instead.
+		const win = DEFAULT_RANKING_CONFIG.perSellerWindow; // 12
+		const cap = DEFAULT_RANKING_CONFIG.perSellerCap; // 2
+		const ordered: DiversityCandidate[] = [];
+		for (let i = 0; i < 20; i++) {
+			ordered.push(cand(`a${i}`, "A", `a-${i}`));
+			ordered.push(cand(`f${i}`, `S${i}`, `f-${i}`));
+		}
+
+		const result = applyDiversity(ordered, DEFAULT_RANKING_CONFIG);
+
+		expect(result).toHaveLength(ordered.length);
+		expect(new Set(result)).toEqual(new Set(ordered.map((c) => c.id)));
+
+		// Sliding invariant: ≤cap A-items in ANY `win` consecutive slots while
+		// other sellers remain to interleave (the final stretch is all-A by
+		// pigeonhole — the cap yields there to keep the feed dense).
+		let lastFiller = -1;
+		for (let i = result.length - 1; i >= 0; i--) {
+			if ((result[i] as string).startsWith("f")) {
+				lastFiller = i;
+				break;
+			}
+		}
+		for (let lo = 0; lo + win <= lastFiller + 1; lo++) {
+			const inWindow = result
+				.slice(lo, lo + win)
+				.filter((id) => id.startsWith("a")).length;
+			expect(inWindow).toBeLessThanOrEqual(cap);
+		}
+
+		// A's 3rd item re-enters in the next window — not at the feed tail
+		// (the old behavior put it at position 38 of 40).
+		expect(result.indexOf("a2")).toBeLessThanOrEqual(win + cap);
+	});
+
+	it("never lets a deferred item cross its sort bucket — scheduled rows stay behind active overflow", () => {
+		const BIN = SortPriority.ACTIVE_BIN;
+		const SCHED = SortPriority.SCHEDULED;
+		const ordered: DiversityCandidate[] = [
+			{ ...cand("a1", "A", "one"), sortPriority: BIN },
+			{ ...cand("a2", "A", "two"), sortPriority: BIN },
+			{ ...cand("a3", "A", "three"), sortPriority: BIN }, // deferred in-bucket
+			{ ...cand("b1", "B", "four"), sortPriority: BIN },
+			{ ...cand("s1", "S", "five"), sortPriority: SCHED },
+		];
+
+		const result = applyDiversity(ordered, DEFAULT_RANKING_CONFIG);
+
+		// a3 defers behind b1 but stays inside the ACTIVE_BIN bucket; the
+		// scheduled row can never jump ahead of it.
+		expect(result).toEqual(["a1", "a2", "b1", "a3", "s1"]);
 	});
 
 	it("demotes a same-seller near-identical duplicate even under the cap", () => {
@@ -1011,49 +1070,6 @@ describe("applyDiversity", () => {
 
 		expect(result).toHaveLength(3);
 		expect(result).toEqual(["a1", "b1", "a2"]);
-	});
-
-	it("holds the per-seller cap across every simulated page slice", () => {
-		const cap = DEFAULT_RANKING_CONFIG.perSellerCap; // 2
-		const pageSize = 4;
-
-		const ordered: DiversityCandidate[] = [];
-		let filler = 0;
-		for (let i = 0; i < 20; i++) {
-			ordered.push(cand(`a${i}`, "A", `a-${i}`));
-			ordered.push(cand(`f${filler}`, `S${filler}`, `f-${filler}`));
-			filler++;
-		}
-
-		const result = applyDiversity(ordered, DEFAULT_RANKING_CONFIG);
-
-		expect(result).toHaveLength(ordered.length);
-		expect(new Set(result)).toEqual(new Set(ordered.map((c) => c.id)));
-
-		const aIds = ordered
-			.filter((c) => c.sellerProfileId === "A")
-			.map((c) => c.id);
-		const tailStart = result.length - (aIds.length - cap);
-		const kept = result.slice(0, tailStart);
-
-		for (let start = 0; start < kept.length; start += pageSize) {
-			const page = kept.slice(start, start + pageSize);
-			const inPage = page.filter((id) => id.startsWith("a")).length;
-			expect(inPage).toBeLessThanOrEqual(cap);
-		}
-		for (let lo = 0; lo < kept.length; lo += pageSize) {
-			for (
-				let hi = lo + pageSize;
-				hi <= kept.length + pageSize;
-				hi += pageSize
-			) {
-				const union = kept.slice(lo, Math.min(hi, kept.length));
-				const inUnion = union.filter((id) => id.startsWith("a")).length;
-				expect(inUnion).toBeLessThanOrEqual(cap);
-			}
-		}
-
-		expect(kept.filter((id) => id.startsWith("a"))).toHaveLength(cap);
 	});
 });
 
