@@ -81,8 +81,9 @@ const EXPLORE_SNAPSHOT_DEPTH = 2000;
 
 /**
  * Upper bound on the candidate set the snapshot is built from. SQL-LIMIT
- * pushdown via the existing `(sortPriority, rankScore DESC, id)` covering
- * index — index-only scan, sub-linear with catalog size.
+ * pushdown via the existing `(sortPriority, rankScore DESC, id)` index — an
+ * index range scan with heap fetches (the SELECT pulls non-indexed columns),
+ * bounded by this limit rather than catalog size.
  *
  * Sized comfortably above `EXPLORE_SNAPSHOT_DEPTH` so the per-seller
  * diversity demotion (rows pushed to a tail, not dropped — see

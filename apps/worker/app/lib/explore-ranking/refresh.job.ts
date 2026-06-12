@@ -362,10 +362,11 @@ interface DemandResult {
 	 * `Listing.demandEngagement` for the slot policy's proven floor. Empty on
 	 * the demand kill switch (column self-heals next enabled tick). */
 	engagementByListing: Map<string, number>;
-	/** listingId → decayed cart+purchase EVENT count (unweighted — evidence,
-	 * not score). Persisted to `Listing.demandIntent` for the window-shopper
-	 * eviction. Computed regardless of the per-signal kill switches: eviction
-	 * is an eligibility test, not a score term. */
+	/** listingId → cart+purchase EVENT count over the window (raw, undecayed —
+	 * shares `feedImpressions`' 30d clock; evidence, not score). Persisted to
+	 * `Listing.demandIntent` for the window-shopper eviction. Computed
+	 * regardless of the per-signal kill switches: eviction is an eligibility
+	 * test, not a score term. */
 	intentByListing: Map<string, number>;
 	/** listingId → bot-filtered window `listing_impression` count. Persisted to
 	 * `Listing.feedImpressions` for the fresh-trial budget + eviction
@@ -392,6 +393,11 @@ interface DemandEventRow {
 	/** Decayed sum of `purchase_completed` events (stamped per OrderLineItem,
 	 * so listing-scoped). */
 	purchases: number;
+	/** RAW count of cart+purchase events in the window (NOT decayed — the
+	 * window-shopper eviction weighs it against `impressions`, and the two
+	 * must share the same 30d clock or intent expires before the exposure
+	 * that earned it, producing phantom evictions). */
+	intentEvents: number;
 	/** Bot-filtered `listing_impression` COUNT in the window (NOT decayed — it
 	 * is an exposure-evidence counter for the slot policy's fresh-trial budget
 	 * and window-shopper threshold, not a score input). */
@@ -533,10 +539,11 @@ interface DemandSignalFlags {
  * independent of the demand signal and the scorer's `computePriceMult` has its
  * own `ENABLE_PRICE_MULT` kill switch.
  *
- * Kill switch: `ENABLE_TOKEN_BOOST=false` skips the demand SQL + math entirely
- * and returns an empty `normalizedDemandByListing` (scoring pass reads 0 →
- * neutral 1.0× multiplier). We still tokenize + compute price medians so the
- * kill-switch path keeps priceMult and the base score intact.
+ * Kill switch: `ENABLE_TOKEN_BOOST=false` skips ONLY the pooling +
+ * normalization (empty `normalizedDemandByListing` → scoring reads 0 →
+ * neutral 1.0× multiplier). The demand SQL still runs so the slot-policy
+ * columns stay fresh — the demand multiplier and the slot policy are
+ * independently killable. Tokenization + price medians always run.
  */
 async function aggregateDemand(
 	ctx: WorkerContextBase,
@@ -583,7 +590,7 @@ async function aggregateDemand(
 	}
 
 	const normalizedDemandByListing = new Map<string, number>();
-	if (process.env.ENABLE_TOKEN_BOOST === "false" || scan.length === 0) {
+	if (scan.length === 0) {
 		return {
 			matchedByListing,
 			normalizedDemandByListing,
@@ -633,7 +640,9 @@ async function aggregateDemand(
 			FROM scoped
 			WHERE event_name = ${EngagementEventName.listingViewed}
 			  AND anonymous_id IS NOT NULL
-			  AND anonymous_id NOT IN (SELECT anonymous_id FROM scrapers)
+			  AND NOT EXISTS (
+			    SELECT 1 FROM scrapers s WHERE s.anonymous_id = scoped.anonymous_id
+			  )
 			GROUP BY listing_id, anonymous_id
 		),
 		viewer_decay AS (
@@ -657,7 +666,13 @@ async function aggregateDemand(
 			          ), 0))::float AS "saves",
 			       COALESCE(SUM(decay) FILTER (
 			         WHERE event_name = ${EngagementEventName.purchaseCompleted}
-			       ), 0)::float AS "purchases"
+			       ), 0)::float AS "purchases",
+			       COUNT(*) FILTER (
+			         WHERE event_name IN (
+			           ${EngagementEventName.cartAdded},
+			           ${EngagementEventName.purchaseCompleted}
+			         )
+			       )::int AS "intentEvents"
 			FROM (
 				SELECT listing_id, event_name,
 				       POWER(0.5, EXTRACT(EPOCH FROM (now() - occurred_at))
@@ -676,7 +691,9 @@ async function aggregateDemand(
 			FROM scoped
 			WHERE event_name = ${EngagementEventName.listingImpression}
 			  AND (anonymous_id IS NULL
-			       OR anonymous_id NOT IN (SELECT anonymous_id FROM scrapers))
+			       OR NOT EXISTS (
+			         SELECT 1 FROM scrapers s WHERE s.anonymous_id = scoped.anonymous_id
+			       ))
 			GROUP BY listing_id
 		)
 		SELECT
@@ -685,6 +702,7 @@ async function aggregateDemand(
 			COALESCE(i."carts", 0)               AS "carts",
 			COALESCE(i."saves", 0)               AS "saves",
 			COALESCE(i."purchases", 0)           AS "purchases",
+			COALESCE(i."intentEvents", 0)        AS "intentEvents",
 			COALESCE(m."impressions", 0)         AS "impressions"
 		FROM viewer_decay v
 		FULL OUTER JOIN intent_decay i ON i.listing_id = v.listing_id
@@ -703,7 +721,7 @@ async function aggregateDemand(
 		cartsByListing.set(row.listingId, row.carts);
 		savesByListing.set(row.listingId, row.saves);
 		purchasesByListing.set(row.listingId, row.purchases);
-		intentByListing.set(row.listingId, row.carts + row.purchases);
+		intentByListing.set(row.listingId, row.intentEvents);
 		impressionsByListing.set(row.listingId, row.impressions);
 	}
 
@@ -732,6 +750,27 @@ async function aggregateDemand(
 			PURCHASE_VIEWS * purchases;
 		engagementByListing.set(r.id, engagement);
 		if (engagement > engagementMax) engagementMax = engagement;
+	}
+
+	// The demand-multiplier kill switch gates ONLY the pooling + normalization
+	// below: `normalizedDemandByListing` stays empty → the scorer reads 0 →
+	// neutral 1.0×. The SQL + composite above always run, so the slot-policy
+	// columns (demandEngagement/demandIntent/feedImpressions) stay fresh and
+	// `ENABLE_TOKEN_BOOST` stays independent of `ENABLE_SLOT_POLICY` — the
+	// earlier short-circuit zeroed those columns and silently disabled the
+	// slot policy too.
+	if (process.env.ENABLE_TOKEN_BOOST === "false") {
+		return {
+			matchedByListing,
+			normalizedDemandByListing,
+			medianPriceByKey,
+			overallMedianPrice,
+			engagementMax,
+			engagementByListing,
+			intentByListing,
+			impressionsByListing,
+			tokenizeMs,
+		};
 	}
 
 	// Subject (character/set) average engagement. A listing pools toward the
@@ -838,10 +877,12 @@ async function aggregateDemand(
  * `token_popularity` write is GONE — that table was analytics-only, never
  * read at serve time; the demand signal lives in memory for the tick and is
  * stored per-listing in the reused `tokenBoost` column. The listing/seller
- * writes are guarded by `IS DISTINCT FROM`; `rankScore` advances every
- * scheduled run because `now` advances — intended, the 10-minute cadence (not
- * byte-stable idempotency) keeps writes negligible. Same-instant BullMQ retry
- * is a true no-op, so retries are safe.
+ * writes are guarded by `IS DISTINCT FROM`; `rankScore` and the decayed
+ * demand columns advance every scheduled run because `now` advances, so the
+ * guard passes for ~every listing with any window activity — the bound on
+ * write volume is the catalog size per tick (fine at this scale; the three
+ * v4 columns are unindexed, so the updates stay HOT). Same-instant BullMQ
+ * retry is a true no-op, so retries are safe.
  *
  * `titleTokens` denorm column intentionally NOT added (docs §4.1 vs §6.2
  * contradiction resolved against §4.1 per the May 2026 research pass).
@@ -941,11 +982,11 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 
 		const matches = demand.matchedByListing.get(r.id);
 
-		// View-demand multiplier (explore-ranking-v3 PR2). The worker already
-		// computed each listing's subject-pooled, min-max-normalized demand in
-		// `aggregateDemand`; the scorer just maps it through the clamp. The
-		// kill switch (`ENABLE_TOKEN_BOOST=false`) leaves `normalizedDemand`
-		// empty, so this reads 0 → neutral 1.0× — the additive collapse.
+		// View-demand multiplier (explore-ranking-v4). The worker already
+		// computed each listing's subject-pooled, rank-quantile-normalized
+		// decayed demand in `aggregateDemand`; the scorer just maps it through
+		// the clamp. The kill switch (`ENABLE_TOKEN_BOOST=false`) leaves
+		// `normalizedDemand` empty, so this reads 0 → neutral 1.0×.
 		const demandMult = tokenBoostEnabled
 			? computeDemandMultiplier(
 					{ normalizedDemand: demand.normalizedDemandByListing.get(r.id) ?? 0 },
