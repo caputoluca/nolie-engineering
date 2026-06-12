@@ -96,6 +96,38 @@ describe("Payout Release", () => {
 	});
 
 	// =========================================================================
+	// NL-263: fast payout releases the earning at label purchase, so the
+	// payout clock can run while the fulfillment clock is still null. The
+	// release.job must pay the seller without depending on markedAsFulfilledAt.
+	// =========================================================================
+	it("releases a fast-paid earning whose fulfillment clock has not fired yet (markedAsFulfilledAt=null)", async () => {
+		const { earning, order, seller } = await createPendingPayout();
+		// Undo the helper's markedAsFulfilledAt stamp to model a fast-paid,
+		// not-yet-delivered earning.
+		await prisma.earning.update({
+			where: { id: earning.id },
+			data: { markedAsFulfilledAt: null },
+		});
+		const { ctx, mocks } = createTestPayoutsContext();
+
+		await release(createMockJob({ earningId: earning.id }), ctx);
+
+		assertSellerPaid(mocks, {
+			sellerConnectAccountId: seller.connectAccountId as string,
+			amount: earning.netAmount / 100,
+		});
+
+		const updatedEarning = await prisma.earning.findUniqueOrThrow({
+			where: { id: earning.id },
+		});
+		expect(updatedEarning.payoutStatus).toBe(PayoutStatus.succeeded);
+		// The fulfillment clock is still null — payout did not touch it.
+		expect(updatedEarning.markedAsFulfilledAt).toBeNull();
+
+		assertNotificationQueued(mocks, "payoutProcessed", { orderId: order.id });
+	});
+
+	// =========================================================================
 	// TEST 2: Idempotency - already paid
 	// =========================================================================
 	it("skips payout when earning already has stripeTransferId (idempotent)", async () => {
@@ -1070,6 +1102,36 @@ describe("Payout Release", () => {
 			// source_transaction kept — net (8_000) ≤ card charge (10_000), so the
 			// charge can fund it and we get its balance-availability guarantee.
 			expect(params.sourceChargeId).toBe(order.paymentChargeId);
+		});
+
+		it("fronts from the platform balance (no source charge) for an early/fast release, even when the charge could fund it", async () => {
+			// Default fixture: net 8_000 ≤ card charge 10_000, so a NORMAL release
+			// would pin source_transaction (prior test). But this earning was released
+			// EARLY at label purchase (`payoutReleasedEarlyAt` set, not yet delivered),
+			// when the buyer's card charge is typically still clearing. Pinning would
+			// make the transfer inherit the charge's pending status and park the "fast"
+			// payout in the seller's PENDING balance — unwithdrawable until it settles —
+			// defeating the feature. So we must front from the platform balance.
+			const { earning } = await createPendingPayout();
+			await prisma.earning.update({
+				where: { id: earning.id },
+				data: { payoutReleasedEarlyAt: new Date(), markedAsFulfilledAt: null },
+			});
+			const { ctx, mocks } = createTestPayoutsContext();
+
+			await release(createMockJob({ earningId: earning.id }), ctx);
+
+			const payOps = mocks.payments._getOperationsOfType("seller.pay");
+			expect(payOps).toHaveLength(1);
+			const params = payOps[0]?.params as {
+				sourceChargeId: string | null;
+				amount: number;
+			};
+			// Fronted: no source charge → the transfer draws on the platform balance
+			// and lands immediately available/withdrawable on the seller's Connect.
+			expect(params.sourceChargeId).toBeNull();
+			// Seller is still paid their full net.
+			expect(params.amount).toBe(earning.netAmount / 100);
 		});
 	});
 });

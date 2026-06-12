@@ -83,6 +83,11 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			payoutHoldAt: true,
 			payoutHoldReason: true,
 			createdAt: true,
+			// NL-263 fast payout: stamped when this earning was released early (at
+			// label purchase, before delivery). Drives the source_transaction
+			// decision below — an early release must front from the platform
+			// balance, never pin to the still-unsettled charge.
+			payoutReleasedEarlyAt: true,
 			// Legacy single-Transfer fields — kept nullable in the expand
 			// step; written on the FIRST transfer for old-webhook back-compat,
 			// then ignored on subsequent partials.
@@ -553,7 +558,22 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 		0,
 	);
 	const cardChargedCents = earning.order.totalCents - appliedCreditCents;
+
+	// NL-263 fast payout: a transfer pinned with `source_transaction` inherits the
+	// charge's pending status — it only lands AVAILABLE on the seller's Connect
+	// balance once that charge settles (~T+2). For an early release (at label
+	// purchase, before delivery → `payoutReleasedEarlyAt` set) the charge is
+	// typically still clearing, so pinning would park the "fast" payout in the
+	// seller's PENDING balance — unwithdrawable for two days — defeating the whole
+	// feature for exactly the same-day shippers it rewards. Fronting means drawing
+	// on the platform's own settled balance so the funds land available and
+	// withdrawable now; a thin platform balance falls through to the existing
+	// insufficient-funds reschedule path. Normal delivery-time releases keep the
+	// pin: by delivery the charge has long settled, so it lands available anyway
+	// and we keep its succeed-against-a-thin-balance safety net.
+	const isEarlyRelease = earning.payoutReleasedEarlyAt !== null;
 	const sourceChargeId =
+		!isEarlyRelease &&
 		earning.order.paymentChargeId !== null &&
 		earning.netAmount <= cardChargedCents
 			? earning.order.paymentChargeId
@@ -570,6 +590,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			buyerId,
 			payoutTransferId,
 			orphan: isOrphan,
+			earlyRelease: isEarlyRelease,
 			sourcePinned: sourceChargeId !== null,
 			cardChargedCents,
 			appliedCreditCents,
