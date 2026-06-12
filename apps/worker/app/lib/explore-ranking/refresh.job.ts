@@ -8,8 +8,11 @@ import {
 	DEFAULT_RANKING_CONFIG,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
+	effectivePriceUSD,
 	type MatchedToken,
 	matchTokens,
+	type QuantileValue,
+	quantileNormalize,
 	RANK_BASE_VERSION,
 	TOKEN_BOOST_MIN,
 	TOKEN_BOOST_VERSION,
@@ -26,28 +29,57 @@ import { reportWarning } from "../observability/sentry/report.js";
 
 const UPDATE_CHUNK = 500;
 
-// View-demand aggregation window (explore-ranking-v3 PR2, §5.2). A flat 30d
-// count, NOT time-decayed — demand here is "how many distinct people looked at
-// / saved / carted this listing in the last month", and we want a month-old
-// view to count the same as a day-old one (the recency term in the scorer is
-// the sole owner of freshness). Mirrors preview-demand-ranking.ts.
+// View-demand aggregation window. Bounds the `engagement_event` scan; the
+// freshness semantics live in the exponential decay below — at the 7d
+// half-life a >30d event would carry <5% weight anyway, so the cutoff costs
+// ~nothing while keeping the scan bounded on a forever-growing table.
 const DEMAND_WINDOW_DAYS = 30;
 
+// Exponential-decay half-life applied to every demand term
+// (explore-ranking-v4). The v3 flat 30d counts froze the feed top: a count
+// only ever grows, so early winners held page-1 indefinitely (prod: one card
+// sat on 1,492 views accrued over 28 days with no path down). Decay makes
+// demand mean "wanted LATELY" — stale winners fade as their events age,
+// recently-hot listings rise. 7d validated on the time-resolved prod replay
+// (preview-track23-ranking.ts PART B): top-12 median age 14d → 9d with proven
+// cards held (Wartortle #1, Altaria #17). 3d REJECTED by the same replay — it
+// buries proven cards whose interest peaked >1wk ago (Altaria 924v → #154),
+// the exact over-correction failure the founder rejected in config (c).
+const DEMAND_HALF_LIFE_DAYS = 7;
+const SECONDS_PER_DAY = 86_400;
+
 // Intent weighting for the engagement composite (validated on the June 2026
-// prod export, signed off by the founder — preview-demand-ranking.ts):
-//   engagement = distinctViewers + SAVE_VIEWS·saveCount + CART_VIEWS·cartEvents
+// prod exports — preview-demand-ranking.ts, preview-track23-ranking.ts):
+//   engagement = decayedViewers + SAVE_VIEWS·decayedNetSaves
+//              + CART_VIEWS·decayedCarts + PURCHASE_VIEWS·decayedPurchases
 // A save / cart is worth far more than a view because it's a high-intent,
 // position-resistant signal (a buyer doesn't bookmark something they clicked
-// off the top of the feed). Tunable post-deploy via ENABLE_*_SIGNAL kill
-// switches + these weights.
+// off the top of the feed). Saves are decayed NET save EVENTS in the window
+// (v4; was the lifetime denormalized `saveCount`, which can't decay — demand
+// should read "saved lately", not "ever saved"; the base score's additive
+// save term still reads the denormalized counter). Tunable post-deploy via
+// ENABLE_*_SIGNAL kill switches + these weights.
 const SAVE_VIEWS = 15;
 const CART_VIEWS = 25;
+// Purchases top the intent hierarchy everywhere the ranking end-state is
+// documented (eBay Best Match counts sales, Mercari grades purchase > like >
+// click, Wish ranked by buy rate) — the v4 research pass flagged their
+// omission as our one unjustified deviation. 3× the cart weight; their
+// sparsity is absorbed by the same pooling + decay as every other term.
+// `purchase_completed` is stamped per OrderLineItem, so it is listing-scoped.
+const PURCHASE_VIEWS = 75;
 
 // Subject-pooling pseudo-count: a listing trusts its OWN engagement once it
 // has ≫ POOL_M; below that it's pulled toward its subject's (character/set)
 // mean engagement, so a fresh listing of a popular character inherits that
-// character's demand. `w = e / (e + POOL_M)`.
-const POOL_M = 30;
+// character's demand. `w = e / (e + POOL_M)`. Dropped 30 → 8
+// (explore-ranking-v4): at 30 the prior homogenized the body — low-traffic
+// listings of a hot character all collapsed to the character mean (part of
+// the 76%-of-catalog-in-one-band symptom). At 8 a listing stands on its own
+// engagement once it has ~a dozen view-equivalents; the prod replay showed
+// own-engagement cards rescued from the subject mean (Altaria 924v: #175 →
+// #18) with the fresh-listing-inherits-subject behavior intact.
+const POOL_M = 8;
 
 // Subject token kinds that drive demand pooling. Characters + sets only —
 // rarity is deliberately excluded (a "psa_10" pool would lump unrelated cards).
@@ -88,12 +120,24 @@ const ALWAYS_RANKABLE_STATUSES = [
 // served listing toward neutral (explore-ranking-v3 PR2).
 const SERVED_STATUSES = new Set<string>(ALWAYS_RANKABLE_STATUSES);
 
+// Active strikes older than this stop counting against trust — matches the
+// NL-230 escalation's rolling-window spirit (a 6-month-old cancellation
+// shouldn't depress a since-reformed seller forever).
+const STRIKE_TRUST_WINDOW_DAYS = 180;
+
 interface SellerTrustInputRow {
 	sellerProfileId: string;
 	reviewCount: number;
 	reviewAverage: number | null;
 	globalAverageRating: number | null;
 	hasFirstEdition: boolean;
+	/** Paid orders that haven't gone bad (returned / shipping-failed /
+	 * refunded), counted per ORDER — one transaction = one proof, a bundle is
+	 * one sale. In-transit and pre-label orders count: "sold" is the signal,
+	 * and failures are punished separately via strikes. */
+	completedSalesCount: number;
+	/** Active (non-waived) strikes inside the trust window. */
+	activeStrikeCount: number;
 }
 
 interface SellerTrustResult {
@@ -153,6 +197,21 @@ async function refreshSellerTrust(
 			       AVG("rating")::float AS "average"
 			FROM "review"
 			GROUP BY "sellerProfileId"
+		),
+		per_seller_sales AS (
+			SELECT "sellerProfileId", COUNT(*)::int AS "sales"
+			FROM "order"
+			WHERE "paidAt" IS NOT NULL
+			  AND ("fulfillmentStatus" IS NULL
+			       OR "fulfillmentStatus" NOT IN ('returned', 'shipping_failed', 'refunded'))
+			GROUP BY "sellerProfileId"
+		),
+		per_seller_strikes AS (
+			SELECT "sellerProfileId", COUNT(*)::int AS "strikes"
+			FROM "seller_strike"
+			WHERE "status" = 'active'
+			  AND "occurredAt" > now() - (${STRIKE_TRUST_WINDOW_DAYS}::int * INTERVAL '1 day')
+			GROUP BY "sellerProfileId"
 		)
 		SELECT sp."id"                              AS "sellerProfileId",
 		       COALESCE(psr."count", 0)::int        AS "reviewCount",
@@ -165,10 +224,16 @@ async function refreshSellerTrust(
 		           AND m."program"::text = 'first_edition'
 		           AND m."revokedAt" IS NULL
 		           AND (m."expiresAt" IS NULL OR m."expiresAt" > now())
-		       )                                    AS "hasFirstEdition"
+		       )                                    AS "hasFirstEdition",
+		       COALESCE(pss."sales", 0)::int        AS "completedSalesCount",
+		       COALESCE(pst."strikes", 0)::int      AS "activeStrikeCount"
 		FROM "seller_profile" sp
 		LEFT JOIN per_seller_review psr
 		       ON psr."sellerProfileId" = sp."id"
+		LEFT JOIN per_seller_sales pss
+		       ON pss."sellerProfileId" = sp."id"
+		LEFT JOIN per_seller_strikes pst
+		       ON pst."sellerProfileId" = sp."id"
 	`;
 
 	if (rows.length === 0) {
@@ -183,7 +248,12 @@ async function refreshSellerTrust(
 	);
 
 	const trustMap = new Map<string, number>();
-	const updates: { id: string; count: number; shrunk: number }[] = [];
+	const updates: {
+		id: string;
+		count: number;
+		shrunk: number;
+		trust: number;
+	}[] = [];
 
 	for (const r of rows) {
 		const reviewAvgShrunk = computeReviewAvgShrunk({
@@ -191,17 +261,18 @@ async function refreshSellerTrust(
 			reviewAverage: r.reviewAverage,
 			globalMeanRating,
 		});
-		trustMap.set(
-			r.sellerProfileId,
-			computeSellerTrust({
-				reviewAvgShrunk,
-				hasFirstEditionBadge: r.hasFirstEdition,
-			}),
-		);
+		const trust = computeSellerTrust({
+			reviewAvgShrunk,
+			hasFirstEditionBadge: r.hasFirstEdition,
+			completedSalesCount: r.completedSalesCount,
+			activeStrikeCount: r.activeStrikeCount,
+		});
+		trustMap.set(r.sellerProfileId, trust);
 		updates.push({
 			id: r.sellerProfileId,
 			count: r.reviewCount,
 			shrunk: reviewAvgShrunk,
+			trust,
 		});
 	}
 
@@ -211,17 +282,22 @@ async function refreshSellerTrust(
 		const values = Prisma.join(
 			chunk.map(
 				(u) =>
-					Prisma.sql`(${u.id}, ${u.count}::int, ${u.shrunk}::double precision)`,
+					Prisma.sql`(${u.id}, ${u.count}::int, ${u.shrunk}::double precision, ${u.trust}::double precision)`,
 			),
 		);
+		// `sellerTrust` is persisted (NL-371) so the listing create/edit path can
+		// seed a new listing's base with the seller's standing in one column read
+		// — the seed then equals the first-tick base by construction.
 		sellersTrustUpdated += await prisma.$executeRaw`
 			UPDATE "seller_profile" AS sp
 			SET "reviewCount" = v.review_count,
-				"reviewAvgShrunk" = v.review_avg_shrunk
-			FROM (VALUES ${values}) AS v(id, review_count, review_avg_shrunk)
+				"reviewAvgShrunk" = v.review_avg_shrunk,
+				"sellerTrust" = v.seller_trust
+			FROM (VALUES ${values}) AS v(id, review_count, review_avg_shrunk, seller_trust)
 			WHERE sp.id = v.id
 				AND (sp."reviewCount" IS DISTINCT FROM v.review_count
-					OR sp."reviewAvgShrunk" IS DISTINCT FROM v.review_avg_shrunk)
+					OR sp."reviewAvgShrunk" IS DISTINCT FROM v.review_avg_shrunk
+					OR sp."sellerTrust" IS DISTINCT FROM v.seller_trust)
 		`;
 	}
 
@@ -258,33 +334,6 @@ interface RankableListing {
 	 * demand normalization restrict its min-max range to the served set
 	 * (`SERVED_STATUSES`) so those rows can't stretch it (v3 PR2). */
 	status: string;
-}
-
-/**
- * Effective dollar price for ranking purposes. Fixed-price uses `price`;
- * auctions use `startingBid`. Both columns are `Decimal(10, 2)` dollars
- * (despite "Bid" naming, `startingBid` is NOT cents). Returns null when
- * neither is set — those listings get a neutral priceMult.
- *
- * Auctions use the starting bid as a stand-in for "asking price" because
- * the live winning amount isn't known at refresh time and would lag as
- * bids accrue anyway. ~96% of listings on `/explore` are fixed-price (per
- * the doc), so the auction approximation is a minor edge.
- */
-function effectivePriceUSD(l: {
-	listingType: string;
-	price: Prisma.Decimal | null;
-	startingBid: Prisma.Decimal | null;
-}): number | null {
-	const raw =
-		l.listingType === "fixed_price"
-			? l.price
-			: l.listingType === "auction"
-				? l.startingBid
-				: null;
-	if (raw === null) return null;
-	const n = Number(raw);
-	return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /**
@@ -327,6 +376,20 @@ interface DemandResult {
 	/** Max raw engagement (pre-normalization) across the scan — logged for
 	 * observability. 0 when demand is disabled or no signal landed. */
 	engagementMax: number;
+	/** listingId → decayed own-engagement composite. Persisted to
+	 * `Listing.demandEngagement` for the slot policy's proven floor. Empty on
+	 * the demand kill switch (column self-heals next enabled tick). */
+	engagementByListing: Map<string, number>;
+	/** listingId → cart+purchase EVENT count over the window (raw, undecayed —
+	 * shares `feedImpressions`' 30d clock; evidence, not score). Persisted to
+	 * `Listing.demandIntent` for the window-shopper eviction. Computed
+	 * regardless of the per-signal kill switches: eviction is an eligibility
+	 * test, not a score term. */
+	intentByListing: Map<string, number>;
+	/** listingId → bot-filtered window `listing_impression` count. Persisted to
+	 * `Listing.feedImpressions` for the fresh-trial budget + eviction
+	 * threshold. */
+	impressionsByListing: Map<string, number>;
 	/** Wall time of the `matchTokens` loop over every rankable listing.
 	 * Alarmed against `TOKENIZE_WARN_THRESHOLD_MS` — the §6.2
 	 * denorm-titleTokens escape hatch's only invisible trigger. */
@@ -335,14 +398,51 @@ interface DemandResult {
 
 interface DemandEventRow {
 	listingId: string;
-	/** Bot-filtered count of DISTINCT anonymous viewers in the window. */
+	/** Bot-filtered DECAYED sum over distinct anonymous viewers — each viewer
+	 * contributes the decay weight of their FIRST view in the window, so a
+	 * returning viewer never double-counts. */
 	viewers: number;
-	/** Count of `cart_added` EVENTS in the window (not net live cart size). */
+	/** Decayed sum of `cart_added` EVENTS in the window (not net cart size). */
 	carts: number;
+	/** Decayed NET save events (`listing_saved` − `listing_unsaved`). Can go
+	 * negative when unsaves outpace saves inside the window — clamped to 0 at
+	 * the composite. */
+	saves: number;
+	/** Decayed sum of `purchase_completed` events (stamped per OrderLineItem,
+	 * so listing-scoped). */
+	purchases: number;
+	/** RAW count of cart+purchase events in the window (NOT decayed — the
+	 * window-shopper eviction weighs it against `impressions`, and the two
+	 * must share the same 30d clock or intent expires before the exposure
+	 * that earned it, producing phantom evictions). */
+	intentEvents: number;
+	/** Bot-filtered `listing_impression` COUNT in the window (NOT decayed — it
+	 * is an exposure-evidence counter for the slot policy's fresh-trial budget
+	 * and window-shopper threshold, not a score input). */
+	impressions: number;
 }
 
 function tokenKey(kind: string, value: string): string {
 	return `${kind}:${value}`;
+}
+
+/**
+ * Percentile a value would land at within an ascending-sorted array (first
+ * index whose element is >= v, over n-1). Used only to keep stored demand
+ * well-formed for terminal cutoff rows that are excluded from the served
+ * normalization — those rows never serve on /explore.
+ */
+function lowerBoundPct(sortedValues: number[], v: number): number {
+	const n = sortedValues.length;
+	if (n <= 1) return 0;
+	let lo = 0;
+	let hi = n;
+	while (lo < hi) {
+		const mid = (lo + hi) >> 1;
+		if ((sortedValues[mid] as number) < v) lo = mid + 1;
+		else hi = mid;
+	}
+	return Math.min(lo, n - 1) / (n - 1);
 }
 
 /**
@@ -423,22 +523,25 @@ interface DemandSignalFlags {
 	cartAddSignalEnabled: boolean;
 	/** When false, the save term drops out of `engagement`. */
 	saveSignalEnabled: boolean;
+	/** When false, the purchase term drops out of `engagement`. */
+	purchaseSignalEnabled: boolean;
 }
 
 /**
- * Per-listing VIEW-DEMAND signal for the scoring pass (explore-ranking-v3 PR2,
- * §5.2). Replaces the inverted Empirical-Bayes token-CVR aggregation. Mirrors
- * `apps/worker/scripts/preview-demand-ranking.ts` — its math was validated on
- * the June 2026 prod export and signed off by the founder.
+ * Per-listing VIEW-DEMAND signal for the scoring pass (explore-ranking-v4;
+ * decayed/quantile rework of the v3 PR2 signal). Mirrors
+ * `apps/worker/scripts/preview-track23-ranking.ts` — the decay half-life and
+ * normalization were validated on the time-resolved June 2026 prod export.
  *
- * Per rankable listing:
- *   engagement = distinctViewers30d + SAVE_VIEWS·saveCount + CART_VIEWS·cartEvents30d
- * where `distinctViewers30d` is the bot-filtered COUNT(DISTINCT anonymous_id)
- * of `listing_viewed` events (a scraper — anon_id viewing > BOT_BREADTH_THRESHOLD
- * distinct listings — is excluded), `saveCount` is the listing's denormalized
- * NET save count, and `cartEvents30d` is the COUNT of `cart_added` events (not
- * net live cart size). Purchases are deliberately NOT in the signal (0% of
- * purchases attribute to the feed slot today — audit BLOCK 4/5).
+ * Per rankable listing, every term decayed at `DEMAND_HALF_LIFE_DAYS`:
+ *   engagement = decayedViewers + SAVE_VIEWS·decayedNetSaves
+ *              + CART_VIEWS·decayedCarts + PURCHASE_VIEWS·decayedPurchases
+ * where `decayedViewers` is the bot-filtered sum over distinct anonymous
+ * viewers of `0.5^(firstViewAgeDays / halfLife)` (a scraper — anon_id viewing
+ * > BOT_BREADTH_THRESHOLD distinct listings — is excluded), saves/carts/
+ * purchases are decayed sums over their events in the window. Purchases
+ * joined the composite in v4 (count, not feed-attributed — attribution is the
+ * known follow-up).
  *
  * Then pooled toward the listing's subject (character/set) demand so a fresh
  * listing of a popular character inherits that character's demand:
@@ -447,16 +550,18 @@ interface DemandSignalFlags {
  *   w      = engagement / (engagement + POOL_M)
  *   pooled = w·engagement + (1-w)·prior
  *   demand = log1p(pooled)
- * Finally min-max-normalized over the full rankable scan → [0,1].
+ * Finally rank-quantile-normalized over the explore-served rows → [0,1]
+ * (`quantileNormalize` — min-max squashed 76% of the catalog into one band).
  *
  * The price-median aggregation (priceMult input) runs unconditionally — it is
  * independent of the demand signal and the scorer's `computePriceMult` has its
  * own `ENABLE_PRICE_MULT` kill switch.
  *
- * Kill switch: `ENABLE_TOKEN_BOOST=false` skips the demand SQL + math entirely
- * and returns an empty `normalizedDemandByListing` (scoring pass reads 0 →
- * neutral 1.0× multiplier). We still tokenize + compute price medians so the
- * kill-switch path keeps priceMult and the base score intact.
+ * Kill switch: `ENABLE_TOKEN_BOOST=false` skips ONLY the pooling +
+ * normalization (empty `normalizedDemandByListing` → scoring reads 0 →
+ * neutral 1.0× multiplier). The demand SQL still runs so the slot-policy
+ * columns stay fresh — the demand multiplier and the slot policy are
+ * independently killable. Tokenization + price medians always run.
  */
 async function aggregateDemand(
 	ctx: WorkerContextBase,
@@ -503,32 +608,41 @@ async function aggregateDemand(
 	}
 
 	const normalizedDemandByListing = new Map<string, number>();
-	if (process.env.ENABLE_TOKEN_BOOST === "false" || scan.length === 0) {
+	if (scan.length === 0) {
 		return {
 			matchedByListing,
 			normalizedDemandByListing,
 			medianPriceByKey,
 			overallMedianPrice,
 			engagementMax: 0,
+			engagementByListing: new Map(),
+			intentByListing: new Map(),
+			impressionsByListing: new Map(),
 			tokenizeMs,
 		};
 	}
 
-	// Per-listing bot-filtered distinct viewers + cart-add event count, scoped
-	// to the scan IDs over the 30d window. The `scrapers` CTE flags any
-	// anonymous_id that viewed > BOT_BREADTH_THRESHOLD distinct listings and
-	// excludes its views from the distinct-viewer count (audit SQL BLOCK 7).
-	// anonymous_id NOT NULL on the view leg keeps server/null actors out.
+	// Per-listing decayed demand terms, scoped to the scan IDs over the window.
+	// The `scrapers` CTE flags any anonymous_id that viewed >
+	// BOT_BREADTH_THRESHOLD distinct listings and excludes its views from the
+	// viewer term (audit SQL BLOCK 7). anonymous_id NOT NULL on the view leg
+	// keeps server/null actors out. Viewers decay off each viewer's FIRST view
+	// (`first_views`) so a returning viewer never double-counts; the intent
+	// events (carts/saves/unsaves/purchases) decay per event.
 	const idsSql = Prisma.join(scan.map((r) => Prisma.sql`${r.id}`));
 	const demandRows = await ctx.prisma.$queryRaw<DemandEventRow[]>`
 		WITH scoped AS (
-			SELECT listing_id, event_name, anonymous_id
+			SELECT listing_id, event_name, anonymous_id, occurred_at
 			FROM engagement_event
 			WHERE occurred_at >= now() - (${DEMAND_WINDOW_DAYS}::int * INTERVAL '1 day')
 			  AND listing_id IN (${idsSql})
 			  AND event_name IN (
 			    ${EngagementEventName.listingViewed},
-			    ${EngagementEventName.cartAdded}
+			    ${EngagementEventName.listingImpression},
+			    ${EngagementEventName.cartAdded},
+			    ${EngagementEventName.listingSaved},
+			    ${EngagementEventName.listingUnsaved},
+			    ${EngagementEventName.purchaseCompleted}
 			  )
 		),
 		scrapers AS (
@@ -539,49 +653,142 @@ async function aggregateDemand(
 			GROUP BY anonymous_id
 			HAVING COUNT(DISTINCT listing_id) > ${BOT_BREADTH_THRESHOLD}::int
 		),
-		viewers AS (
-			SELECT listing_id, COUNT(DISTINCT anonymous_id)::int AS "viewers"
+		first_views AS (
+			SELECT listing_id, anonymous_id, MIN(occurred_at) AS first_at
 			FROM scoped
 			WHERE event_name = ${EngagementEventName.listingViewed}
 			  AND anonymous_id IS NOT NULL
-			  AND anonymous_id NOT IN (SELECT anonymous_id FROM scrapers)
+			  AND NOT EXISTS (
+			    SELECT 1 FROM scrapers s WHERE s.anonymous_id = scoped.anonymous_id
+			  )
+			GROUP BY listing_id, anonymous_id
+		),
+		viewer_decay AS (
+			SELECT listing_id,
+			       SUM(POWER(0.5, EXTRACT(EPOCH FROM (now() - first_at))
+			           / ${SECONDS_PER_DAY}::float
+			           / ${DEMAND_HALF_LIFE_DAYS}::float))::float AS "viewers"
+			FROM first_views
 			GROUP BY listing_id
 		),
-		carts AS (
-			SELECT listing_id, COUNT(*)::int AS "carts"
+		intent_decay AS (
+			SELECT listing_id,
+			       COALESCE(SUM(decay) FILTER (
+			         WHERE event_name = ${EngagementEventName.cartAdded}
+			       ), 0)::float AS "carts",
+			       (COALESCE(SUM(decay) FILTER (
+			          WHERE event_name = ${EngagementEventName.listingSaved}
+			        ), 0)
+			        - COALESCE(SUM(decay) FILTER (
+			            WHERE event_name = ${EngagementEventName.listingUnsaved}
+			          ), 0))::float AS "saves",
+			       COALESCE(SUM(decay) FILTER (
+			         WHERE event_name = ${EngagementEventName.purchaseCompleted}
+			       ), 0)::float AS "purchases",
+			       COUNT(*) FILTER (
+			         WHERE event_name IN (
+			           ${EngagementEventName.cartAdded},
+			           ${EngagementEventName.purchaseCompleted}
+			         )
+			       )::int AS "intentEvents"
+			FROM (
+				SELECT listing_id, event_name,
+				       POWER(0.5, EXTRACT(EPOCH FROM (now() - occurred_at))
+				           / ${SECONDS_PER_DAY}::float
+				           / ${DEMAND_HALF_LIFE_DAYS}::float) AS decay
+				FROM scoped
+				WHERE event_name NOT IN (
+				  ${EngagementEventName.listingViewed},
+				  ${EngagementEventName.listingImpression}
+				)
+			) e
+			GROUP BY listing_id
+		),
+		impressions AS (
+			SELECT listing_id, COUNT(*)::int AS "impressions"
 			FROM scoped
-			WHERE event_name = ${EngagementEventName.cartAdded}
+			WHERE event_name = ${EngagementEventName.listingImpression}
+			  AND (anonymous_id IS NULL
+			       OR NOT EXISTS (
+			         SELECT 1 FROM scrapers s WHERE s.anonymous_id = scoped.anonymous_id
+			       ))
 			GROUP BY listing_id
 		)
 		SELECT
-			COALESCE(v.listing_id, c.listing_id) AS "listingId",
+			COALESCE(v.listing_id, i.listing_id, m.listing_id) AS "listingId",
 			COALESCE(v."viewers", 0)             AS "viewers",
-			COALESCE(c."carts", 0)               AS "carts"
-		FROM viewers v
-		FULL OUTER JOIN carts c ON c.listing_id = v.listing_id
+			COALESCE(i."carts", 0)               AS "carts",
+			COALESCE(i."saves", 0)               AS "saves",
+			COALESCE(i."purchases", 0)           AS "purchases",
+			COALESCE(i."intentEvents", 0)        AS "intentEvents",
+			COALESCE(m."impressions", 0)         AS "impressions"
+		FROM viewer_decay v
+		FULL OUTER JOIN intent_decay i ON i.listing_id = v.listing_id
+		FULL OUTER JOIN impressions m
+			ON m.listing_id = COALESCE(v.listing_id, i.listing_id)
 	`;
 
 	const viewersByListing = new Map<string, number>();
 	const cartsByListing = new Map<string, number>();
+	const savesByListing = new Map<string, number>();
+	const purchasesByListing = new Map<string, number>();
+	const intentByListing = new Map<string, number>();
+	const impressionsByListing = new Map<string, number>();
 	for (const row of demandRows) {
 		viewersByListing.set(row.listingId, row.viewers);
 		cartsByListing.set(row.listingId, row.carts);
+		savesByListing.set(row.listingId, row.saves);
+		purchasesByListing.set(row.listingId, row.purchases);
+		intentByListing.set(row.listingId, row.intentEvents);
+		impressionsByListing.set(row.listingId, row.impressions);
 	}
 
-	// engagement = viewers + SAVE_VIEWS·saveCount + CART_VIEWS·cartEvents.
-	// Kill switches drop the save / cart term respectively (mirror the base
-	// score's per-signal switches).
+	// engagement = decayedViewers + SAVE_VIEWS·decayedNetSaves
+	//            + CART_VIEWS·decayedCarts + PURCHASE_VIEWS·decayedPurchases.
+	// Kill switches drop their term respectively (mirror the base score's
+	// per-signal switches). Net saves clamp at 0 — an unsave-heavy window
+	// should zero the term, not turn it into a penalty.
 	const engagementByListing = new Map<string, number>();
 	let engagementMax = 0;
 	for (const r of scan) {
 		const viewers = viewersByListing.get(r.id) ?? 0;
-		const saves = flags.saveSignalEnabled ? r.saveCount : 0;
+		const saves = flags.saveSignalEnabled
+			? Math.max(savesByListing.get(r.id) ?? 0, 0)
+			: 0;
 		const carts = flags.cartAddSignalEnabled
 			? (cartsByListing.get(r.id) ?? 0)
 			: 0;
-		const engagement = viewers + SAVE_VIEWS * saves + CART_VIEWS * carts;
+		const purchases = flags.purchaseSignalEnabled
+			? (purchasesByListing.get(r.id) ?? 0)
+			: 0;
+		const engagement =
+			viewers +
+			SAVE_VIEWS * saves +
+			CART_VIEWS * carts +
+			PURCHASE_VIEWS * purchases;
 		engagementByListing.set(r.id, engagement);
 		if (engagement > engagementMax) engagementMax = engagement;
+	}
+
+	// The demand-multiplier kill switch gates ONLY the pooling + normalization
+	// below: `normalizedDemandByListing` stays empty → the scorer reads 0 →
+	// neutral 1.0×. The SQL + composite above always run, so the slot-policy
+	// columns (demandEngagement/demandIntent/feedImpressions) stay fresh and
+	// `ENABLE_TOKEN_BOOST` stays independent of `ENABLE_SLOT_POLICY` — the
+	// earlier short-circuit zeroed those columns and silently disabled the
+	// slot policy too.
+	if (process.env.ENABLE_TOKEN_BOOST === "false") {
+		return {
+			matchedByListing,
+			normalizedDemandByListing,
+			medianPriceByKey,
+			overallMedianPrice,
+			engagementMax,
+			engagementByListing,
+			intentByListing,
+			impressionsByListing,
+			tokenizeMs,
+		};
 	}
 
 	// Subject (character/set) average engagement. A listing pools toward the
@@ -610,9 +817,9 @@ async function aggregateDemand(
 		scan.reduce((s, r) => s + (engagementByListing.get(r.id) ?? 0), 0) /
 		scan.length;
 
-	// Pooled demand = log1p(w·engagement + (1-w)·prior), then min-max-normalize
-	// across the scan. `prior` is the max matched subject average, or the global
-	// mean when the listing matches no character/set token.
+	// Pooled demand = log1p(w·engagement + (1-w)·prior), then quantile-normalize
+	// across the served scan. `prior` is the max matched subject average, or the
+	// global mean when the listing matches no character/set token.
 	const demandLogByListing = new Map<string, number>();
 	for (const r of scan) {
 		const engagement = engagementByListing.get(r.id) ?? 0;
@@ -628,26 +835,32 @@ async function aggregateDemand(
 		demandLogByListing.set(r.id, Math.log1p(w * engagement + (1 - w) * prior));
 	}
 
-	// Min-max normalize over the EXPLORE-SERVED rows only (`SERVED_STATUSES`).
-	// Pooling above intentionally spans the full scan (matches the preview), but
-	// the normalization range must exclude terminal cutoff rows (sold/closed) —
-	// otherwise a single recently-sold high-demand listing stretches dMax and
-	// compresses every served listing's multiplier toward 1.0 (appraiser, v3 PR2).
-	let dMin = Number.POSITIVE_INFINITY;
-	let dMax = Number.NEGATIVE_INFINITY;
+	// Rank-quantile normalize over the EXPLORE-SERVED rows only
+	// (`SERVED_STATUSES` — same exclusion rationale as v3 PR2: terminal cutoff
+	// rows would distort the range). Quantile replaces min-max (v4): engagement
+	// is heavy-tailed, and min-max squashed 76% of the prod catalog into
+	// demand-mult 1.20-1.50 (47% in a single bin) — "demand barely
+	// differentiates the body". Rank percentiles spread the body flat by
+	// construction; tie handling (min-rank) keeps the zero-demand floor at a
+	// neutral 1.0× (see `quantileNormalize`).
+	const served: QuantileValue[] = [];
 	for (const r of scan) {
 		if (!SERVED_STATUSES.has(r.status)) continue;
 		const v = demandLogByListing.get(r.id);
 		if (v === undefined) continue;
-		if (v < dMin) dMin = v;
-		if (v > dMax) dMax = v;
+		served.push({ id: r.id, value: v });
 	}
-	const span = dMax > dMin ? dMax - dMin : 0;
+	const pctByListing = quantileNormalize(served);
+	// Terminal cutoff rows (sold/closed) never serve, but keep their stored
+	// value well-formed: place each at the percentile a served row with the
+	// same demand would land at (lower-bound rank into the served values).
+	const servedValues = served.map((s) => s.value).sort((a, b) => a - b);
 	for (const [id, v] of demandLogByListing) {
-		const n = span > 0 ? (v - dMin) / span : 0;
-		// Clamp: terminal rows excluded from the range above can fall outside
-		// [0,1]; they don't serve, but keep the stored value well-formed.
-		normalizedDemandByListing.set(id, n < 0 ? 0 : n > 1 ? 1 : n);
+		const pct = pctByListing.get(id);
+		normalizedDemandByListing.set(
+			id,
+			pct !== undefined ? pct : lowerBoundPct(servedValues, v),
+		);
 	}
 
 	return {
@@ -656,6 +869,9 @@ async function aggregateDemand(
 		medianPriceByKey,
 		overallMedianPrice,
 		engagementMax,
+		engagementByListing,
+		intentByListing,
+		impressionsByListing,
 		tokenizeMs,
 	};
 }
@@ -663,7 +879,9 @@ async function aggregateDemand(
 /**
  * /explore default-feed ranking refresh (NL-284 docs/explore-ranking.md §7;
  * NL-310 v2 commit #6 extends with sellerTrust; explore-ranking-v3 PR2 swaps
- * the token-CVR multiplier for a view-demand one). Sole writer of the
+ * the token-CVR multiplier for a view-demand one; explore-ranking-v4 decays
+ * every demand term at a 7d half-life, adds purchases to the composite, and
+ * replaces min-max normalization with rank quantiles). Sole writer of the
  * time-decaying `rankScore`, `Listing.addToCartCount`, `Listing.tokenBoost`
  * (which now carries the view-demand multiplier, not CVR), and
  * `SellerProfile.reviewAvgShrunk`. Pure scoring formula lives in
@@ -677,10 +895,12 @@ async function aggregateDemand(
  * `token_popularity` write is GONE — that table was analytics-only, never
  * read at serve time; the demand signal lives in memory for the tick and is
  * stored per-listing in the reused `tokenBoost` column. The listing/seller
- * writes are guarded by `IS DISTINCT FROM`; `rankScore` advances every
- * scheduled run because `now` advances — intended, the 10-minute cadence (not
- * byte-stable idempotency) keeps writes negligible. Same-instant BullMQ retry
- * is a true no-op, so retries are safe.
+ * writes are guarded by `IS DISTINCT FROM`; `rankScore` and the decayed
+ * demand columns advance every scheduled run because `now` advances, so the
+ * guard passes for ~every listing with any window activity — the bound on
+ * write volume is the catalog size per tick (fine at this scale; the three
+ * v4 columns are unindexed, so the updates stay HOT). Same-instant BullMQ
+ * retry is a true no-op, so retries are safe.
  *
  * `titleTokens` denorm column intentionally NOT added (docs §4.1 vs §6.2
  * contradiction resolved against §4.1 per the May 2026 research pass).
@@ -724,15 +944,17 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 	const tokenBoostEnabled = process.env.ENABLE_TOKEN_BOOST !== "false";
 	const cartAddSignalEnabled = process.env.ENABLE_CART_ADD_SIGNAL !== "false";
 	const saveSignalEnabled = process.env.ENABLE_SAVE_SIGNAL !== "false";
+	const purchaseSignalEnabled = process.env.ENABLE_PURCHASE_SIGNAL !== "false";
 	const priceMultEnabled = process.env.ENABLE_PRICE_MULT !== "false";
 	const premiumPriceEnabled = process.env.ENABLE_PREMIUM_PRICE !== "false";
 	const imageDemeritEnabled = process.env.ENABLE_IMAGE_DEMERIT !== "false";
 
 	// Sequential: demand aggregation needs listing IDs from the scan. The
-	// cart/save kill switches drop their term from the engagement composite.
+	// cart/save/purchase kill switches drop their term from the composite.
 	const demand = await aggregateDemand(ctx, scanRows, {
 		cartAddSignalEnabled,
 		saveSignalEnabled,
+		purchaseSignalEnabled,
 	});
 
 	if (demand.tokenizeMs > TOKENIZE_WARN_THRESHOLD_MS) {
@@ -778,11 +1000,11 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 
 		const matches = demand.matchedByListing.get(r.id);
 
-		// View-demand multiplier (explore-ranking-v3 PR2). The worker already
-		// computed each listing's subject-pooled, min-max-normalized demand in
-		// `aggregateDemand`; the scorer just maps it through the clamp. The
-		// kill switch (`ENABLE_TOKEN_BOOST=false`) leaves `normalizedDemand`
-		// empty, so this reads 0 → neutral 1.0× — the additive collapse.
+		// View-demand multiplier (explore-ranking-v4). The worker already
+		// computed each listing's subject-pooled, rank-quantile-normalized
+		// decayed demand in `aggregateDemand`; the scorer just maps it through
+		// the clamp. The kill switch (`ENABLE_TOKEN_BOOST=false`) leaves
+		// `normalizedDemand` empty, so this reads 0 → neutral 1.0×.
 		const demandMult = tokenBoostEnabled
 			? computeDemandMultiplier(
 					{ normalizedDemand: demand.normalizedDemandByListing.get(r.id) ?? 0 },
@@ -863,6 +1085,10 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			addToCartCount,
 			// Stored into the reused `tokenBoost` column (now view-demand, not CVR).
 			demandMult,
+			// Slot-policy inputs (NL-371) — see the schema comment on the columns.
+			demandEngagement: demand.engagementByListing.get(r.id) ?? 0,
+			demandIntent: demand.intentByListing.get(r.id) ?? 0,
+			feedImpressions: demand.impressionsByListing.get(r.id) ?? 0,
 		};
 	});
 
@@ -872,7 +1098,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 		const values = Prisma.join(
 			chunk.map(
 				(p) =>
-					Prisma.sql`(${p.id}, ${p.rankScore}::double precision, ${p.rankBaseScore}::double precision, ${p.rankBaseVersion}::int, ${p.addToCartCount}::int, ${p.demandMult}::double precision, ${TOKEN_BOOST_VERSION}::int)`,
+					Prisma.sql`(${p.id}, ${p.rankScore}::double precision, ${p.rankBaseScore}::double precision, ${p.rankBaseVersion}::int, ${p.addToCartCount}::int, ${p.demandMult}::double precision, ${TOKEN_BOOST_VERSION}::int, ${p.demandEngagement}::double precision, ${p.demandIntent}::double precision, ${p.feedImpressions}::int)`,
 			),
 		);
 		// Raw SQL targets the physical `auction` table (NL-284/NL-310 columns
@@ -884,10 +1110,14 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 				"rankBaseVersion"   = v.rank_base_version,
 				"addToCartCount"    = v.add_to_cart_count,
 				"tokenBoost"        = v.token_boost,
-				"tokenBoostVersion" = v.token_boost_version
+				"tokenBoostVersion" = v.token_boost_version,
+				"demandEngagement"  = v.demand_engagement,
+				"demandIntent"      = v.demand_intent,
+				"feedImpressions"   = v.feed_impressions
 			FROM (VALUES ${values}) AS v(
 				id, rank_score, rank_base_score, rank_base_version,
-				add_to_cart_count, token_boost, token_boost_version
+				add_to_cart_count, token_boost, token_boost_version,
+				demand_engagement, demand_intent, feed_impressions
 			)
 			WHERE a.id = v.id
 				AND (a."rankScore"         IS DISTINCT FROM v.rank_score
@@ -895,7 +1125,10 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 					OR a."rankBaseVersion" IS DISTINCT FROM v.rank_base_version
 					OR a."addToCartCount"  IS DISTINCT FROM v.add_to_cart_count
 					OR a."tokenBoost"      IS DISTINCT FROM v.token_boost
-					OR a."tokenBoostVersion" IS DISTINCT FROM v.token_boost_version)
+					OR a."tokenBoostVersion" IS DISTINCT FROM v.token_boost_version
+					OR a."demandEngagement" IS DISTINCT FROM v.demand_engagement
+					OR a."demandIntent"    IS DISTINCT FROM v.demand_intent
+					OR a."feedImpressions" IS DISTINCT FROM v.feed_impressions)
 		`;
 	}
 
@@ -933,6 +1166,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			tokenBoostEnabled,
 			cartAddSignalEnabled,
 			saveSignalEnabled,
+			purchaseSignalEnabled,
 			priceMultEnabled,
 			premiumPriceEnabled,
 			imageDemeritEnabled,
