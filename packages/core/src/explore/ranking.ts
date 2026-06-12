@@ -104,7 +104,19 @@ export interface RankingConfig {
 		premium: number;
 	};
 	recencyHalfLifeHours: number;
+	/**
+	 * Max listings from one seller within ANY `perSellerWindow` consecutive
+	 * slots of the diversity-reflowed order (genuinely sliding, so two at one
+	 * page's end can't meet two at the next page's start). Overflow defers to
+	 * later slots — never to the feed tail.
+	 */
 	perSellerCap: number;
+	/**
+	 * Length (in slots) of the sliding stretch `perSellerCap` is enforced
+	 * over. One feed page by default (matches `DEFAULT_EXPLORE_LIMIT` and the
+	 * slot policy's `pageSize`).
+	 */
+	perSellerWindow: number;
 	/**
 	 * Soft demerit subtracted from the base for title-echo / near-empty
 	 * listings. Never a WHERE filter — fully reversible by setting it to 0.
@@ -343,18 +355,22 @@ export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 		premium: 0.35,
 	},
 	recencyHalfLifeHours: 72,
-	// Global per-seller cap (NOT per-page): `applyDiversity` keeps a seller's
-	// top-N ranked listings and demotes the rest to the tail, so the feed reads
-	// as a varied market rather than one seller's storefront. Dropped 3 → 2
-	// (explore-ranking-v3 §5.1.6): live-catalog data showed prolific sellers
-	// clustering hard near the top (one seller held 4 of the top 12), and the
-	// image-resolution demerit only breaks up the LOW-RES clusters — a seller
-	// with good 1200px photos still stacks the top without this. Cap 2 lifts
-	// page-one seller diversity from ~8 to ~12 distinct sellers per 24 slots and
-	// spreads top-slot exposure. Demote-not-drop + applied at snapshot build, so
-	// it's instantly reversible with no version bump. Their profile page is the
+	// Sliding-window per-seller cap: at most `perSellerCap` listings from one
+	// seller in any `perSellerWindow` consecutive slots, overflow DEFERRED to
+	// the following slots — a prolific seller reads as ~2 cards per page all
+	// the way down. The original global cap appended a seller's 3rd+ listings
+	// after the ENTIRE snapshot (behind even sub-gate junk); the June 2026
+	// prod replay showed a 69-listing seller at slots 8, 17, then 153+ under
+	// the global cap vs 8, 18, 33, 41, 47… under the window (preview-track23
+	// PART C). Pattern is standard practice: eBay caps sellers per result
+	// set, Pinterest/Xiaohongshu re-rank with a sliding window, Twitter/X
+	// decays repeated authors — none of them bury overflow at the tail. Cap
+	// kept at 2 (explore-ranking-v3 §5.1.6: one seller held 4 of the top 12
+	// without it). Demote-not-drop + applied at snapshot build, so it's
+	// instantly reversible with no version bump. Their profile page is the
 	// uncapped storefront.
 	perSellerCap: 2,
+	perSellerWindow: 12,
 	lowEffortPenalty: 0.12,
 	longTitlePenalty: 0.04,
 	demandSensitivity: 1.0,
@@ -996,6 +1012,13 @@ export interface DiversityCandidate {
 	id: string;
 	sellerProfileId: string;
 	title: string;
+	/**
+	 * Snapshot sort bucket (`SortPriority`). The diversity reflow never moves
+	 * a listing across bucket boundaries — deferring an ACTIVE_BIN row must
+	 * not let a SCHEDULED row jump ahead of it. Optional so callers without
+	 * bucketed input (offline preview scripts) reflow as a single bucket.
+	 */
+	sortPriority?: number;
 }
 
 export interface SnapshotOrderCandidate {
@@ -1036,37 +1059,92 @@ export function compareForSnapshot(
 }
 
 /**
- * Global per-seller cap + near-identical dedup, applied ONCE over the full
- * ordered candidate list at snapshot-build time, BEFORE slicing. Demote
- * (push to a tail appended after the capped list) — never drop — so result
- * count is preserved and a small-catalog seller is never erased. Because
- * pagination is then a pure slice of this array, the global cap is exactly
- * correct across every page by construction (docs/explore-ranking.md §9).
+ * Sliding-window per-seller cap + near-identical dedup, applied ONCE over the
+ * full ordered candidate list at snapshot-build time, BEFORE slicing. At most
+ * `perSellerCap` listings per seller in ANY `perSellerWindow` consecutive
+ * slots; overflow DEFERS to the next available slot instead of demoting to
+ * the feed tail (the v1 global cap exiled a seller's 3rd+ listings behind the
+ * entire ~2k-row snapshot — see the `perSellerCap` config note for the prod
+ * replay numbers and industry precedent). Never drop — result count is
+ * preserved and a small-catalog seller is never erased. Because pagination is
+ * a pure slice of this array and the window is genuinely sliding, the cap
+ * holds across every page AND across page boundaries by construction.
  *
- * Unchanged from v1.
+ * Two behaviors survive from v1 unchanged:
+ *   - Same-seller near-identical relistings (normalized-title dup) still go
+ *     to the global tail — spacing five copies of one card two-per-page would
+ *     serve the same card on every page.
+ *   - When only capped sellers remain in a bucket, the cap yields and they
+ *     pack densely — a full feed beats a strictly-spaced short one.
+ *
+ * The reflow runs per `sortPriority` bucket: deferring an ACTIVE_BIN row must
+ * never let a SCHEDULED/ENDED row jump ahead of it.
  */
 export function applyDiversity(
 	ordered: DiversityCandidate[],
 	config: RankingConfig,
 ): string[] {
-	const sellerCount = new Map<string, number>();
 	const seenTitles = new Set<string>();
-	const kept: string[] = [];
-	const tail: string[] = [];
-
+	const dupTail: string[] = [];
+	const unique: DiversityCandidate[] = [];
 	for (const c of ordered) {
-		const count = sellerCount.get(c.sellerProfileId) ?? 0;
 		const titleKey = `${c.sellerProfileId}:${normalizeTitle(c.title)}`;
-
-		if (count >= config.perSellerCap || seenTitles.has(titleKey)) {
-			tail.push(c.id);
+		if (seenTitles.has(titleKey)) {
+			dupTail.push(c.id);
 			continue;
 		}
-
-		kept.push(c.id);
-		sellerCount.set(c.sellerProfileId, count + 1);
 		seenTitles.add(titleKey);
+		unique.push(c);
 	}
 
-	return kept.concat(tail);
+	const cap = Math.max(1, config.perSellerCap);
+	const win = Math.max(1, config.perSellerWindow);
+	const out: string[] = [];
+
+	let bucketStart = 0;
+	for (let i = 1; i <= unique.length; i++) {
+		if (
+			i === unique.length ||
+			(unique[i] as DiversityCandidate).sortPriority !==
+				(unique[bucketStart] as DiversityCandidate).sortPriority
+		) {
+			reflowBucket(unique.slice(bucketStart, i), cap, win, out);
+			bucketStart = i;
+		}
+	}
+
+	return out.concat(dupTail);
+}
+
+/**
+ * Greedy sliding-window reflow of one sort bucket, appending to `out`. At
+ * each slot, place the highest-ranked pending candidate whose seller has
+ * fewer than `cap` placements among the previous `win - 1` slots; when no
+ * candidate qualifies (only capped sellers remain), the cap yields to keep
+ * the feed dense.
+ */
+function reflowBucket(
+	bucket: DiversityCandidate[],
+	cap: number,
+	win: number,
+	out: string[],
+): void {
+	const pending = [...bucket];
+	/** Sellers of the last `win - 1` placements; counts age out as it slides. */
+	const recent: string[] = [];
+	const counts = new Map<string, number>();
+	while (pending.length > 0) {
+		let idx = pending.findIndex(
+			(c) => (counts.get(c.sellerProfileId) ?? 0) < cap,
+		);
+		if (idx < 0) idx = 0;
+		const c = pending.splice(idx, 1)[0] as DiversityCandidate;
+		out.push(c.id);
+		counts.set(c.sellerProfileId, (counts.get(c.sellerProfileId) ?? 0) + 1);
+		recent.push(c.sellerProfileId);
+		if (recent.length > win - 1) {
+			const aged = recent.shift() as string;
+			counts.set(aged, (counts.get(aged) ?? 0) - 1);
+		}
+	}
 }

@@ -274,7 +274,7 @@ interface SnapshotBuildLog {
  *
  * After diversity, the v4 SLOT POLICY (NL-371, `applySlotPolicy`) recomposes
  * the top of the ACTIVE_BIN section: hourly-rotating anchors over the proven
- * top-8 (the resting pool members re-enter ~page 3, not page-1 backfill),
+ * top-12 (the resting pool members re-enter ~page 3, not page-1 backfill),
  * impression-budgeted fresh-listing trial slots, and the window-shopper
  * eviction (heavy exposure + zero cart/purchase intent loses page-1
  * eligibility). Applied HERE deliberately so the Klaviyo "trending" rail
@@ -331,6 +331,7 @@ export async function selectRankedCandidateIds(
 				sortPriority: r.sortPriority,
 				rankBaseScore: r.rankBaseScore,
 				createdAt: r.createdAt,
+				sellerProfileId: r.sellerProfileId,
 				priceUSD: effectivePriceUSD(r),
 				demandEngagement: r.demandEngagement,
 				demandIntent: r.demandIntent,
