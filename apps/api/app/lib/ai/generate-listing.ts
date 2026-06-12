@@ -75,7 +75,7 @@ function buildPrompt(record: CanonicalRecord): string {
 	If kind = "slab":
 	- Lead with subject + card number + set + year in natural prose.
 	- State grader + grade once ("PSA 10", "BGS 9.5"). Do NOT say "graded", "slabbed", "encapsulated", "this is a graded example" — the grade speaks for itself.
-	- If certNumber is present, include it once at the end of the grade clause as "Cert #<number>." Buyers verify on the grader's site, so this matters.
+	- Do NOT include the cert number. It renders as a structured authenticity field on the listing page with a verify link; repeating it in prose creates a second editable copy that drifts when the seller corrects the field (NL-374).
 	- If language is non-English AND the language is not already conveyed by the set name, mention it once as a bare adjective qualifying the relevant noun (e.g. "Japanese promo", "Japanese print"). Skip the mention entirely if the set name already carries it.
 	- Optionally one short clause of set or card significance — only if factually defensible from the record.
 	- Do NOT discuss centering, surface, edges, or corners. The grade encodes them.
@@ -117,13 +117,13 @@ function buildPrompt(record: CanonicalRecord): string {
 	EXAMPLES (study the voice; do not copy verbatim):
 
 	slab, Pokemon, Japanese:
-	"Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10, Cert #84512309. Released for Pokemon's 25th anniversary."
+	"Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10. Released for Pokemon's 25th anniversary."
 
 	slab, Pokemon, vintage:
-	"1999 Base Set Charizard 4/102. PSA 8, Cert #67223451. The defining card of the original WOTC release."
+	"1999 Base Set Charizard 4/102. PSA 8. The defining card of the original WOTC release."
 
 	slab, sports, modern RC:
-	"2018 Panini Prizm Luka Doncic #280 rookie. PSA 10, Cert #71994023. Key rookie card of the 2018-19 Prizm class."
+	"2018 Panini Prizm Luka Doncic #280 rookie. PSA 10. Key rookie card of the 2018-19 Prizm class."
 
 	raw Pokemon, modern:
 	"Charizard ex 199/165 Special Illustration Rare from Scarlet & Violet 151 (2023). Sleeved since the pull. See photos for exact condition."
@@ -142,13 +142,13 @@ function buildPrompt(record: CanonicalRecord): string {
 	<language_handling_examples>
 		<case>Set name already conveys the language.</case>
 		<bad>Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10. Japanese language card commemorating the anniversary.</bad>
-		<good>Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10, Cert #84512309. Released for Pokemon's 25th anniversary.</good>
+		<good>Lugia 005/028 from the 2021 Japanese 25th Anniversary Collection. PSA 10. Released for Pokemon's 25th anniversary.</good>
 	</language_handling_examples>
 
 	<language_handling_examples>
 		<case>Set name does not convey the language.</case>
 		<bad>Bulbasaur 030 from the 2009 P.M. Promo 10th Anniversary set. PSA 9. Japanese language card commemorating the 10th anniversary of the Pokemon TCG.</bad>
-		<good>Bulbasaur 030 from the 2009 P.M. Japanese Promo 10th Anniversary set. PSA 9, Cert #42942348. Released for the 10th anniversary of the Pokemon TCG.</good>
+		<good>Bulbasaur 030 from the 2009 P.M. Japanese Promo 10th Anniversary set. PSA 9. Released for the 10th anniversary of the Pokemon TCG.</good>
 	</language_handling_examples>
 
 	---
