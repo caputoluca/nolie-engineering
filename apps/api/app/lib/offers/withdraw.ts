@@ -1,3 +1,5 @@
+import { offerWithdrawn } from "@nolie/analytics/events";
+import type { ServerAnalytics } from "@nolie/analytics/server";
 import {
 	type Offer,
 	OfferActor,
@@ -13,6 +15,7 @@ import { toOfferOut } from "./transform.js";
 export interface WithdrawOfferInput {
 	db: PrismaClient;
 	realtime: RestClient;
+	analytics: ServerAnalytics;
 	offerId: string;
 	userId: string;
 }
@@ -38,7 +41,7 @@ export interface WithdrawOfferResult {
 export async function withdrawOffer(
 	input: WithdrawOfferInput,
 ): Promise<WithdrawOfferResult> {
-	const { db, realtime, offerId, userId } = input;
+	const { db, realtime, analytics, offerId, userId } = input;
 
 	const offer = await db.offer.findUnique({ where: { id: offerId } });
 	if (!offer) {
@@ -101,6 +104,20 @@ export async function withdrawOffer(
 	const refreshed = await db.offer.findUniqueOrThrow({
 		where: { id: offerId },
 	});
+
+	// offer_withdrawn (NL-370) — terminal offer-funnel leg, buyer-keyed.
+	// First-write path only; alreadyWithdrawn replays returned above.
+	analytics.capture(
+		refreshed.buyerId,
+		offerWithdrawn({
+			offerId: refreshed.id,
+			listingId: refreshed.listingId,
+			sellerId: refreshed.sellerId,
+			buyerId: refreshed.buyerId,
+			offerAmountCents: refreshed.amountCents,
+			proposedBy: refreshed.proposedBy,
+		}),
+	);
 
 	// Notify the counterparty (the seller, since V1 only has buyer-proposed
 	// offers). No email — the V1 matrix doesn't include withdraw emails;
