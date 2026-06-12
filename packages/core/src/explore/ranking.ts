@@ -1078,7 +1078,10 @@ export function compareForSnapshot(
  *     pack densely — a full feed beats a strictly-spaced short one.
  *
  * The reflow runs per `sortPriority` bucket: deferring an ACTIVE_BIN row must
- * never let a SCHEDULED/ENDED row jump ahead of it.
+ * never let a SCHEDULED/ENDED row jump ahead of it. Input MUST already be
+ * `sortPriority`-ordered (it is — `compareForSnapshot` sorts on it first);
+ * buckets are detected as contiguous runs, so an unsorted input would split
+ * one logical bucket into several independently-spaced runs.
  */
 export function applyDiversity(
 	ordered: DiversityCandidate[],
