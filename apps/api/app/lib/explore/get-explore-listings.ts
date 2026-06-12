@@ -273,12 +273,13 @@ interface SnapshotBuildLog {
  * filters at hydration, not here, so the ordering stays shared.
  *
  * After diversity, the v4 SLOT POLICY (NL-371, `applySlotPolicy`) recomposes
- * the top of the ACTIVE_BIN section: daily-rotating anchors over the proven
- * top-8, impression-budgeted fresh-listing trial slots, and the
- * window-shopper eviction (heavy exposure + zero cart/purchase intent loses
- * page-1 eligibility). Applied HERE deliberately so the Klaviyo "trending"
- * rail inherits the rotation — its top-4 differs per send day by
- * construction. With zero proven listings the policy is the identity, and
+ * the top of the ACTIVE_BIN section: hourly-rotating anchors over the proven
+ * top-8 (the resting pool members re-enter ~page 3, not page-1 backfill),
+ * impression-budgeted fresh-listing trial slots, and the window-shopper
+ * eviction (heavy exposure + zero cart/purchase intent loses page-1
+ * eligibility). Applied HERE deliberately so the Klaviyo "trending" rail
+ * inherits the rotation — its top-4 differs per send hour by construction.
+ * With zero proven listings the policy is the identity, and
  * `ENABLE_SLOT_POLICY=false` bypasses it without touching the ranked path.
  */
 export async function selectRankedCandidateIds(
