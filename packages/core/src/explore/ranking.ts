@@ -859,10 +859,11 @@ export function computeRankScore(
 
 export interface ComputeDemandMultiplierInput {
 	/**
-	 * The listing's min-max-normalized view-demand in `[0,1]` (explore-ranking-v3
-	 * PR2). Computed by the refresh worker as the log1p of the listing's
-	 * subject-pooled engagement (distinct 30d viewers + weighted saves + weighted
-	 * cart events), min-max-normalized across the full rankable scan. 0 = the
+	 * The listing's rank-quantile-normalized view-demand in `[0,1]`
+	 * (explore-ranking-v4; was min-max in v3 PR2). Computed by the refresh
+	 * worker as the log1p of the listing's subject-pooled DECAYED engagement
+	 * (decayed distinct viewers + weighted decayed saves/carts/purchases),
+	 * passed through `quantileNormalize` over the explore-served scan. 0 = the
 	 * least-demanded listing in the scan (collapses to neutral), 1 = the most.
 	 */
 	normalizedDemand: number;
@@ -893,6 +894,58 @@ export function computeDemandMultiplier(
 ): number {
 	const raw = 1 + config.demandSensitivity * input.normalizedDemand;
 	return Math.max(TOKEN_BOOST_MIN, Math.min(DEMAND_MULT_MAX, raw));
+}
+
+export interface QuantileValue {
+	id: string;
+	value: number;
+}
+
+/**
+ * Rank-quantile normalization to `[0,1]` (explore-ranking-v4). Replaces
+ * min-max for the demand signal: engagement is heavy-tailed, so min-max lets
+ * a single outlier stretch the range and squash the body into a narrow band
+ * (observed in prod: 76% of the catalog landed in demand-mult 1.20-1.50, 47%
+ * in one decile). Rank percentiles are outlier-immune by construction — the
+ * body spreads flat (~10% per decile) regardless of the tail.
+ *
+ * Ties share the percentile of the tie group's FIRST rank (min-rank, not
+ * mean-rank). Load-bearing for the floor invariant: in a cold catalog every
+ * zero-demand listing ties at the bottom, and min-rank keeps that whole group
+ * at pct 0 → neutral 1.0× — mean-rank would gift a large bottom tie group a
+ * ~1.5× boost for having no demand at all.
+ *
+ * n ≤ 1, or all values tied → 0 for everyone: nothing to differentiate, the
+ * multiplier collapses to neutral (same as min-max's span-0 behavior).
+ */
+export function quantileNormalize(
+	values: ReadonlyArray<QuantileValue>,
+): Map<string, number> {
+	const out = new Map<string, number>();
+	const n = values.length;
+	if (n === 0) return out;
+	if (n === 1) {
+		out.set((values[0] as QuantileValue).id, 0);
+		return out;
+	}
+	const sorted = [...values].sort((a, b) => a.value - b.value);
+	let i = 0;
+	while (i < n) {
+		let j = i;
+		while (
+			j + 1 < n &&
+			(sorted[j + 1] as QuantileValue).value ===
+				(sorted[i] as QuantileValue).value
+		) {
+			j++;
+		}
+		const pct = i / (n - 1);
+		for (let k = i; k <= j; k++) {
+			out.set((sorted[k] as QuantileValue).id, pct);
+		}
+		i = j + 1;
+	}
+	return out;
 }
 
 /**

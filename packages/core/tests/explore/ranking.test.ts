@@ -14,6 +14,7 @@ import {
 	matchesNegativeKeyword,
 	PLATEAU_HI_USD,
 	PLATEAU_LO_USD,
+	quantileNormalize,
 	type RankingConfig,
 	TOKEN_BOOST_MIN,
 } from "../../src/explore/ranking.js";
@@ -631,6 +632,67 @@ describe("computeRankScore", () => {
 		);
 
 		expect(omitted).toBe(explicit);
+	});
+});
+
+describe("quantileNormalize", () => {
+	it("spreads distinct values evenly across [0,1] regardless of magnitude gaps", () => {
+		// A heavy tail (1000 vs single digits) must NOT compress the body —
+		// the exact failure min-max had (76% of the catalog in one band).
+		const pct = quantileNormalize([
+			{ id: "a", value: 1 },
+			{ id: "b", value: 2 },
+			{ id: "c", value: 3 },
+			{ id: "d", value: 4 },
+			{ id: "e", value: 1000 },
+		]);
+		expect(pct.get("a")).toBe(0);
+		expect(pct.get("b")).toBe(0.25);
+		expect(pct.get("c")).toBe(0.5);
+		expect(pct.get("d")).toBe(0.75);
+		expect(pct.get("e")).toBe(1);
+	});
+
+	it("keeps a bottom tie group at exactly 0 (min-rank ties → neutral floor)", () => {
+		// A cold catalog ties many listings at zero demand. The whole group must
+		// land at pct 0 → multiplier 1.0, not inherit a mean-rank freebie.
+		const pct = quantileNormalize([
+			{ id: "z1", value: 0 },
+			{ id: "z2", value: 0 },
+			{ id: "z3", value: 0 },
+			{ id: "hot", value: 9 },
+		]);
+		expect(pct.get("z1")).toBe(0);
+		expect(pct.get("z2")).toBe(0);
+		expect(pct.get("z3")).toBe(0);
+		expect(pct.get("hot")).toBe(1);
+	});
+
+	it("collapses to 0 when there is nothing to differentiate", () => {
+		expect(quantileNormalize([]).size).toBe(0);
+		expect(quantileNormalize([{ id: "only", value: 7 }]).get("only")).toBe(0);
+		const allTied = quantileNormalize([
+			{ id: "a", value: 5 },
+			{ id: "b", value: 5 },
+			{ id: "c", value: 5 },
+		]);
+		expect(allTied.get("a")).toBe(0);
+		expect(allTied.get("b")).toBe(0);
+		expect(allTied.get("c")).toBe(0);
+	});
+
+	it("ties inside the body share their group's first-rank percentile", () => {
+		const pct = quantileNormalize([
+			{ id: "lo", value: 1 },
+			{ id: "m1", value: 2 },
+			{ id: "m2", value: 2 },
+			{ id: "hi", value: 3 },
+		]);
+		expect(pct.get("lo")).toBe(0);
+		// Tie group occupies ranks 1-2 of 0..3 → both get 1/3.
+		expect(pct.get("m1")).toBeCloseTo(1 / 3, 9);
+		expect(pct.get("m2")).toBeCloseTo(1 / 3, 9);
+		expect(pct.get("hi")).toBe(1);
 	});
 });
 
