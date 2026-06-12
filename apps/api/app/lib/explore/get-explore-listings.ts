@@ -5,10 +5,13 @@ import type {
 } from "@nolie/cache";
 import {
 	applyDiversity,
+	applySlotPolicy,
 	compareForSnapshot,
 	DEFAULT_RANKING_CONFIG,
+	DEFAULT_SLOT_POLICY,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
+	type SlotCandidate,
 } from "@nolie/core/explore";
 import { type DbClient, ListingStatus, type Prisma } from "@nolie/db";
 import {
@@ -266,6 +269,15 @@ interface SnapshotBuildLog {
  * byte-for-byte" invariant `compareForSnapshot` is documented under. A consumer
  * that needs a different *eligibility* set (e.g. the feed wants fixed-price only)
  * filters at hydration, not here, so the ordering stays shared.
+ *
+ * After diversity, the v4 SLOT POLICY (NL-371, `applySlotPolicy`) recomposes
+ * the top of the ACTIVE_BIN section: daily-rotating anchors over the proven
+ * top-8, impression-budgeted fresh-listing trial slots, and the
+ * window-shopper eviction (heavy exposure + zero cart/purchase intent loses
+ * page-1 eligibility). Applied HERE deliberately so the Klaviyo "trending"
+ * rail inherits the rotation — its top-4 differs per send day by
+ * construction. With zero proven listings the policy is the identity, and
+ * `ENABLE_SLOT_POLICY=false` bypasses it without touching the ranked path.
  */
 export async function selectRankedCandidateIds(
 	db: DbClient,
@@ -290,13 +302,50 @@ export async function selectRankedCandidateIds(
 			sortTimeMs: true,
 			rankScore: true,
 			categoryId: true,
+			listingType: true,
+			price: true,
+			startingBid: true,
+			rankBaseScore: true,
+			createdAt: true,
+			demandEngagement: true,
+			demandIntent: true,
+			feedImpressions: true,
 		},
 		orderBy: [{ sortPriority: "asc" }, { rankScore: "desc" }, { id: "asc" }],
 		take: candidateLimit,
 	});
 	rows.sort(compareForSnapshot);
+	let orderedIds = applyDiversity(rows, DEFAULT_RANKING_CONFIG);
+
+	if (process.env.ENABLE_SLOT_POLICY !== "false") {
+		const rowById = new Map(rows.map((r) => [r.id, r]));
+		const candidates: SlotCandidate[] = [];
+		for (const id of orderedIds) {
+			const r = rowById.get(id);
+			if (!r) continue;
+			const rawPrice =
+				r.listingType === "fixed_price"
+					? r.price
+					: r.listingType === "auction"
+						? r.startingBid
+						: null;
+			const priceUSD = rawPrice === null ? Number.NaN : Number(rawPrice);
+			candidates.push({
+				id: r.id,
+				sortPriority: r.sortPriority,
+				rankBaseScore: r.rankBaseScore,
+				createdAt: r.createdAt,
+				priceUSD: Number.isFinite(priceUSD) && priceUSD > 0 ? priceUSD : null,
+				demandEngagement: r.demandEngagement,
+				demandIntent: r.demandIntent,
+				feedImpressions: r.feedImpressions,
+			});
+		}
+		orderedIds = applySlotPolicy(candidates, Date.now(), DEFAULT_SLOT_POLICY);
+	}
+
 	return {
-		orderedIds: applyDiversity(rows, DEFAULT_RANKING_CONFIG),
+		orderedIds,
 		candidateCount: rows.length,
 		categoryById: new Map(rows.map((r) => [r.id, r.categoryId ?? null])),
 	};

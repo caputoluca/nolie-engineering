@@ -358,6 +358,19 @@ interface DemandResult {
 	/** Max raw engagement (pre-normalization) across the scan — logged for
 	 * observability. 0 when demand is disabled or no signal landed. */
 	engagementMax: number;
+	/** listingId → decayed own-engagement composite. Persisted to
+	 * `Listing.demandEngagement` for the slot policy's proven floor. Empty on
+	 * the demand kill switch (column self-heals next enabled tick). */
+	engagementByListing: Map<string, number>;
+	/** listingId → decayed cart+purchase EVENT count (unweighted — evidence,
+	 * not score). Persisted to `Listing.demandIntent` for the window-shopper
+	 * eviction. Computed regardless of the per-signal kill switches: eviction
+	 * is an eligibility test, not a score term. */
+	intentByListing: Map<string, number>;
+	/** listingId → bot-filtered window `listing_impression` count. Persisted to
+	 * `Listing.feedImpressions` for the fresh-trial budget + eviction
+	 * threshold. */
+	impressionsByListing: Map<string, number>;
 	/** Wall time of the `matchTokens` loop over every rankable listing.
 	 * Alarmed against `TOKENIZE_WARN_THRESHOLD_MS` — the §6.2
 	 * denorm-titleTokens escape hatch's only invisible trigger. */
@@ -379,6 +392,10 @@ interface DemandEventRow {
 	/** Decayed sum of `purchase_completed` events (stamped per OrderLineItem,
 	 * so listing-scoped). */
 	purchases: number;
+	/** Bot-filtered `listing_impression` COUNT in the window (NOT decayed — it
+	 * is an exposure-evidence counter for the slot policy's fresh-trial budget
+	 * and window-shopper threshold, not a score input). */
+	impressions: number;
 }
 
 function tokenKey(kind: string, value: string): string {
@@ -573,6 +590,9 @@ async function aggregateDemand(
 			medianPriceByKey,
 			overallMedianPrice,
 			engagementMax: 0,
+			engagementByListing: new Map(),
+			intentByListing: new Map(),
+			impressionsByListing: new Map(),
 			tokenizeMs,
 		};
 	}
@@ -593,6 +613,7 @@ async function aggregateDemand(
 			  AND listing_id IN (${idsSql})
 			  AND event_name IN (
 			    ${EngagementEventName.listingViewed},
+			    ${EngagementEventName.listingImpression},
 			    ${EngagementEventName.cartAdded},
 			    ${EngagementEventName.listingSaved},
 			    ${EngagementEventName.listingUnsaved},
@@ -643,29 +664,47 @@ async function aggregateDemand(
 				           / ${SECONDS_PER_DAY}::float
 				           / ${DEMAND_HALF_LIFE_DAYS}::float) AS decay
 				FROM scoped
-				WHERE event_name <> ${EngagementEventName.listingViewed}
+				WHERE event_name NOT IN (
+				  ${EngagementEventName.listingViewed},
+				  ${EngagementEventName.listingImpression}
+				)
 			) e
+			GROUP BY listing_id
+		),
+		impressions AS (
+			SELECT listing_id, COUNT(*)::int AS "impressions"
+			FROM scoped
+			WHERE event_name = ${EngagementEventName.listingImpression}
+			  AND (anonymous_id IS NULL
+			       OR anonymous_id NOT IN (SELECT anonymous_id FROM scrapers))
 			GROUP BY listing_id
 		)
 		SELECT
-			COALESCE(v.listing_id, i.listing_id) AS "listingId",
+			COALESCE(v.listing_id, i.listing_id, m.listing_id) AS "listingId",
 			COALESCE(v."viewers", 0)             AS "viewers",
 			COALESCE(i."carts", 0)               AS "carts",
 			COALESCE(i."saves", 0)               AS "saves",
-			COALESCE(i."purchases", 0)           AS "purchases"
+			COALESCE(i."purchases", 0)           AS "purchases",
+			COALESCE(m."impressions", 0)         AS "impressions"
 		FROM viewer_decay v
 		FULL OUTER JOIN intent_decay i ON i.listing_id = v.listing_id
+		FULL OUTER JOIN impressions m
+			ON m.listing_id = COALESCE(v.listing_id, i.listing_id)
 	`;
 
 	const viewersByListing = new Map<string, number>();
 	const cartsByListing = new Map<string, number>();
 	const savesByListing = new Map<string, number>();
 	const purchasesByListing = new Map<string, number>();
+	const intentByListing = new Map<string, number>();
+	const impressionsByListing = new Map<string, number>();
 	for (const row of demandRows) {
 		viewersByListing.set(row.listingId, row.viewers);
 		cartsByListing.set(row.listingId, row.carts);
 		savesByListing.set(row.listingId, row.saves);
 		purchasesByListing.set(row.listingId, row.purchases);
+		intentByListing.set(row.listingId, row.carts + row.purchases);
+		impressionsByListing.set(row.listingId, row.impressions);
 	}
 
 	// engagement = decayedViewers + SAVE_VIEWS·decayedNetSaves
@@ -773,6 +812,9 @@ async function aggregateDemand(
 		medianPriceByKey,
 		overallMedianPrice,
 		engagementMax,
+		engagementByListing,
+		intentByListing,
+		impressionsByListing,
 		tokenizeMs,
 	};
 }
@@ -984,6 +1026,10 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			addToCartCount,
 			// Stored into the reused `tokenBoost` column (now view-demand, not CVR).
 			demandMult,
+			// Slot-policy inputs (NL-371) — see the schema comment on the columns.
+			demandEngagement: demand.engagementByListing.get(r.id) ?? 0,
+			demandIntent: demand.intentByListing.get(r.id) ?? 0,
+			feedImpressions: demand.impressionsByListing.get(r.id) ?? 0,
 		};
 	});
 
@@ -993,7 +1039,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 		const values = Prisma.join(
 			chunk.map(
 				(p) =>
-					Prisma.sql`(${p.id}, ${p.rankScore}::double precision, ${p.rankBaseScore}::double precision, ${p.rankBaseVersion}::int, ${p.addToCartCount}::int, ${p.demandMult}::double precision, ${TOKEN_BOOST_VERSION}::int)`,
+					Prisma.sql`(${p.id}, ${p.rankScore}::double precision, ${p.rankBaseScore}::double precision, ${p.rankBaseVersion}::int, ${p.addToCartCount}::int, ${p.demandMult}::double precision, ${TOKEN_BOOST_VERSION}::int, ${p.demandEngagement}::double precision, ${p.demandIntent}::double precision, ${p.feedImpressions}::int)`,
 			),
 		);
 		// Raw SQL targets the physical `auction` table (NL-284/NL-310 columns
@@ -1005,10 +1051,14 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 				"rankBaseVersion"   = v.rank_base_version,
 				"addToCartCount"    = v.add_to_cart_count,
 				"tokenBoost"        = v.token_boost,
-				"tokenBoostVersion" = v.token_boost_version
+				"tokenBoostVersion" = v.token_boost_version,
+				"demandEngagement"  = v.demand_engagement,
+				"demandIntent"      = v.demand_intent,
+				"feedImpressions"   = v.feed_impressions
 			FROM (VALUES ${values}) AS v(
 				id, rank_score, rank_base_score, rank_base_version,
-				add_to_cart_count, token_boost, token_boost_version
+				add_to_cart_count, token_boost, token_boost_version,
+				demand_engagement, demand_intent, feed_impressions
 			)
 			WHERE a.id = v.id
 				AND (a."rankScore"         IS DISTINCT FROM v.rank_score
@@ -1016,7 +1066,10 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 					OR a."rankBaseVersion" IS DISTINCT FROM v.rank_base_version
 					OR a."addToCartCount"  IS DISTINCT FROM v.add_to_cart_count
 					OR a."tokenBoost"      IS DISTINCT FROM v.token_boost
-					OR a."tokenBoostVersion" IS DISTINCT FROM v.token_boost_version)
+					OR a."tokenBoostVersion" IS DISTINCT FROM v.token_boost_version
+					OR a."demandEngagement" IS DISTINCT FROM v.demand_engagement
+					OR a."demandIntent"    IS DISTINCT FROM v.demand_intent
+					OR a."feedImpressions" IS DISTINCT FROM v.feed_impressions)
 		`;
 	}
 
