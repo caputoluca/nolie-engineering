@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import {
 	assertResponse,
 	type createApiClient,
+	getMockAnalytics,
 	getMockRealtime,
 } from "../../helpers/index.js";
 import {
@@ -82,6 +83,18 @@ describe("POST /offers/:offerId/withdraw", () => {
 			)
 			.find((m) => m.data.eventId === offerId);
 		expect(publicMsg?.data.listingId).toBe(listing.id);
+
+		// offer_withdrawn (NL-370) — buyer-keyed terminal leg of the offer funnel.
+		expect(getMockAnalytics().capture).toHaveBeenCalledWith(
+			buyer.session.user.id,
+			expect.objectContaining({
+				event: "offer_withdrawn",
+				properties: expect.objectContaining({
+					offer_id: offerId,
+					listing_id: listing.id,
+				}),
+			}),
+		);
 	});
 
 	it("rejects a withdraw from someone other than the proposer", async () => {
