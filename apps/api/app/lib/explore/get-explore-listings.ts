@@ -11,6 +11,7 @@ import {
 	DEFAULT_SLOT_POLICY,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
+	effectivePriceUSD,
 	type SlotCandidate,
 } from "@nolie/core/explore";
 import { type DbClient, ListingStatus, type Prisma } from "@nolie/db";
@@ -324,19 +325,12 @@ export async function selectRankedCandidateIds(
 		for (const id of orderedIds) {
 			const r = rowById.get(id);
 			if (!r) continue;
-			const rawPrice =
-				r.listingType === "fixed_price"
-					? r.price
-					: r.listingType === "auction"
-						? r.startingBid
-						: null;
-			const priceUSD = rawPrice === null ? Number.NaN : Number(rawPrice);
 			candidates.push({
 				id: r.id,
 				sortPriority: r.sortPriority,
 				rankBaseScore: r.rankBaseScore,
 				createdAt: r.createdAt,
-				priceUSD: Number.isFinite(priceUSD) && priceUSD > 0 ? priceUSD : null,
+				priceUSD: effectivePriceUSD(r),
 				demandEngagement: r.demandEngagement,
 				demandIntent: r.demandIntent,
 				feedImpressions: r.feedImpressions,

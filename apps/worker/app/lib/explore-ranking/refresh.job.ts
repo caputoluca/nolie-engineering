@@ -8,6 +8,7 @@ import {
 	DEFAULT_RANKING_CONFIG,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
+	effectivePriceUSD,
 	type MatchedToken,
 	matchTokens,
 	type QuantileValue,
@@ -119,12 +120,24 @@ const ALWAYS_RANKABLE_STATUSES = [
 // served listing toward neutral (explore-ranking-v3 PR2).
 const SERVED_STATUSES = new Set<string>(ALWAYS_RANKABLE_STATUSES);
 
+// Active strikes older than this stop counting against trust — matches the
+// NL-230 escalation's rolling-window spirit (a 6-month-old cancellation
+// shouldn't depress a since-reformed seller forever).
+const STRIKE_TRUST_WINDOW_DAYS = 180;
+
 interface SellerTrustInputRow {
 	sellerProfileId: string;
 	reviewCount: number;
 	reviewAverage: number | null;
 	globalAverageRating: number | null;
 	hasFirstEdition: boolean;
+	/** Paid orders that haven't gone bad (returned / shipping-failed /
+	 * refunded), counted per ORDER — one transaction = one proof, a bundle is
+	 * one sale. In-transit and pre-label orders count: "sold" is the signal,
+	 * and failures are punished separately via strikes. */
+	completedSalesCount: number;
+	/** Active (non-waived) strikes inside the trust window. */
+	activeStrikeCount: number;
 }
 
 interface SellerTrustResult {
@@ -184,6 +197,21 @@ async function refreshSellerTrust(
 			       AVG("rating")::float AS "average"
 			FROM "review"
 			GROUP BY "sellerProfileId"
+		),
+		per_seller_sales AS (
+			SELECT "sellerProfileId", COUNT(*)::int AS "sales"
+			FROM "order"
+			WHERE "paidAt" IS NOT NULL
+			  AND ("fulfillmentStatus" IS NULL
+			       OR "fulfillmentStatus" NOT IN ('returned', 'shipping_failed', 'refunded'))
+			GROUP BY "sellerProfileId"
+		),
+		per_seller_strikes AS (
+			SELECT "sellerProfileId", COUNT(*)::int AS "strikes"
+			FROM "seller_strike"
+			WHERE "status" = 'active'
+			  AND "occurredAt" > now() - (${STRIKE_TRUST_WINDOW_DAYS}::int * INTERVAL '1 day')
+			GROUP BY "sellerProfileId"
 		)
 		SELECT sp."id"                              AS "sellerProfileId",
 		       COALESCE(psr."count", 0)::int        AS "reviewCount",
@@ -196,10 +224,16 @@ async function refreshSellerTrust(
 		           AND m."program"::text = 'first_edition'
 		           AND m."revokedAt" IS NULL
 		           AND (m."expiresAt" IS NULL OR m."expiresAt" > now())
-		       )                                    AS "hasFirstEdition"
+		       )                                    AS "hasFirstEdition",
+		       COALESCE(pss."sales", 0)::int        AS "completedSalesCount",
+		       COALESCE(pst."strikes", 0)::int      AS "activeStrikeCount"
 		FROM "seller_profile" sp
 		LEFT JOIN per_seller_review psr
 		       ON psr."sellerProfileId" = sp."id"
+		LEFT JOIN per_seller_sales pss
+		       ON pss."sellerProfileId" = sp."id"
+		LEFT JOIN per_seller_strikes pst
+		       ON pst."sellerProfileId" = sp."id"
 	`;
 
 	if (rows.length === 0) {
@@ -214,7 +248,12 @@ async function refreshSellerTrust(
 	);
 
 	const trustMap = new Map<string, number>();
-	const updates: { id: string; count: number; shrunk: number }[] = [];
+	const updates: {
+		id: string;
+		count: number;
+		shrunk: number;
+		trust: number;
+	}[] = [];
 
 	for (const r of rows) {
 		const reviewAvgShrunk = computeReviewAvgShrunk({
@@ -222,17 +261,18 @@ async function refreshSellerTrust(
 			reviewAverage: r.reviewAverage,
 			globalMeanRating,
 		});
-		trustMap.set(
-			r.sellerProfileId,
-			computeSellerTrust({
-				reviewAvgShrunk,
-				hasFirstEditionBadge: r.hasFirstEdition,
-			}),
-		);
+		const trust = computeSellerTrust({
+			reviewAvgShrunk,
+			hasFirstEditionBadge: r.hasFirstEdition,
+			completedSalesCount: r.completedSalesCount,
+			activeStrikeCount: r.activeStrikeCount,
+		});
+		trustMap.set(r.sellerProfileId, trust);
 		updates.push({
 			id: r.sellerProfileId,
 			count: r.reviewCount,
 			shrunk: reviewAvgShrunk,
+			trust,
 		});
 	}
 
@@ -242,17 +282,22 @@ async function refreshSellerTrust(
 		const values = Prisma.join(
 			chunk.map(
 				(u) =>
-					Prisma.sql`(${u.id}, ${u.count}::int, ${u.shrunk}::double precision)`,
+					Prisma.sql`(${u.id}, ${u.count}::int, ${u.shrunk}::double precision, ${u.trust}::double precision)`,
 			),
 		);
+		// `sellerTrust` is persisted (NL-371) so the listing create/edit path can
+		// seed a new listing's base with the seller's standing in one column read
+		// — the seed then equals the first-tick base by construction.
 		sellersTrustUpdated += await prisma.$executeRaw`
 			UPDATE "seller_profile" AS sp
 			SET "reviewCount" = v.review_count,
-				"reviewAvgShrunk" = v.review_avg_shrunk
-			FROM (VALUES ${values}) AS v(id, review_count, review_avg_shrunk)
+				"reviewAvgShrunk" = v.review_avg_shrunk,
+				"sellerTrust" = v.seller_trust
+			FROM (VALUES ${values}) AS v(id, review_count, review_avg_shrunk, seller_trust)
 			WHERE sp.id = v.id
 				AND (sp."reviewCount" IS DISTINCT FROM v.review_count
-					OR sp."reviewAvgShrunk" IS DISTINCT FROM v.review_avg_shrunk)
+					OR sp."reviewAvgShrunk" IS DISTINCT FROM v.review_avg_shrunk
+					OR sp."sellerTrust" IS DISTINCT FROM v.seller_trust)
 		`;
 	}
 
@@ -289,33 +334,6 @@ interface RankableListing {
 	 * demand normalization restrict its min-max range to the served set
 	 * (`SERVED_STATUSES`) so those rows can't stretch it (v3 PR2). */
 	status: string;
-}
-
-/**
- * Effective dollar price for ranking purposes. Fixed-price uses `price`;
- * auctions use `startingBid`. Both columns are `Decimal(10, 2)` dollars
- * (despite "Bid" naming, `startingBid` is NOT cents). Returns null when
- * neither is set — those listings get a neutral priceMult.
- *
- * Auctions use the starting bid as a stand-in for "asking price" because
- * the live winning amount isn't known at refresh time and would lag as
- * bids accrue anyway. ~96% of listings on `/explore` are fixed-price (per
- * the doc), so the auction approximation is a minor edge.
- */
-function effectivePriceUSD(l: {
-	listingType: string;
-	price: Prisma.Decimal | null;
-	startingBid: Prisma.Decimal | null;
-}): number | null {
-	const raw =
-		l.listingType === "fixed_price"
-			? l.price
-			: l.listingType === "auction"
-				? l.startingBid
-				: null;
-	if (raw === null) return null;
-	const n = Number(raw);
-	return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /**

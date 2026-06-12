@@ -46,10 +46,14 @@ export interface RankingConfig {
 	weights: {
 		recency: number;
 		/**
-		 * Seller-trust weight. v1 was 0; v2 ramps to 0.05 — sparse signal
-		 * (only a handful of sellers have any reviews), the weight ramps to
-		 * 0.15–0.20 as density grows. Honest framing: today this is mostly a
-		 * placeholder so the seam is wired end-to-end (docs §7.4).
+		 * Seller-trust weight. v1 was 0; v2 wired the seam at 0.05 — which
+		 * measured as a literal no-op in prod (the rating-only composite had
+		 * zero spread across all sellers; see TRUST_REVIEW_WEIGHT in
+		 * @nolie/core/seller-trust). v4 (NL-371) doubles it to 0.10 alongside
+		 * the re-centered composite (rating + completed sales − strikes):
+		 * replay on the Jun 2026 export showed experienced sellers gaining
+		 * ≤13 ranks and zero-sales sellers slipping 5-13 — a real tie-breaker
+		 * at ~1/3 the premium term, still nowhere near dominating.
 		 */
 		sellerTrust: number;
 		/**
@@ -271,8 +275,14 @@ export interface RankingConfig {
  *           forces a one-time recompute so existing listings pick up the demerit
  *           on the next refresh tick once their hero dims are backfilled. Gated
  *           by the `ENABLE_IMAGE_DEMERIT` kill switch at the refresh worker.
+ *   v10 → 11: seller-trust rework (NL-371). The v2 rating-only composite
+ *           measured zero spread in prod (every seller clamped at 1.0 — a
+ *           constant); the trust composite is re-centered around completed
+ *           sales and active strikes (see @nolie/core/seller-trust) and the
+ *           weight doubles 0.05 → 0.10. Replay-validated on the Jun 2026
+ *           export. Bump forces a one-time recompute at the new shape.
  */
-export const RANK_BASE_VERSION = 10;
+export const RANK_BASE_VERSION = 11;
 
 /**
  * Lower edge of the price sweet-spot band. Inside `[LO, HI]` the plateau
@@ -327,7 +337,7 @@ export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 		// was over-weighting at cold start; lowering it lets a high-demand older
 		// listing outrank a fresh-but-ignored one (half-life 72h unchanged).
 		recency: 0.2,
-		sellerTrust: 0.05,
+		sellerTrust: 0.1,
 		cartAdd: 0.1,
 		save: 0.05,
 		premium: 0.35,
@@ -756,6 +766,34 @@ export interface RankScoreInput {
 	 * the unmodified demand-boosted score.
 	 */
 	priceMult?: number;
+}
+
+/**
+ * Effective dollar price for ranking purposes: fixed-price listings use
+ * `price`, auctions use `startingBid` (both `Decimal(10,2)` DOLLARS in the
+ * DB — `startingBid` is NOT cents despite the name). Inputs are `unknown` so
+ * every caller's shape fits without this package importing Prisma types:
+ * Prisma `Decimal` (worker scan rows, API reads), plain `number` (create
+ * payloads), or null. Returns null when unpriced/invalid — premium and gate
+ * terms collapse to neutral for those.
+ *
+ * Single source of truth: the worker refresh job, the explore snapshot build,
+ * and the create-time seed all call this — the inline copies drifted once.
+ */
+export function effectivePriceUSD(input: {
+	listingType: string;
+	price: unknown;
+	startingBid: unknown;
+}): number | null {
+	const raw =
+		input.listingType === "fixed_price"
+			? input.price
+			: input.listingType === "auction"
+				? input.startingBid
+				: null;
+	if (raw === null || raw === undefined) return null;
+	const n = Number(raw);
+	return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 export interface ComputePriceMultInput {
