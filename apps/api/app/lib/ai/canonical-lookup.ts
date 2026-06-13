@@ -9,7 +9,6 @@ export interface CanonicalRecord {
 	cardNumber: string | null;
 	grader: string | null;
 	grade: string | null;
-	certNumber: string | null;
 	rarity: string | null;
 	parallel: string | null;
 	language: string | null;
@@ -73,26 +72,6 @@ function formatCardNumber(detail: TcgdexCardDetail): string {
 	if (!official || official <= 0) return detail.localId;
 	if (!/^\d+$/.test(detail.localId)) return detail.localId;
 	return `${detail.localId}/${official}`;
-}
-
-// TAG cert format is published on their cert-search page: one letter then
-// seven digits (e.g. "A1234567"). The model loves to hallucinate plausible
-// 8-digit numerics here because the cert is rotated -90° on the slab edge —
-// drop anything that doesn't match so a wrong cert never reaches buyers.
-// Other graders' formats aren't published, so we don't gate them.
-const TAG_CERT_PATTERN = /^[A-Z]\d{7}$/;
-
-function sanitizeCertForGrader(
-	grader: string | null,
-	cert: string | null,
-): string | null {
-	if (!cert || grader !== "TAG") return cert;
-	if (TAG_CERT_PATTERN.test(cert)) return cert;
-	logger.warn(
-		{ grader, cert },
-		"[ai-listing] cert: TAG cert failed format check, dropping",
-	);
-	return null;
 }
 
 /** Empty string is the AI's "not visible" sentinel; treat as null. */
@@ -180,7 +159,6 @@ async function lookupCanonicalInner(
 				cardNumber: nz(f.cardNumber),
 				grader,
 				grade: nz(f.grade),
-				certNumber: sanitizeCertForGrader(grader, nz(f.certNumber)),
 				rarity: null,
 				parallel: null,
 				language: nzEnum(f.language),
@@ -200,7 +178,6 @@ async function lookupCanonicalInner(
 				cardNumber: nz(f.cardNumber),
 				grader: null,
 				grade: null,
-				certNumber: null,
 				rarity: null,
 				parallel: null,
 				language: null,
@@ -219,7 +196,6 @@ async function lookupCanonicalInner(
 				cardNumber: null,
 				grader: null,
 				grade: null,
-				certNumber: null,
 				rarity: null,
 				parallel: null,
 				language: null,
@@ -243,7 +219,6 @@ async function lookupCanonicalInner(
 				cardNumber: null,
 				grader: null,
 				grade: null,
-				certNumber: null,
 				rarity: null,
 				parallel: null,
 				language: nzEnum(f.language),
@@ -266,7 +241,6 @@ async function lookupCanonicalInner(
 			cardNumber: null,
 			grader: null,
 			grade: null,
-			certNumber: null,
 			rarity: null,
 			parallel: null,
 			language: f.language,
@@ -291,7 +265,6 @@ async function lookupCanonicalInner(
 				cardNumber: formatCardNumber(match),
 				grader: null,
 				grade: null,
-				certNumber: null,
 				rarity: match.rarity ?? null,
 				parallel: null,
 				language: f.language,

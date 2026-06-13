@@ -66,7 +66,6 @@ async function seedGeneration(userId: string, facts: ExtractedCardFacts) {
 			cardNumber: null,
 			grader: null,
 			grade: null,
-			certNumber: null,
 			rarity: null,
 			parallel: null,
 			language: null,
