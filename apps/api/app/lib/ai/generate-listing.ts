@@ -75,7 +75,6 @@ function buildPrompt(record: CanonicalRecord): string {
 	If kind = "slab":
 	- Lead with subject + card number + set + year in natural prose.
 	- State grader + grade once ("PSA 10", "BGS 9.5"). Do NOT say "graded", "slabbed", "encapsulated", "this is a graded example" — the grade speaks for itself.
-	- Do NOT include the cert number. It renders as a structured authenticity field on the listing page with a verify link; repeating it in prose creates a second editable copy that drifts when the seller corrects the field (NL-374).
 	- If language is non-English AND the language is not already conveyed by the set name, mention it once as a bare adjective qualifying the relevant noun (e.g. "Japanese promo", "Japanese print"). Skip the mention entirely if the set name already carries it.
 	- Optionally one short clause of set or card significance — only if factually defensible from the record.
 	- Do NOT discuss centering, surface, edges, or corners. The grade encodes them.
