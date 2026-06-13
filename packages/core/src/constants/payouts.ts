@@ -51,20 +51,22 @@ export const DEEMED_SHIPPED_BUSINESS_DAYS = 2;
 
 /**
  * Time-based "deemed delivered" window (NL-314, generalizing NL-285).
- * Applies to BOTH parcel and letter rails. After this many business
- * days the cron flips the Order to `delivered`. Rail-specific behavior
- * lives in the cron handler:
+ * Both rails. After this many business days `promoteStaleOrders` flips
+ * the Order to `delivered` when no real `delivered` scan landed first:
  *   - Parcel: full delivery flow (deliveryConfirmed email, review
- *     prompts, payout release).
- *   - Letter: review prompts only with `deliveryConfirmed: false`
- *     copy — payout already released at day-3 via the letter rail.
+ *     prompts, payout release). Rarely hit — parcels carry a reliable
+ *     delivery scan that flips them first.
+ *   - Letter: review prompts with `deliveryConfirmed: false` soft copy;
+ *     payout via its own `releaseLetterPayouts` clock (same 7-BD beat).
+ *     The main path for the letters that never emit a usable scan.
  *
- * 10 business days = ~14 calendar days. Bumped from the original 7
- * after NL-285 live data showed real envelopes still landing past the
- * 7-business-day mark. Decoupled from buyer INR rights (user-initiated,
- * time-from-purchase, not status-gated).
+ * 7 business days ≈ 9-11 calendar days. Was 10 under NL-285's
+ * letter-only model; lowered once the letter rail started flipping on the
+ * real `delivered` scan, leaving this clock as the no-scan fallback.
+ * Decoupled from buyer INR rights (user-initiated, time-from-purchase,
+ * not status-gated).
  */
-export const DEEMED_DELIVERED_BUSINESS_DAYS = 10;
+export const DEEMED_DELIVERED_BUSINESS_DAYS = 7;
 
 /**
  * Resolves the absolute timestamp at which a label is deemed shipped
@@ -84,21 +86,6 @@ export function getDeemedShippedAt(now: Date = new Date()): Date {
  */
 export function getDeemedDeliveredAt(now: Date = new Date()): Date {
 	return addBusinessDays(now, DEEMED_DELIVERED_BUSINESS_DAYS);
-}
-
-/**
- * @deprecated Use `DEEMED_DELIVERED_BUSINESS_DAYS` (NL-314). Kept
- * exclusively for legacy
- * `apps/api/scripts/backfill-letter-deemed-delivered.ts` bit-for-bit
- * compatibility during the NL-314 rollout. Drop in a follow-up PR
- * once the new backfill has run.
- */
-export const LETTER_DEEMED_DELIVERED_BUSINESS_DAYS =
-	DEEMED_DELIVERED_BUSINESS_DAYS;
-
-/** @deprecated Use `getDeemedDeliveredAt` (NL-314). See above. */
-export function getLetterDeemedDeliveredAt(now: Date = new Date()): Date {
-	return getDeemedDeliveredAt(now);
 }
 
 // ─────────────────────────────────────────────────────────────
