@@ -1573,7 +1573,7 @@ describe("POST /checkout/claim", () => {
 	describe("letter shipping (PWE / NL-253)", () => {
 		// At claim time the per-seller bundle is classified onto a shipping
 		// rail — letter (EasyPost FCML), letter-upgraded-to-parcel (Shippo
-		// with a standard_card fallback), or default parcel (Shippo with the
+		// with a padded_mailer fallback), or default parcel (Shippo with the
 		// listing's own dims). The decision is frozen on Order.shippingPresetKey
 		// so PI-succeeded + label-purchase don't re-derive it.
 
@@ -1706,11 +1706,11 @@ describe("POST /checkout/claim", () => {
 			expect(order.shippingCents).toBe(195);
 		});
 
-		it("two-card all-letter bundle over the $30 value ceiling upgrades to a standard_card parcel", async () => {
+		it("two-card all-letter bundle over the $30 value ceiling upgrades to a padded_mailer parcel", async () => {
 			// Card count is within the cap (2 ≤ 3), but the two cards SUM to $40,
 			// past LETTER_MAX_BUNDLE_VALUE_CENTS. An untracked envelope shouldn't
 			// carry that much value, so checkout flips the bundle to a tracked
-			// standard_card parcel at the fallback rate.
+			// padded_mailer parcel at the fallback rate.
 			const seller = await setupSellerWithListing({
 				price: 20,
 				itemType: "physical",
@@ -1750,11 +1750,11 @@ describe("POST /checkout/claim", () => {
 				include: { lineItems: true },
 			});
 			expect(order.lineItems).toHaveLength(2);
-			expect(order.shippingPresetKey).toBe("standard_card");
-			expect(order.shippingCents).toBe(650);
+			expect(order.shippingPresetKey).toBe("padded_mailer");
+			expect(order.shippingCents).toBe(599);
 		});
 
-		it("four-card all-letter bundle over the card-count cap upgrades to a standard_card parcel", async () => {
+		it("four-card all-letter bundle over the card-count cap upgrades to a padded_mailer parcel", async () => {
 			// Combined value ($20) is within LETTER_MAX_BUNDLE_VALUE_CENTS, but a
 			// fourth card pushes the bundle past LETTER_MAX_CARD_COUNT (3). The
 			// count gate alone forces the parcel upgrade — the seller ships one
@@ -1805,11 +1805,11 @@ describe("POST /checkout/claim", () => {
 				include: { lineItems: true },
 			});
 			expect(order.lineItems).toHaveLength(4);
-			expect(order.shippingPresetKey).toBe("standard_card");
-			expect(order.shippingCents).toBe(650);
+			expect(order.shippingPresetKey).toBe("padded_mailer");
+			expect(order.shippingCents).toBe(599);
 		});
 
-		it("single letter listing over the $30 value ceiling upgrades to a standard_card parcel", async () => {
+		it("single letter listing over the $30 value ceiling upgrades to a padded_mailer parcel", async () => {
 			// Single card, so the card-count gate passes — but the listing value
 			// exceeds LETTER_MAX_BUNDLE_VALUE_CENTS, so the bundle upgrades to a
 			// tracked parcel instead of riding an untracked envelope. Force the
@@ -1839,8 +1839,8 @@ describe("POST /checkout/claim", () => {
 			const order = await prisma.order.findUniqueOrThrow({
 				where: { id: body.orderIds[0] },
 			});
-			expect(order.shippingPresetKey).toBe("standard_card");
-			expect(order.shippingCents).toBe(650);
+			expect(order.shippingPresetKey).toBe("padded_mailer");
+			expect(order.shippingCents).toBe(599);
 		});
 
 		it("single letter listing priced exactly at the $30 value ceiling stays on the letter rail", async () => {
@@ -1848,7 +1848,7 @@ describe("POST /checkout/claim", () => {
 			// gates with a strict `>` on LETTER_MAX_BUNDLE_VALUE_CENTS, so a bundle
 			// worth EXACTLY $30 is still letter-eligible — it must NOT upgrade. This
 			// pins the `>` vs `>=` boundary so a future tightening to `>=` (which
-			// would silently bump every $30 letter to a $6.50 parcel) fails here.
+			// would silently bump every $30 letter to a $5.99 parcel) fails here.
 			const seller = await setupSellerWithListing({
 				price: 30,
 				itemType: "physical",
