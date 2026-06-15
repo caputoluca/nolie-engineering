@@ -1570,6 +1570,166 @@ describe("POST /checkout/claim", () => {
 		});
 	});
 
+	// NL-345 Build 2 — seller-funded "Free shipping", Model A bundle math.
+	// A funded item contributes $0 to the buyer-facing bundle; the seller
+	// absorbs the gap up to the real package cost. The absorbed cents are
+	// netted out of the seller's earning and recorded on the line. These run
+	// the real quote→claim path, so a quote/claim disagreement would also
+	// surface here as a drift error.
+	describe("seller-funded free shipping (NL-345)", () => {
+		it("free heavy item: buyer pays the paid item's shipping, seller absorbs the gap", async () => {
+			// Spec worked example: free $9.50-ship item + paid $5.99-ship item in
+			// one box → buyer pays $5.99, seller absorbs $3.51.
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 950,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { sellerPaysShipping: true },
+			});
+			const paid = await createFixedPriceListingForSeller(
+				seller.sellerProfileId,
+				{ price: 30, itemType: "physical" },
+			);
+			await prisma.listing.update({
+				where: { id: paid.id },
+				data: { shippingCostCents: 599 },
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				paid.id,
+			]);
+			const body = await assertResponse<{ orderIds: string[] }>(
+				await postClaim(buyer.api, {
+					quoteId,
+					paymentMethodId: buyer.paymentMethodId,
+					idempotencyKey: uniqueIdempotencyKey("nl345-free-heavy"),
+				}),
+				200,
+			);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+
+			// Buyer pays the PAID item's $5.99, NOT the heavy free item's $9.50,
+			// and is never charged the $3.51 the seller absorbed.
+			expect(order.shippingCents).toBe(599);
+			expect(order.totalCents).toBe(order.subtotalCents + 599 + order.taxCents);
+
+			const freeLine = order.lineItems.find(
+				(l) => l.listingId === seller.listing.id,
+			);
+			const paidLine = order.lineItems.find((l) => l.listingId === paid.id);
+			// Seller absorbs realPackage(950) − buyerBundle(599) = 351 on the
+			// heaviest (package-owning) free line.
+			expect(freeLine?.sellerShippingAbsorbedCents).toBe(351);
+			expect(paidLine?.sellerShippingAbsorbedCents).toBe(0);
+			// The 351 is netted out of the free line's earning (derived from
+			// persisted fields — robust to fee/tax constants).
+			expect(freeLine?.sellerEarningCents).toBe(
+				(freeLine?.priceCents ?? 0) -
+					(freeLine?.applicationFeeCents ?? 0) -
+					(freeLine?.processingFeeCents ?? 0) -
+					351,
+			);
+			expect(paidLine?.sellerEarningCents).toBe(
+				(paidLine?.priceCents ?? 0) -
+					(paidLine?.applicationFeeCents ?? 0) -
+					(paidLine?.processingFeeCents ?? 0),
+			);
+		});
+
+		it("free light item tucks in free: buyer pays the heavy paid item, seller absorbs nothing", async () => {
+			// Mirror: paid $9.50-ship item + free $5.99-ship item → buyer pays
+			// $9.50, seller absorbs $0 (the free item ships free inside the box).
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 950,
+			});
+			const free = await createFixedPriceListingForSeller(
+				seller.sellerProfileId,
+				{ price: 30, itemType: "physical" },
+			);
+			await prisma.listing.update({
+				where: { id: free.id },
+				data: { shippingCostCents: 599, sellerPaysShipping: true },
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [
+				seller.listing.id,
+				free.id,
+			]);
+			const body = await assertResponse<{ orderIds: string[] }>(
+				await postClaim(buyer.api, {
+					quoteId,
+					paymentMethodId: buyer.paymentMethodId,
+					idempotencyKey: uniqueIdempotencyKey("nl345-free-light"),
+				}),
+				200,
+			);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+
+			// Buyer pays the heavy paid item's $9.50; the free light item adds $0.
+			expect(order.shippingCents).toBe(950);
+			const heavyLine = order.lineItems.find(
+				(l) => l.listingId === seller.listing.id,
+			);
+			const freeLine = order.lineItems.find((l) => l.listingId === free.id);
+			// Nobody absorbs anything — the free item tucked under the bigger box.
+			expect(heavyLine?.sellerShippingAbsorbedCents).toBe(0);
+			expect(freeLine?.sellerShippingAbsorbedCents).toBe(0);
+		});
+
+		it("single free-shipping item: buyer pays $0 shipping, seller absorbs the full flat cost", async () => {
+			const seller = await setupSellerWithListing({
+				price: 50,
+				itemType: "physical",
+				shippingCostCents: 599,
+			});
+			await prisma.listing.update({
+				where: { id: seller.listing.id },
+				data: { sellerPaysShipping: true },
+			});
+
+			const buyer = await setupReadyBuyer();
+			const quoteId = await createQuoteFor(buyer.api, [seller.listing.id]);
+			const body = await assertResponse<{ orderIds: string[] }>(
+				await postClaim(buyer.api, {
+					quoteId,
+					paymentMethodId: buyer.paymentMethodId,
+					idempotencyKey: uniqueIdempotencyKey("nl345-single-free"),
+				}),
+				200,
+			);
+			const order = await prisma.order.findUniqueOrThrow({
+				where: { id: body.orderIds[0] },
+				include: { lineItems: true },
+			});
+
+			// Buyer sees free shipping; never charged the absorbed cost.
+			expect(order.shippingCents).toBe(0);
+			expect(order.totalCents).toBe(order.subtotalCents + order.taxCents);
+			const line = order.lineItems[0];
+			expect(line?.sellerShippingAbsorbedCents).toBe(599);
+			expect(line?.sellerEarningCents).toBe(
+				(line?.priceCents ?? 0) -
+					(line?.applicationFeeCents ?? 0) -
+					(line?.processingFeeCents ?? 0) -
+					599,
+			);
+		});
+	});
+
 	describe("letter shipping (PWE / NL-253)", () => {
 		// At claim time the per-seller bundle is classified onto a shipping
 		// rail — letter (EasyPost FCML), letter-upgraded-to-parcel (Shippo

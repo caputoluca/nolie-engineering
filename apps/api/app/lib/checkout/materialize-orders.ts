@@ -222,6 +222,9 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 				grossAmount: totals.priceCents,
 				platformFee: totals.applicationFeeCents,
 				processingFee: totals.processingFeeCents,
+				// NL-345: seller-funded "Free shipping" — the absorbed cents are
+				// netted out of this line's earning (0 unless the seller opted in).
+				sellerShippingCents: totals.sellerShippingAbsorbedCents,
 			});
 
 			subtotalCents += totals.priceCents;
@@ -261,6 +264,7 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 				applicationFeeCents: totals.applicationFeeCents,
 				processingFeeCents: totals.processingFeeCents,
 				sellerEarningCents: lineSellerEarning,
+				sellerShippingAbsorbedCents: totals.sellerShippingAbsorbedCents,
 				referrerQueryId: lineReferrer.queryId,
 				referrerRankPosition: lineReferrer.rankPosition,
 				referrerSurface: lineReferrer.surface,
