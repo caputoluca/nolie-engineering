@@ -762,6 +762,17 @@ export function computeRankBaseScore(
 	);
 }
 
+/**
+ * HARD INVARIANT (NL-345): the seller-funded "Free shipping" flag (the
+ * per-listing seller-pays-shipping boolean) must NEVER feed ranking — not
+ * here, not in `RankBaseInput`, not in any signal feeding this score, and not
+ * in the worker/API selects that hydrate these inputs. Seller-funded shipping
+ * is a buyer incentive, never a ranking lever: tying it to placement is the
+ * exact coercion-via-demotion that drove Etsy's 2022 seller strike. No
+ * shipping signal of any kind belongs in the ranker. Enforced by the
+ * "ranking invariant (NL-345)" test in `ranking.test.ts`, which asserts the
+ * column identifier never appears anywhere in this module.
+ */
 export interface RankScoreInput {
 	rankBaseScore: number;
 	createdAt: Date;
