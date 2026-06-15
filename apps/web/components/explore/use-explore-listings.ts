@@ -1,12 +1,14 @@
 "use client";
 
 import type {
+	ExploreForm,
 	ExploreListingsResponse,
 	ExploreSort,
 } from "@nolie/schemas/explore";
 import type { CategoryKey } from "@nolie/schemas/listing/categories";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { useExploreCategory } from "@/hooks/listings/use-category";
+import { useExploreFilters } from "@/hooks/listings/use-explore-filters";
 import { useListingsSort } from "@/hooks/listings/use-sort";
 import { browser } from "@/lib/http/browser";
 import { EXPLORE_LISTINGS_QUERY_KEY } from "./queries";
@@ -24,22 +26,38 @@ interface UseExploreListingsOptions {
 	// Category (NL-349) the SSR payload was fetched for — same matching role as
 	// initialSort. Undefined = "All".
 	initialCategory?: CategoryKey;
+	// Price + item-type filters (NL-383) the SSR payload was fetched for — same
+	// matching role as initialSort/initialCategory. Undefined = filter off.
+	initialMinPrice?: number;
+	initialMaxPrice?: number;
+	initialForm?: ExploreForm;
 }
 
 export function useExploreListings(options?: UseExploreListingsOptions) {
 	const sort: ExploreSort = useListingsSort();
 	const category = useExploreCategory();
+	const { minPrice, maxPrice, form } = useExploreFilters();
 	const seedInitialData =
 		options?.initialData &&
 		options.initialSort === sort &&
-		options.initialCategory === category
+		options.initialCategory === category &&
+		options.initialMinPrice === minPrice &&
+		options.initialMaxPrice === maxPrice &&
+		options.initialForm === form
 			? options.initialData
 			: undefined;
 	const res = useInfiniteQuery({
-		queryKey: [EXPLORE_LISTINGS_QUERY_KEY, sort, category],
+		queryKey: [
+			EXPLORE_LISTINGS_QUERY_KEY,
+			sort,
+			category,
+			minPrice,
+			maxPrice,
+			form,
+		],
 		queryFn: async ({ pageParam }) => {
 			const res = await browser.get<ExploreListingsResponse>("/explore", {
-				params: { cursor: pageParam, sort, category },
+				params: { cursor: pageParam, sort, category, minPrice, maxPrice, form },
 				timeout: 7_000,
 			});
 			return res.data;
