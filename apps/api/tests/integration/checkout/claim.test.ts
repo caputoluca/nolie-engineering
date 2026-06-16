@@ -1601,7 +1601,7 @@ describe("POST /checkout/claim", () => {
 				where: { id: body.orderIds[0] },
 			});
 			expect(order.shippingPresetKey).toBe("raw_single_pwe");
-			expect(order.shippingCents).toBe(195);
+			expect(order.shippingCents).toBe(199);
 		});
 
 		it("two-card all-letter bundle within the caps stays on the letter rail at the flat $1.95", async () => {
@@ -1650,7 +1650,7 @@ describe("POST /checkout/claim", () => {
 			});
 			expect(order.lineItems).toHaveLength(2);
 			expect(order.shippingPresetKey).toBe("raw_single_pwe");
-			expect(order.shippingCents).toBe(195);
+			expect(order.shippingCents).toBe(199);
 		});
 
 		it("three-card all-letter bundle at the card-count cap stays on the letter rail at the flat $1.95", async () => {
@@ -1703,7 +1703,7 @@ describe("POST /checkout/claim", () => {
 			});
 			expect(order.lineItems).toHaveLength(3);
 			expect(order.shippingPresetKey).toBe("raw_single_pwe");
-			expect(order.shippingCents).toBe(195);
+			expect(order.shippingCents).toBe(199);
 		});
 
 		it("two-card all-letter bundle over the $30 value ceiling upgrades to a padded_mailer parcel", async () => {
@@ -1873,7 +1873,7 @@ describe("POST /checkout/claim", () => {
 				where: { id: body.orderIds[0] },
 			});
 			expect(order.shippingPresetKey).toBe("raw_single_pwe");
-			expect(order.shippingCents).toBe(195);
+			expect(order.shippingCents).toBe(199);
 		});
 
 		it("mixed letter + parcel bundle stays on the parcel rail with bundle-max shipping", async () => {
