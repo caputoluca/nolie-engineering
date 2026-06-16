@@ -2,6 +2,7 @@
 
 import { fail } from "@nolie/actions";
 import { computeNextBidAmount } from "@nolie/core/auctions";
+import { anySignal } from "@nolie/http";
 import {
 	type BidCreateResponse,
 	BidCreateSchema,
@@ -130,8 +131,9 @@ export function usePlaceBid(
 				abortControllerRef.current = new AbortController();
 
 				try {
-					// Combine timeout + manual abort signal
-					const signal = AbortSignal.any([
+					// Combine timeout + manual abort signal (AbortSignal.any
+					// is unavailable before Safari 17.4 — anySignal falls back)
+					const signal = anySignal([
 						AbortSignal.timeout(BID_RESULT_TIMEOUT_MS),
 						abortControllerRef.current.signal,
 					]);
