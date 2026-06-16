@@ -17,12 +17,19 @@ import {
 import { type DbClient, ListingStatus, type Prisma } from "@nolie/db";
 import {
 	DEFAULT_EXPLORE_LIMIT,
+	type ExploreForm,
 	type ExploreListingSummary,
 	type ExploreQueryType,
 } from "@nolie/schemas/explore";
 import { logger } from "../../logger.js";
 import { queryListings } from "../listings/query.js";
 import { reportError } from "../observability/sentry/report.js";
+import {
+	type ExploreFilters,
+	entryMatchesFilters,
+	isRawFields,
+	isSlabFields,
+} from "./filters.js";
 import { exploreListingSelect } from "./select.js";
 import { loadSortedExploreListings } from "./sort.js";
 import { toExploreListingSummary } from "./transform.js";
@@ -228,6 +235,16 @@ interface ExploreCursor {
 	 * the same frozen list (and `o` indexes into that filtered sublist).
 	 */
 	c?: string;
+	/**
+	 * Price-band + item-type filters the sublist was frozen under (NL-383).
+	 * Same carry-forward role as `c`: `o` indexes into the filtered sublist, so
+	 * the bounds and form must travel with the cursor or page 2+ would re-slice
+	 * a differently-sized list. Absent when the filter is off. `mn`/`mx` =
+	 * min/max price, `fm` = item form ("slab" | "raw").
+	 */
+	mn?: number;
+	mx?: number;
+	fm?: ExploreForm;
 }
 
 function encodeCursor(c: ExploreCursor): string {
@@ -243,6 +260,9 @@ function decodeCursor(raw: string): ExploreCursor | null {
 				o: c.o,
 				q: typeof c?.q === "string" ? c.q : undefined,
 				c: typeof c?.c === "string" ? c.c : undefined,
+				mn: typeof c?.mn === "number" ? c.mn : undefined,
+				mx: typeof c?.mx === "number" ? c.mx : undefined,
+				fm: c?.fm === "slab" || c?.fm === "raw" ? c.fm : undefined,
 			};
 		}
 	} catch {
@@ -348,6 +368,50 @@ export async function selectRankedCandidateIds(
 	};
 }
 
+interface SnapshotEntryMeta {
+	priceUSD: number | null;
+	isSlab: boolean;
+	isRaw: boolean;
+}
+
+/**
+ * Hydrates the price + item-type facets for the snapshot's top-`depth` ids
+ * (NL-383). Kept OUT of `selectRankedCandidateIds` so the shared ranker (also
+ * driving Klaviyo trending) never grows a facet dependency it doesn't use — one
+ * bounded `IN` read over the ≤2000 frozen ids, run once per snapshot build
+ * (≤60s cache TTL), is cheaper than the drift risk of touching the ranker.
+ * Effective price reuses `effectivePriceUSD` (fixed price, or starting bid for
+ * auctions) so the in-memory band filter agrees with the price sort.
+ */
+async function loadSnapshotEntryMeta(
+	db: DbClient,
+	ids: string[],
+): Promise<Map<string, SnapshotEntryMeta>> {
+	if (ids.length === 0) return new Map();
+	const rows = await db.listing.findMany({
+		where: { id: { in: ids } },
+		select: {
+			id: true,
+			listingType: true,
+			price: true,
+			startingBid: true,
+			grader: true,
+			certNumber: true,
+			condition: true,
+		},
+	});
+	return new Map(
+		rows.map((r) => [
+			r.id,
+			{
+				priceUSD: effectivePriceUSD(r),
+				isSlab: isSlabFields(r),
+				isRaw: isRawFields(r),
+			},
+		]),
+	);
+}
+
 async function buildSnapshotEntries(
 	db: DbClient,
 	rankEpoch: number,
@@ -355,9 +419,18 @@ async function buildSnapshotEntries(
 	const start = Date.now();
 	const { orderedIds, candidateCount, categoryById } =
 		await selectRankedCandidateIds(db, EXPLORE_CANDIDATE_LIMIT);
-	const entries = orderedIds
-		.slice(0, EXPLORE_SNAPSHOT_DEPTH)
-		.map((id) => ({ id, categoryId: categoryById.get(id) ?? null }));
+	const slicedIds = orderedIds.slice(0, EXPLORE_SNAPSHOT_DEPTH);
+	const metaById = await loadSnapshotEntryMeta(db, slicedIds);
+	const entries = slicedIds.map((id) => {
+		const meta = metaById.get(id);
+		return {
+			id,
+			categoryId: categoryById.get(id) ?? null,
+			priceUSD: meta?.priceUSD ?? null,
+			isSlab: meta?.isSlab ?? false,
+			isRaw: meta?.isRaw ?? false,
+		};
+	});
 
 	const log: SnapshotBuildLog = {
 		candidateCount,
@@ -435,6 +508,14 @@ async function loadRankedExploreListings(
 	// recovered from the cursor on every later page so a category scroll keeps
 	// filtering the same frozen list even if the request param drifts.
 	const category = parsed?.c ?? query.category;
+	// Price + item-type filters the sublist is frozen under (NL-383). Same
+	// cursor-recovery as `category` so every page of a filtered scroll narrows
+	// the same frozen list; `?? query` self-heals pre-NL-383 cursors.
+	const filters: ExploreFilters = {
+		minPrice: parsed?.mn ?? query.minPrice,
+		maxPrice: parsed?.mx ?? query.maxPrice,
+		form: parsed?.fm ?? query.form,
+	};
 
 	const loadSnapshot = (epoch: number) =>
 		snapshotCache.get(`${epoch}`, {
@@ -456,14 +537,16 @@ async function loadRankedExploreListings(
 	}
 	const snap = frozen ?? (await loadSnapshot(currentEpoch));
 
-	// Category filter (NL-349): one global snapshot, filtered in memory. "All"
-	// (no category) keeps the full frozen list; a category narrows it, with
-	// `offset` indexing into the FILTERED sublist so the page math + rank
-	// positions stay exact. Untagged rows (categoryId null) match no category
-	// and surface only in "All".
-	const entries = category
-		? snap.entries.filter((e) => e.categoryId === category)
-		: snap.entries;
+	// Buyer-facing filters over one global snapshot, applied in memory before
+	// the page slice so `offset` + rank positions stay exact (NL-349 category,
+	// NL-383 price + item type). No-filter keeps the full frozen list. Untagged
+	// rows (categoryId null) match no category and surface only in "All";
+	// unpriced rows fail any active price bound.
+	const entries = snap.entries.filter(
+		(e) =>
+			(category ? e.categoryId === category : true) &&
+			entryMatchesFilters(e, filters),
+	);
 
 	const window = entries.slice(offset, offset + limit).map((e) => e.id);
 	const { listings, impressions } = await hydrateWindow(
@@ -480,6 +563,9 @@ async function loadRankedExploreListings(
 					o: nextOffset,
 					q: queryId,
 					...(category ? { c: category } : {}),
+					...(filters.minPrice != null ? { mn: filters.minPrice } : {}),
+					...(filters.maxPrice != null ? { mx: filters.maxPrice } : {}),
+					...(filters.form ? { fm: filters.form } : {}),
 				})
 			: null;
 
