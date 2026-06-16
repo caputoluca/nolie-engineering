@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { SortPriority } from "../../src/auctions/sort.js";
 import {
@@ -1204,5 +1206,23 @@ describe("computeImageDemerit", () => {
 			cfg,
 		);
 		expect(withDims).toBe(withoutDims);
+	});
+});
+
+// NL-345 hard invariant — seller-funded "Free shipping" must never be a
+// ranking lever (Etsy's 2022 coercion-via-demotion strike). This guards the
+// scorer module itself: a future change that pulls the seller-pays-shipping
+// column into any ranking signal would have to name the identifier here, and
+// this test fails the moment it appears. The broader rule (worker/API selects
+// that hydrate the inputs) is documented on `RankScoreInput`.
+describe("ranking invariant (NL-345)", () => {
+	it("never references the seller-funded-shipping column anywhere in the ranker", () => {
+		const source = readFileSync(
+			fileURLToPath(new URL("../../src/explore/ranking.ts", import.meta.url)),
+			"utf8",
+		);
+		// The comment on RankScoreInput deliberately refers to the flag in prose
+		// (hyphenated) so the camelCase column identifier appears zero times.
+		expect(source).not.toContain("sellerPaysShipping");
 	});
 });
