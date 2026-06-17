@@ -16,6 +16,7 @@ import { isStripeRateLimitError } from "@nolie/payments/utils";
 import type { QueueOf } from "@nolie/queues";
 import type { RestClient } from "@nolie/realtime/server";
 import type {
+	BnplBillingDetails,
 	CheckoutClaimBody,
 	CheckoutClaimSuccess,
 	CheckoutCreditChangedData,
@@ -455,16 +456,14 @@ export async function claimCheckout(
 	const isCreditOnlyCheckout = chargedAmountCents === 0;
 	const paidAt = new Date();
 
-	// NL-378 — BNPL can't settle a $0 charge. If wallet credit covers the whole
-	// order the UI won't offer BNPL (it's hidden below the provider minimum), so
-	// reaching here means a stale/forged client. Refuse before any reservation.
-	if (isBnpl && isCreditOnlyCheckout) {
-		throw new HttpError(
-			"Buy now, pay later isn't available when account credit covers the full order",
-			CheckoutClaimErrorCode.bnpl_unavailable_for_amount,
-			{ statusCode: 422 },
-		);
-	}
+	// NL-378 — when wallet credit covers the whole order there's nothing to
+	// finance, so a BNPL selection is moot: fall through to the credit-only ($0)
+	// path and record it as a credit/$0 order (not the provider) rather than
+	// erroring. BNPL billing comes from the ship-to when present; a pickup-only
+	// order passes no address and the provider collects it on its hosted page
+	// (Affirm self-collects; Klarna collects in the redirect flow).
+	const recordedPaymentMethodType =
+		isBnpl && !isCreditOnlyCheckout ? body.bnpl : "card";
 
 	// 8) Tx A — atomic DB writes only. Fast (no external calls).
 	const txResult = await apiTx(db, async (tx) => {
@@ -527,7 +526,7 @@ export async function claimCheckout(
 			pickupSnapshotByLocationId,
 			paymentMethodBrand: isBnpl ? null : (paymentMethod?.brand ?? null),
 			paymentMethodLast4: isBnpl ? null : (paymentMethod?.last4 ?? null),
-			paymentMethodType: isBnpl ? body.bnpl : "card",
+			paymentMethodType: recordedPaymentMethodType,
 			vacationBySellerProfileId,
 			requestReferrer: input.requestReferrer,
 		});
@@ -640,6 +639,7 @@ export async function claimCheckout(
 			clientSecret: null,
 			paymentIntentId: null,
 			orderIds,
+			bnplBilling: null,
 		};
 	}
 
@@ -741,6 +741,7 @@ export async function claimCheckout(
 		clientSecret: piResult.clientSecret,
 		paymentIntentId: piResult.paymentIntentId,
 		orderIds,
+		bnplBilling: isBnpl ? toBnplAddress(shipTo, buyer.email) : null,
 	};
 }
 
@@ -820,6 +821,16 @@ async function replayIfExists({
 			totalCents: true,
 			sellerProfileId: true,
 			idempotencyPayloadHash: true,
+			// NL-378 — ship-to snapshot + buyer email, for rebuilding the BNPL
+			// billing details handed back to the client on a replay confirm.
+			shipToName: true,
+			shipToLine1: true,
+			shipToLine2: true,
+			shipToCity: true,
+			shipToState: true,
+			shipToPostalCode: true,
+			shipToCountry: true,
+			buyerEmailSnapshot: true,
 		},
 	});
 	if (siblings.length === 0) return null;
@@ -853,8 +864,15 @@ async function replayIfExists({
 			clientSecret: null,
 			paymentIntentId: null,
 			orderIds,
+			bnplBilling: null,
 		};
 	}
+
+	// BNPL replay re-confirms client-side, so it needs the billing details again.
+	// Rebuild them from a sibling Order's frozen ship-to snapshot.
+	const replayBilling = isBnplClaim(body)
+		? bnplBillingFromOrderSnapshot(siblings.find((s) => s.shipToLine1) ?? null)
+		: null;
 
 	// Replay path A — PI was already linked. Just refetch the clientSecret.
 	if (linkedPI?.paymentIntentId) {
@@ -929,6 +947,7 @@ async function replayIfExists({
 			clientSecret: pi.clientSecret,
 			paymentIntentId: pi.id,
 			orderIds,
+			bnplBilling: replayBilling,
 		};
 	}
 
@@ -1019,6 +1038,8 @@ async function resumeWithoutLinkedPI({
 	let piResult: Awaited<
 		ReturnType<typeof payments.customer.createCheckoutPaymentIntent>
 	>;
+	// Billing handed back to the client for the BNPL confirm (null on the card rail).
+	let replayBilling: BnplBillingDetails | null = null;
 	if (isBnpl) {
 		// BNPL resume — recreate the same single-method PI (idempotency-keyed, so
 		// Stripe returns the original if it ever landed). Customer + the ship-to
@@ -1028,6 +1049,7 @@ async function resumeWithoutLinkedPI({
 			buyerId,
 			orderIds,
 		});
+		replayBilling = address;
 		piResult = await payments.customer.createBnplCheckoutPaymentIntent({
 			idempotencyKey: body.idempotencyKey,
 			buyerId,
@@ -1101,6 +1123,7 @@ async function resumeWithoutLinkedPI({
 		clientSecret: piResult.clientSecret,
 		paymentIntentId: piResult.paymentIntentId,
 		orderIds,
+		bnplBilling: replayBilling,
 	};
 }
 
@@ -1302,6 +1325,36 @@ function toBnplAddress(
 		state: shipTo.state,
 		postalCode: shipTo.postalCode,
 		country: shipTo.country,
+	};
+}
+
+/**
+ * NL-378 — rebuild BNPL billing from an Order's frozen ship-to snapshot, for the
+ * replay path (the client re-confirms and needs the details again). Null when the
+ * order has no ship-to (pickup-only).
+ */
+function bnplBillingFromOrderSnapshot(
+	order: {
+		shipToName: string | null;
+		shipToLine1: string | null;
+		shipToLine2: string | null;
+		shipToCity: string | null;
+		shipToState: string | null;
+		shipToPostalCode: string | null;
+		shipToCountry: string | null;
+		buyerEmailSnapshot: string;
+	} | null,
+): BnplBillingDetails | null {
+	if (!order?.shipToLine1) return null;
+	return {
+		name: order.shipToName ?? "",
+		email: order.buyerEmailSnapshot,
+		line1: order.shipToLine1,
+		line2: order.shipToLine2,
+		city: order.shipToCity ?? "",
+		state: order.shipToState ?? "",
+		postalCode: order.shipToPostalCode ?? "",
+		country: order.shipToCountry ?? "",
 	};
 }
 
