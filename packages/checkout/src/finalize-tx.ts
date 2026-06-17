@@ -20,7 +20,7 @@ import {
 	LETTER_UPGRADE_PARCEL_PRESET_KEY,
 	PACKAGE_PRESETS,
 } from "@nolie/shipping/presets";
-import { captureHolds } from "@nolie/wallet";
+import { captureHolds, releaseHolds } from "@nolie/wallet";
 
 /**
  * Listing-side packaging dims used by the bundle-dim fallback. Letter-
@@ -641,4 +641,102 @@ export async function finalizeCheckoutTx(
 		listingIds,
 		buyerId,
 	};
+}
+
+export interface ReleaseOrdersTxInput {
+	tx: Prisma.TransactionClient;
+	orders: Pick<
+		OrderForFinalization,
+		"id" | "originationType" | "acceptedOfferId"
+	>[];
+	/** `voided` = abandoned (PI canceled / superseded); `failed` = declined. */
+	terminalStatus: Extract<PaymentStatus, "failed" | "voided">;
+}
+
+/**
+ * Terminal-release tx body, shared by the worker's `payment_intent.canceled` /
+ * `.payment_failed` handlers and the API checkout-claim resume guard (which
+ * supersedes a buyer's own abandoned in-flight order before re-reserving —
+ * NL-378). Flips the orders to `terminalStatus`, voids their line items (frees
+ * the listing's 1-of-1 slot), releases reserved listings back to `active`,
+ * voids any linked offer, and releases held wallet credit.
+ *
+ * Idempotent under retries / concurrent paths:
+ *   - order flip is guarded `WHERE paymentStatus = pending`
+ *   - listing release is scoped `WHERE reservedByOrderId IN (orderIds) AND
+ *     status = reserved`, so a *fresh* re-reservation by a new order (the
+ *     resume guard's next step) is never clobbered by a late webhook
+ *   - credit release dedupes on the unified `${ac.id}:release` key
+ */
+export async function releaseOrdersTx(
+	input: ReleaseOrdersTxInput,
+): Promise<void> {
+	const { tx, orders, terminalStatus } = input;
+	const orderIds = orders.map((o) => o.id);
+	const offerIdsToVoid = orders
+		.map((o) => o.acceptedOfferId)
+		.filter((id): id is string => id !== null);
+
+	await tx.order.updateMany({
+		where: {
+			id: { in: orderIds },
+			originationType: {
+				in: [
+					OrderOriginationType.checkout,
+					OrderOriginationType.offer_accepted,
+				],
+			},
+			paymentStatus: PaymentStatus.pending,
+		},
+		data: { paymentStatus: terminalStatus },
+	});
+	await tx.orderLineItem.updateMany({
+		where: { orderId: { in: orderIds }, voidedAt: null },
+		data: { voidedAt: new Date() },
+	});
+	await tx.listing.updateMany({
+		where: {
+			reservedByOrderId: { in: orderIds },
+			status: ListingStatus.reserved,
+		},
+		data: {
+			status: ListingStatus.active,
+			reservedUntil: null,
+			reservedByOrderId: null,
+		},
+	});
+	if (offerIdsToVoid.length > 0) {
+		await tx.offer.updateMany({
+			where: {
+				id: { in: offerIdsToVoid },
+				state: {
+					in: [OfferState.accepted, OfferState.accepted_payment_pending],
+				},
+			},
+			data: {
+				state: OfferState.canceled_payment_failed,
+				resolvedAt: new Date(),
+			},
+		});
+	}
+	const heldCredits = await tx.appliedCredit.findMany({
+		where: {
+			orderId: { in: orderIds },
+			holdEntryId: { not: null },
+			captureEntryId: null,
+		},
+		select: { id: true, holdEntryId: true },
+	});
+	const releaseSpecs = heldCredits.filter(
+		(ac): ac is typeof ac & { holdEntryId: string } => ac.holdEntryId !== null,
+	);
+	if (releaseSpecs.length > 0) {
+		await releaseHolds({
+			db: tx,
+			holds: releaseSpecs.map((ac) => ({
+				holdEntryId: ac.holdEntryId,
+				idempotencyKey: `${ac.id}:release`,
+			})),
+		});
+	}
 }

@@ -58,6 +58,7 @@ import {
 	type ShipToSnapshot,
 } from "./materialize-orders.js";
 import { reserveListings } from "./reserve.js";
+import { resolveInFlightCheckout } from "./resume-guard.js";
 
 /** Claim-before-charge hold — see flat-pricing-bin-checkout.md "Reservation TTL". */
 const RESERVATION_TTL_MS = 10 * 60 * 1000;
@@ -162,6 +163,16 @@ export async function claimCheckout(
 	);
 
 	const listingIds = quote.lines.map((l) => l.listingId);
+
+	// NL-378 — resume/supersede guard. The replay path above keys on the
+	// idempotencyKey; a buyer returning after abandoning the BNPL/3DS redirect
+	// arrives with a *fresh* key, so it can't match. Before we reserve + open a
+	// PI, reconcile any in-flight order the buyer already has for these listings:
+	// supersede an uncommitted one (releasing its hold so the reads below see the
+	// listings as active again), or block with `payment_in_progress` if its PI
+	// already committed — never a second charge. Runs before the pre-flight reads
+	// so a superseded hold is back to `active` by the time we partition.
+	await resolveInFlightCheckout({ db, payments, buyerId, listingIds });
 
 	// Buyer fulfillment choices come from the persisted quote lines — at claim
 	// time we trust the snapshot. Fulfillment changes require a fresh quote;
