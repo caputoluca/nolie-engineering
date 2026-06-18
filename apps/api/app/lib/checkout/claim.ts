@@ -5,6 +5,7 @@ import {
 	loadFinalizableOrdersByIds,
 	runCheckoutSideEffects,
 } from "@nolie/checkout";
+import { isBnplEligibleAmount } from "@nolie/core/constants/bnpl";
 import type { SellerVacationPeriod } from "@nolie/core/orders";
 import type { PrismaClient } from "@nolie/db";
 import { PaymentStatus } from "@nolie/db";
@@ -466,6 +467,26 @@ export async function claimCheckout(
 	const chargedAmountCents = fresh.totalCents - credit.totalCreditCents;
 	const isCreditOnlyCheckout = chargedAmountCents === 0;
 	const paidAt = new Date();
+
+	// NL-378 — server-side BNPL floor. The quote computes `bnplEligible` and the
+	// FE only renders the rails when true, but the claim is the charge-creating
+	// path and must not trust the client: a crafted body could open an
+	// Affirm/Klarna PI on a sub-floor amount — a PI the provider rejects at
+	// confirm, plus a needlessly held reservation. Gauge the *payable* (gross −
+	// credit), the same number the quote gated on. Credit-covered ($0) BNPL is
+	// rerouted to the credit-only path below, so it's exempt. Checked before
+	// Tx A so a refused claim reserves nothing.
+	if (
+		isBnpl &&
+		!isCreditOnlyCheckout &&
+		!isBnplEligibleAmount(chargedAmountCents)
+	) {
+		throw new HttpError(
+			"This order doesn't qualify for Pay over time",
+			CheckoutClaimErrorCode.bnpl_unavailable_for_amount,
+			{ statusCode: 422, data: { payableCents: chargedAmountCents } },
+		);
+	}
 
 	// NL-378 — when wallet credit covers the whole order there's nothing to
 	// finance, so a BNPL selection is moot: fall through to the credit-only ($0)

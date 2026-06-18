@@ -1,4 +1,4 @@
-import { loadFinalizableOrdersByIds, releaseOrdersTx } from "@nolie/checkout";
+import { releaseOrdersTx } from "@nolie/checkout";
 import type { PrismaClient } from "@nolie/db";
 import { OrderOriginationType, PaymentStatus } from "@nolie/db";
 import { errors, HttpError } from "@nolie/errors/http";
@@ -112,9 +112,10 @@ export async function resolveInFlightCheckout(
 		}
 
 		if (result.status !== "canceled") {
-			// Committed (`processing` / `succeeded` / `requires_capture`): the buyer
-			// already owns this payment. Refuse a second PI; the FE sends them to
-			// the existing order's confirmation.
+			// The PI raced to a committed state (`processing` / `succeeded`) between
+			// our read and our cancel — these auto-capture PIs never sit at
+			// `requires_capture`. The buyer already owns this payment; refuse a
+			// second PI and let the FE route them to the existing order's confirmation.
 			logger.info(
 				{ buyerId, paymentIntentId, orderIds, status: result.status },
 				"checkout.resume: blocked — in-flight PI already committed",
@@ -146,9 +147,21 @@ export async function resolveInFlightCheckout(
  * these order ids, never clobbering a fresh re-reservation).
  */
 async function supersede(db: PrismaClient, orderIds: string[]): Promise<void> {
-	const orders = await loadFinalizableOrdersByIds(db, orderIds);
-	if (orders.length === 0) return;
+	if (orderIds.length === 0) return;
 	await apiTx(db, (tx) =>
-		releaseOrdersTx({ tx, orders, terminalStatus: PaymentStatus.voided }),
+		releaseOrdersTx({
+			tx,
+			// The caller scopes the in-flight query to `checkout` origin, so these
+			// are never offer-accepted: `acceptedOfferId` is always null and there's
+			// no linked offer to void. Build the minimal shape `releaseOrdersTx`
+			// reads (`id` + `acceptedOfferId`) rather than re-fetching the full
+			// finalization select.
+			orders: orderIds.map((id) => ({
+				id,
+				originationType: OrderOriginationType.checkout,
+				acceptedOfferId: null,
+			})),
+			terminalStatus: PaymentStatus.voided,
+		}),
 	);
 }
