@@ -107,15 +107,25 @@ const FALLBACK_LINE_DIMS: BundleDims = {
 };
 
 /**
- * Bundle-level package dims for a multi-item Order. Weight sums; LWH take
- * the per-line max. A line without listing parcel dims falls back to its
- * legacy ShippingLabel row, then to a fallback box. The fallback is
- * *expected* for letter-tagged lines in a default-parcel bundle (normal
- * mixed checkout): such a line rides inside the bundle's real parcel, so it
- * contributes the upgrade box's LWH (for the max) but only ~1 oz of weight
- * (`LETTER_RIDEALONG_WEIGHT_LBS`), not a whole `padded_mailer`. Only a
- * *non-letter* listing reaching the fallback is flagged for Sentry — that's
- * the unexpected case, and it keeps the full upgrade box as a safe over-estimate.
+ * Bundle-level package dims for a multi-item Order. A same-seller bundle ships
+ * as ONE box: the heaviest line "owns" that box and contributes its full
+ * (band-ceiling) weight; every other line adds only its *ride-along* content
+ * weight, never a whole second box. LWH take the per-line max.
+ *
+ * Why not sum the full per-line weights: a preset's `weightLbs` is the USPS
+ * band CEILING (a `padded_mailer` declares 8 oz but holds a ~2–3 oz slab).
+ * Summing ceilings declared e.g. five slabs at 2.5 lb when the real shipment
+ * is ~6 oz, buying a far costlier label (NL-345 follow-up — see orders
+ * 586db9f2 / a5154d19). The ride-along weight is sized to each preset's
+ * heaviest realistic content so the bundle weight stays APV-safe (never
+ * under-declares). This generalizes the letter ride-along (NL-391) — a letter
+ * line already rode at ~1 oz, not a whole `padded_mailer` — to parcel lines.
+ *
+ * A line without listing parcel dims falls back to its legacy ShippingLabel
+ * row, then to a fallback box. The fallback is *expected* for letter-tagged
+ * lines (they carry no parcel dims and ride at `LETTER_RIDEALONG_WEIGHT_LBS`).
+ * Only a *non-letter* listing reaching the fallback is flagged for Sentry —
+ * the unexpected case — keeping the full upgrade box as a safe over-estimate.
  */
 export function computeBundleDims(
 	lineItems: { listing: ListingPackageDims }[],
@@ -129,14 +139,34 @@ export function computeBundleDims(
 			l.packageWidthIn &&
 			l.packageHeightIn
 		) {
+			// A preset listing stores the band-ceiling weight; prefer the
+			// preset's ride-along content weight for the non-owner case. A
+			// custom-dims listing has no resolvable preset, so its stored
+			// weight IS its real weight — it rides (and sums) at that.
+			const preset = l.shippingPresetKey
+				? getPreset(l.shippingPresetKey)
+				: undefined;
+			const rideAlongWeight =
+				preset?.rideAlongWeightLbs != null
+					? new Prisma.Decimal(preset.rideAlongWeightLbs)
+					: l.packageWeightLbs;
 			return {
-				weightLbs: l.packageWeightLbs,
+				fullWeight: l.packageWeightLbs,
+				rideAlongWeight,
 				lengthIn: l.packageLengthIn,
 				widthIn: l.packageWidthIn,
 				heightIn: l.packageHeightIn,
 			};
 		}
-		if (l.shippingLabel) return l.shippingLabel;
+		if (l.shippingLabel) {
+			return {
+				fullWeight: l.shippingLabel.weightLbs,
+				rideAlongWeight: l.shippingLabel.weightLbs,
+				lengthIn: l.shippingLabel.lengthIn,
+				widthIn: l.shippingLabel.widthIn,
+				heightIn: l.shippingLabel.heightIn,
+			};
+		}
 		const isLetterTagged =
 			l.shippingPresetKey != null &&
 			getLetterPreset(l.shippingPresetKey) != null;
@@ -145,24 +175,43 @@ export function computeBundleDims(
 			// shouldn't happen — over-estimate at the full upgrade box and
 			// flag it (Sentry via onAnomalousFallback at the call site).
 			anomalousFallback = true;
-			return FALLBACK_LINE_DIMS;
+			return {
+				fullWeight: FALLBACK_LINE_DIMS.weightLbs,
+				rideAlongWeight: FALLBACK_LINE_DIMS.weightLbs,
+				lengthIn: FALLBACK_LINE_DIMS.lengthIn,
+				widthIn: FALLBACK_LINE_DIMS.widthIn,
+				heightIn: FALLBACK_LINE_DIMS.heightIn,
+			};
 		}
-		// A letter-tagged line is a raw single riding inside the bundle's
-		// real parcel — always present here, since an all-letter bundle is
-		// routed to a non-null preset upstream and never reaches this fn.
-		// Keep the upgrade box for the LWH max, but add only the card's
-		// ~1 oz, not a whole padded_mailer (8 oz). The latter over-stated
-		// bundle weight and bought a costlier label than the real shipment.
+		// A letter-tagged line is a raw single riding inside the bundle's real
+		// parcel — always present here, since an all-letter bundle is routed
+		// to a non-null preset upstream and never reaches this fn. It never
+		// owns the box (lightest line); ride at ~1 oz, not a whole mailer.
+		const letterRide = new Prisma.Decimal(LETTER_RIDEALONG_WEIGHT_LBS);
 		return {
-			...FALLBACK_LINE_DIMS,
-			weightLbs: new Prisma.Decimal(LETTER_RIDEALONG_WEIGHT_LBS),
+			fullWeight: letterRide,
+			rideAlongWeight: letterRide,
+			lengthIn: FALLBACK_LINE_DIMS.lengthIn,
+			widthIn: FALLBACK_LINE_DIMS.widthIn,
+			heightIn: FALLBACK_LINE_DIMS.heightIn,
 		};
 	});
 
-	const sumWeight = dimsPerLine.reduce(
-		(acc, d) => acc.add(d.weightLbs),
-		new Prisma.Decimal(0),
-	);
+	// The heaviest line owns the single box (its full weight); the rest add
+	// only their ride-along content weight. The first line at the max weight is
+	// the owner — ties don't matter, the full weight is identical across them.
+	let ownerWeight = new Prisma.Decimal(0);
+	for (const d of dimsPerLine) {
+		if (d.fullWeight.greaterThan(ownerWeight)) ownerWeight = d.fullWeight;
+	}
+	let ownerTaken = false;
+	const weightLbs = dimsPerLine.reduce((acc, d) => {
+		if (!ownerTaken && d.fullWeight.equals(ownerWeight)) {
+			ownerTaken = true;
+			return acc.add(d.fullWeight);
+		}
+		return acc.add(d.rideAlongWeight);
+	}, new Prisma.Decimal(0));
 	const maxBy = (key: "lengthIn" | "widthIn" | "heightIn") =>
 		dimsPerLine.reduce(
 			(max, d) => (d[key].greaterThan(max) ? d[key] : max),
@@ -170,7 +219,7 @@ export function computeBundleDims(
 		);
 	return {
 		dims: {
-			weightLbs: sumWeight,
+			weightLbs,
 			lengthIn: maxBy("lengthIn"),
 			widthIn: maxBy("widthIn"),
 			heightIn: maxBy("heightIn"),
