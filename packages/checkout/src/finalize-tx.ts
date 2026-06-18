@@ -16,6 +16,7 @@ import {
 	getLetterPreset,
 	getPreset,
 	LETTER_PLACEHOLDER_PARCEL_DIMS,
+	LETTER_RIDEALONG_WEIGHT_LBS,
 	LETTER_SERVICE_CODE,
 	LETTER_UPGRADE_PARCEL_PRESET_KEY,
 	PACKAGE_PRESETS,
@@ -108,10 +109,13 @@ const FALLBACK_LINE_DIMS: BundleDims = {
 /**
  * Bundle-level package dims for a multi-item Order. Weight sums; LWH take
  * the per-line max. A line without listing parcel dims falls back to its
- * legacy ShippingLabel row, then to `FALLBACK_LINE_DIMS`. The fallback is
+ * legacy ShippingLabel row, then to a fallback box. The fallback is
  * *expected* for letter-tagged lines in a default-parcel bundle (normal
- * mixed checkout) — only flag a non-letter listing reaching the fallback,
- * since that's the unexpected case worth Sentry-ing.
+ * mixed checkout): such a line rides inside the bundle's real parcel, so it
+ * contributes the upgrade box's LWH (for the max) but only ~1 oz of weight
+ * (`LETTER_RIDEALONG_WEIGHT_LBS`), not a whole `padded_mailer`. Only a
+ * *non-letter* listing reaching the fallback is flagged for Sentry — that's
+ * the unexpected case, and it keeps the full upgrade box as a safe over-estimate.
  */
 export function computeBundleDims(
 	lineItems: { listing: ListingPackageDims }[],
@@ -136,8 +140,23 @@ export function computeBundleDims(
 		const isLetterTagged =
 			l.shippingPresetKey != null &&
 			getLetterPreset(l.shippingPresetKey) != null;
-		if (!isLetterTagged) anomalousFallback = true;
-		return FALLBACK_LINE_DIMS;
+		if (!isLetterTagged) {
+			// A non-letter listing with no parcel dims and no legacy label
+			// shouldn't happen — over-estimate at the full upgrade box and
+			// flag it (Sentry via onAnomalousFallback at the call site).
+			anomalousFallback = true;
+			return FALLBACK_LINE_DIMS;
+		}
+		// A letter-tagged line is a raw single riding inside the bundle's
+		// real parcel — always present here, since an all-letter bundle is
+		// routed to a non-null preset upstream and never reaches this fn.
+		// Keep the upgrade box for the LWH max, but add only the card's
+		// ~1 oz, not a whole padded_mailer (8 oz). The latter over-stated
+		// bundle weight and bought a costlier label than the real shipment.
+		return {
+			...FALLBACK_LINE_DIMS,
+			weightLbs: new Prisma.Decimal(LETTER_RIDEALONG_WEIGHT_LBS),
+		};
 	});
 
 	const sumWeight = dimsPerLine.reduce(
