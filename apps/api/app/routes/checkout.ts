@@ -77,6 +77,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				totals: full.totals,
 				unavailableItems: full.unavailableItems,
 				isTaxExempt: full.isTaxExempt,
+				bnplEligible: full.bnplEligible,
 				selectedShippingAddressId: full.selectedShippingAddressId,
 				shippingCountryNotSupported: full.shippingCountryNotSupported,
 			});

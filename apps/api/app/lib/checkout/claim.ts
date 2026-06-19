@@ -5,6 +5,7 @@ import {
 	loadFinalizableOrdersByIds,
 	runCheckoutSideEffects,
 } from "@nolie/checkout";
+import { isBnplEligibleAmount } from "@nolie/core/constants/bnpl";
 import type { SellerVacationPeriod } from "@nolie/core/orders";
 import type { PrismaClient } from "@nolie/db";
 import { PaymentStatus } from "@nolie/db";
@@ -16,11 +17,16 @@ import { isStripeRateLimitError } from "@nolie/payments/utils";
 import type { QueueOf } from "@nolie/queues";
 import type { RestClient } from "@nolie/realtime/server";
 import type {
+	BnplBillingDetails,
+	CheckoutClaimBody,
 	CheckoutClaimSuccess,
 	CheckoutCreditChangedData,
 	CheckoutLineTotals,
 } from "@nolie/schemas/checkout/claim";
-import { CheckoutClaimErrorCode } from "@nolie/schemas/checkout/claim";
+import {
+	CheckoutClaimErrorCode,
+	isBnplClaim,
+} from "@nolie/schemas/checkout/claim";
 import type { FulfillmentMethodType } from "@nolie/schemas/fulfillment";
 import { getSpendableBalance, holdCredits } from "@nolie/wallet";
 import { COUNTRY_CODE_US } from "../../constants/country.js";
@@ -53,9 +59,20 @@ import {
 	type ShipToSnapshot,
 } from "./materialize-orders.js";
 import { reserveListings } from "./reserve.js";
+import { resolveInFlightCheckout } from "./resume-guard.js";
 
 /** Claim-before-charge hold — see flat-pricing-bin-checkout.md "Reservation TTL". */
 const RESERVATION_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * NL-378 — BNPL gets a longer hold than the 10-min card window. The buyer
+ * leaves our page for the Affirm/Klarna redirect (account creation, soft credit
+ * check, schedule review), so 10 min is too tight. The reservation reconciler
+ * (`apps/worker/app/checkout/reconcile.job.ts`) compares only the stored
+ * `reservedUntil`, so a per-rail TTL needs no sweeper change. This same instant
+ * also drives the wallet-credit `holdExpiresAt`.
+ */
+const BNPL_RESERVATION_TTL_MS = 25 * 60 * 1000;
 
 interface ClaimInput {
 	db: PrismaClient;
@@ -73,11 +90,8 @@ interface ClaimInput {
 	analytics: ServerAnalytics;
 	marketing: ServerMarketing;
 	buyerId: string;
-	body: {
-		quoteId: string;
-		paymentMethodId: string;
-		idempotencyKey: string;
-	};
+	/** Card rail (`{ paymentMethodId }`) or BNPL rail (`{ bnpl }`) — NL-378. */
+	body: CheckoutClaimBody;
 	/** §19 — the claim request's originating-impression triad (from the
 	 *  `X-NL-Referrer-*` headers). Fallback for cartless Buy-Now lines whose
 	 *  triad rides the claim request rather than a cart item. All-null when the
@@ -110,6 +124,7 @@ export async function claimCheckout(
 	input: ClaimInput,
 ): Promise<CheckoutClaimSuccess> {
 	const { db, payments, buyerId, body } = input;
+	const isBnpl = isBnplClaim(body);
 
 	// 0) Validate idempotency key format up-front. Cheap synchronous check —
 	//    rejects low-entropy / malformed keys before they hit any DB or Stripe
@@ -119,10 +134,11 @@ export async function claimCheckout(
 	// 0b) Compute the canonical payload hash once. Used twice:
 	//      - on replay: compare to the stored hash; mismatch → 422
 	//      - on fresh insert: persisted on Order so future replays can compare
-	const payloadHash = computeIdempotencyPayloadHash({
-		quoteId: body.quoteId,
-		paymentMethodId: body.paymentMethodId,
-	});
+	const payloadHash = computeIdempotencyPayloadHash(
+		isBnpl
+			? { quoteId: body.quoteId, bnpl: body.bnpl }
+			: { quoteId: body.quoteId, paymentMethodId: body.paymentMethodId },
+	);
 
 	// 1) Idempotency replay — same buyer + same key returns the same Order set
 	//    and the same PI clientSecret. Handles two replay scenarios:
@@ -149,6 +165,16 @@ export async function claimCheckout(
 
 	const listingIds = quote.lines.map((l) => l.listingId);
 
+	// NL-378 — resume/supersede guard. The replay path above keys on the
+	// idempotencyKey; a buyer returning after abandoning the BNPL/3DS redirect
+	// arrives with a *fresh* key, so it can't match. Before we reserve + open a
+	// PI, reconcile any in-flight order the buyer already has for these listings:
+	// supersede an uncommitted one (releasing its hold so the reads below see the
+	// listings as active again), or block with `payment_in_progress` if its PI
+	// already committed — never a second charge. Runs before the pre-flight reads
+	// so a superseded hold is back to `active` by the time we partition.
+	await resolveInFlightCheckout({ db, payments, buyerId, listingIds });
+
 	// Buyer fulfillment choices come from the persisted quote lines — at claim
 	// time we trust the snapshot. Fulfillment changes require a fresh quote;
 	// the claim body never overrides.
@@ -156,7 +182,7 @@ export async function claimCheckout(
 		quote.lines.map((l) => [l.listingId, asResolvedMethod(l.fulfillmentMode)]),
 	);
 
-	const [{ listings, unavailableListingIds }, buyer, spendable] =
+	const [{ listings, unavailableListingIds }, buyer, spendable, paymentMethod] =
 		await Promise.all([
 			partitionCheckoutListings(db, buyerId, listingIds),
 			db.user.findUnique({
@@ -165,21 +191,7 @@ export async function claimCheckout(
 					email: true,
 					phone: true,
 					taxExemptStatus: true,
-					billing: {
-						select: {
-							customerId: true,
-							paymentMethods: {
-								where: { id: body.paymentMethodId },
-								select: {
-									id: true,
-									stripePaymentMethodId: true,
-									brand: true,
-									last4: true,
-								},
-								take: 1,
-							},
-						},
-					},
+					billing: { select: { customerId: true } },
 					shippingAddresses: quote.shippingAddressId
 						? {
 								where: { id: quote.shippingAddressId },
@@ -204,6 +216,24 @@ export async function claimCheckout(
 			// in Tx A then materialises the expiry so the actual CAS is backed
 			// by the same number the drift check approved.
 			getSpendableBalance({ db, userId: buyerId }),
+			// Card rail only — load the selected saved payment method (scoped to
+			// this buyer's billing). BNPL has none, so we skip the lookup entirely
+			// rather than fetch-and-ignore. Parallel with the reads above, so no
+			// added latency on the card path.
+			isBnpl
+				? Promise.resolve(null)
+				: db.paymentMethod.findFirst({
+						where: {
+							id: body.paymentMethodId,
+							userBilling: { userId: buyerId },
+						},
+						select: {
+							id: true,
+							stripePaymentMethodId: true,
+							brand: true,
+							last4: true,
+						},
+					}),
 		]);
 
 	// A listing went unavailable between quote and claim — sold, pulled, or its
@@ -227,8 +257,8 @@ export async function claimCheckout(
 			{ code: "BUYER_MISSING_WALLET" },
 		);
 	}
-	const paymentMethod = buyer.billing?.paymentMethods[0];
-	if (!paymentMethod) {
+	// Card rail requires the saved payment method (loaded above); BNPL has none.
+	if (!isBnpl && !paymentMethod) {
 		throw errors.badRequest("Payment method not found for this buyer", {
 			code: "PAYMENT_METHOD_NOT_FOUND",
 		});
@@ -427,7 +457,9 @@ export async function claimCheckout(
 			code: "NO_FULFILLMENT_GROUPS",
 		});
 	}
-	const reservedUntil = new Date(Date.now() + RESERVATION_TTL_MS);
+	const reservedUntil = new Date(
+		Date.now() + (isBnpl ? BNPL_RESERVATION_TTL_MS : RESERVATION_TTL_MS),
+	);
 
 	// The floor rule in `applyCreditToCheckout` guarantees this is either 0
 	// (credit covers everything → bypass Stripe, finalize inline) or ≥ $0.50
@@ -435,6 +467,35 @@ export async function claimCheckout(
 	const chargedAmountCents = fresh.totalCents - credit.totalCreditCents;
 	const isCreditOnlyCheckout = chargedAmountCents === 0;
 	const paidAt = new Date();
+
+	// NL-378 — server-side BNPL floor. The quote computes `bnplEligible` and the
+	// FE only renders the rails when true, but the claim is the charge-creating
+	// path and must not trust the client: a crafted body could open an
+	// Affirm/Klarna PI on a sub-floor amount — a PI the provider rejects at
+	// confirm, plus a needlessly held reservation. Gauge the *payable* (gross −
+	// credit), the same number the quote gated on. Credit-covered ($0) BNPL is
+	// rerouted to the credit-only path below, so it's exempt. Checked before
+	// Tx A so a refused claim reserves nothing.
+	if (
+		isBnpl &&
+		!isCreditOnlyCheckout &&
+		!isBnplEligibleAmount(chargedAmountCents)
+	) {
+		throw new HttpError(
+			"This order doesn't qualify for Pay over time",
+			CheckoutClaimErrorCode.bnpl_unavailable_for_amount,
+			{ statusCode: 422, data: { payableCents: chargedAmountCents } },
+		);
+	}
+
+	// NL-378 — when wallet credit covers the whole order there's nothing to
+	// finance, so a BNPL selection is moot: fall through to the credit-only ($0)
+	// path and record it as a credit/$0 order (not the provider) rather than
+	// erroring. BNPL billing comes from the ship-to when present; a pickup-only
+	// order passes no address and the provider collects it on its hosted page
+	// (Affirm self-collects; Klarna collects in the redirect flow).
+	const recordedPaymentMethodType =
+		isBnpl && !isCreditOnlyCheckout ? body.bnpl : "card";
 
 	// 8) Tx A — atomic DB writes only. Fast (no external calls).
 	const txResult = await apiTx(db, async (tx) => {
@@ -495,8 +556,9 @@ export async function claimCheckout(
 			shipTo,
 			shipFromBySellerProfile,
 			pickupSnapshotByLocationId,
-			paymentMethodBrand: paymentMethod.brand,
-			paymentMethodLast4: paymentMethod.last4,
+			paymentMethodBrand: isBnpl ? null : (paymentMethod?.brand ?? null),
+			paymentMethodLast4: isBnpl ? null : (paymentMethod?.last4 ?? null),
+			paymentMethodType: recordedPaymentMethodType,
 			vacationBySellerProfileId,
 			requestReferrer: input.requestReferrer,
 		});
@@ -609,6 +671,7 @@ export async function claimCheckout(
 			clientSecret: null,
 			paymentIntentId: null,
 			orderIds,
+			bnplBilling: null,
 		};
 	}
 
@@ -621,23 +684,36 @@ export async function claimCheckout(
 	// totals so receipts can render the gross-then-tender breakdown;
 	// AppliedCredit carries the credit slice per Order for refund-time
 	// proration.
-	const piResult = await payments.customer.createCheckoutPaymentIntent({
-		idempotencyKey: body.idempotencyKey,
+	const piMetadata = buildPaymentIntentMetadata({
+		fresh,
 		buyerId,
-		customerId,
-		paymentMethodId: paymentMethod.stripePaymentMethodId,
-		amountCents: chargedAmountCents,
-		taxCalculationId: fresh.taxCalculationId ?? undefined,
-		metadata: buildPaymentIntentMetadata({
-			fresh,
-			buyerId,
-			sellerProfileIds,
-			orderIds,
-			quoteId: quote.id,
-			idempotencyKey: body.idempotencyKey,
-			creditAppliedCents: credit.totalCreditCents,
-		}),
+		sellerProfileIds,
+		orderIds,
+		quoteId: quote.id,
+		idempotencyKey: body.idempotencyKey,
+		creditAppliedCents: credit.totalCreditCents,
 	});
+	const piResult = isBnpl
+		? await payments.customer.createBnplCheckoutPaymentIntent({
+				idempotencyKey: body.idempotencyKey,
+				buyerId,
+				customerId,
+				provider: body.bnpl,
+				amountCents: chargedAmountCents,
+				taxCalculationId: fresh.taxCalculationId ?? undefined,
+				metadata: piMetadata,
+				address: toBnplAddress(shipTo, buyer.email),
+			})
+		: await payments.customer.createCheckoutPaymentIntent({
+				idempotencyKey: body.idempotencyKey,
+				buyerId,
+				customerId,
+				// biome-ignore lint/style/noNonNullAssertion: card rail guaranteed a PM above.
+				paymentMethodId: paymentMethod!.stripePaymentMethodId,
+				amountCents: chargedAmountCents,
+				taxCalculationId: fresh.taxCalculationId ?? undefined,
+				metadata: piMetadata,
+			});
 	if (!piResult.success) {
 		if (piResult.error === PaymentErrorCode.rate_limit_exceeded) {
 			throw errors.tooManyRequests(
@@ -697,6 +773,7 @@ export async function claimCheckout(
 		clientSecret: piResult.clientSecret,
 		paymentIntentId: piResult.paymentIntentId,
 		orderIds,
+		bnplBilling: isBnpl ? toBnplAddress(shipTo, buyer.email) : null,
 	};
 }
 
@@ -776,6 +853,16 @@ async function replayIfExists({
 			totalCents: true,
 			sellerProfileId: true,
 			idempotencyPayloadHash: true,
+			// NL-378 — ship-to snapshot + buyer email, for rebuilding the BNPL
+			// billing details handed back to the client on a replay confirm.
+			shipToName: true,
+			shipToLine1: true,
+			shipToLine2: true,
+			shipToCity: true,
+			shipToState: true,
+			shipToPostalCode: true,
+			shipToCountry: true,
+			buyerEmailSnapshot: true,
 		},
 	});
 	if (siblings.length === 0) return null;
@@ -809,8 +896,15 @@ async function replayIfExists({
 			clientSecret: null,
 			paymentIntentId: null,
 			orderIds,
+			bnplBilling: null,
 		};
 	}
+
+	// BNPL replay re-confirms client-side, so it needs the billing details again.
+	// Rebuild them from a sibling Order's frozen ship-to snapshot.
+	const replayBilling = isBnplClaim(body)
+		? bnplBillingFromOrderSnapshot(siblings.find((s) => s.shipToLine1) ?? null)
+		: null;
 
 	// Replay path A — PI was already linked. Just refetch the clientSecret.
 	if (linkedPI?.paymentIntentId) {
@@ -840,7 +934,12 @@ async function replayIfExists({
 		// next `stripe.confirmPayment(clientSecret)` would otherwise hit Stripe
 		// with no PM attached and surface a generic processing-error message.
 		// Re-attach the saved card so the retry charges normally.
-		if (pi.status === "requires_payment_method") {
+		//
+		// BNPL never pre-attaches a payment method: `requires_payment_method` is
+		// just the buyer's last redirect not completing, and the retry confirms
+		// fresh via `confirmAffirmPayment`/`confirmKlarnaPayment` client-side. So
+		// for BNPL we skip the re-attach and return the same clientSecret as-is.
+		if (!isBnplClaim(body) && pi.status === "requires_payment_method") {
 			const { stripePaymentMethodId } = await loadReplayWalletContext({
 				db,
 				buyerId,
@@ -880,6 +979,7 @@ async function replayIfExists({
 			clientSecret: pi.clientSecret,
 			paymentIntentId: pi.id,
 			orderIds,
+			bnplBilling: replayBilling,
 		};
 	}
 
@@ -911,11 +1011,7 @@ async function resumeWithoutLinkedPI({
 		sellerProfileId: string;
 	}[];
 }): Promise<CheckoutClaimSuccess> {
-	const { customerId, stripePaymentMethodId } = await loadReplayWalletContext({
-		db,
-		buyerId,
-		paymentMethodId: body.paymentMethodId,
-	});
+	const isBnpl = isBnplClaim(body);
 
 	const orderIds = siblings.map((s) => s.id);
 	const sellerProfileIds = Array.from(
@@ -956,28 +1052,64 @@ async function resumeWithoutLinkedPI({
 		appliedCreditAggregate._sum.appliedCents ?? 0;
 	const chargedAmountCents = aggregate.totalCents - replayCreditAppliedCents;
 
-	const piResult = await payments.customer.createCheckoutPaymentIntent({
-		idempotencyKey: body.idempotencyKey,
+	const replayMetadata = {
+		subtotalCents: aggregate.subtotalCents,
+		shippingCents: aggregate.shippingCents,
+		taxCents: aggregate.taxCents,
+		applicationFeeCents: aggregate.applicationFeeCents,
+		totalCents: aggregate.totalCents,
+		creditAppliedCents: replayCreditAppliedCents,
 		buyerId,
-		customerId,
-		paymentMethodId: stripePaymentMethodId,
-		amountCents: chargedAmountCents,
-		taxCalculationId: quote?.taxCalculationId ?? undefined,
-		metadata: {
-			subtotalCents: aggregate.subtotalCents,
-			shippingCents: aggregate.shippingCents,
-			taxCents: aggregate.taxCents,
-			applicationFeeCents: aggregate.applicationFeeCents,
-			totalCents: aggregate.totalCents,
-			creditAppliedCents: replayCreditAppliedCents,
+		sellerProfileIds: sellerProfileIds.join(","),
+		orderIds: orderIds.join(","),
+		quoteId: quote?.id ?? "",
+		idempotencyKey: body.idempotencyKey,
+		bundleShippingFormula: BUNDLE_SHIPPING_FORMULA,
+	};
+
+	let piResult: Awaited<
+		ReturnType<typeof payments.customer.createCheckoutPaymentIntent>
+	>;
+	// Billing handed back to the client for the BNPL confirm (null on the card rail).
+	let replayBilling: BnplBillingDetails | null = null;
+	if (isBnpl) {
+		// BNPL resume — recreate the same single-method PI (idempotency-keyed, so
+		// Stripe returns the original if it ever landed). Customer + the ship-to
+		// snapshot come from the already-materialized Orders, never re-derived.
+		const { customerId, address } = await loadReplayBnplContext({
+			db,
 			buyerId,
-			sellerProfileIds: sellerProfileIds.join(","),
-			orderIds: orderIds.join(","),
-			quoteId: quote?.id ?? "",
+			orderIds,
+		});
+		replayBilling = address;
+		piResult = await payments.customer.createBnplCheckoutPaymentIntent({
 			idempotencyKey: body.idempotencyKey,
-			bundleShippingFormula: BUNDLE_SHIPPING_FORMULA,
-		},
-	});
+			buyerId,
+			customerId,
+			provider: body.bnpl,
+			amountCents: chargedAmountCents,
+			taxCalculationId: quote?.taxCalculationId ?? undefined,
+			metadata: replayMetadata,
+			address,
+		});
+	} else {
+		const { customerId, stripePaymentMethodId } = await loadReplayWalletContext(
+			{
+				db,
+				buyerId,
+				paymentMethodId: body.paymentMethodId,
+			},
+		);
+		piResult = await payments.customer.createCheckoutPaymentIntent({
+			idempotencyKey: body.idempotencyKey,
+			buyerId,
+			customerId,
+			paymentMethodId: stripePaymentMethodId,
+			amountCents: chargedAmountCents,
+			taxCalculationId: quote?.taxCalculationId ?? undefined,
+			metadata: replayMetadata,
+		});
+	}
 	if (!piResult.success) {
 		if (piResult.error === PaymentErrorCode.rate_limit_exceeded) {
 			throw errors.tooManyRequests(
@@ -1023,6 +1155,7 @@ async function resumeWithoutLinkedPI({
 		clientSecret: piResult.clientSecret,
 		paymentIntentId: piResult.paymentIntentId,
 		orderIds,
+		bnplBilling: replayBilling,
 	};
 }
 
@@ -1195,6 +1328,68 @@ function uniqueSellerProfileIds(groups: ComputedFulfillmentGroup[]): string[] {
 	return Array.from(new Set(groups.map((g) => g.sellerProfileId)));
 }
 
+/**
+ * NL-378 — buyer name + address for the BNPL `billing_details`/`shipping`,
+ * sourced from the ship-to snapshot. Null for a pickup-only checkout (no buyer
+ * ship address). The payments layer attaches it to the PI only for Klarna; for
+ * Affirm it's supplied client-side at confirm.
+ */
+function toBnplAddress(
+	shipTo: ShipToSnapshot | null,
+	email: string,
+): {
+	name: string;
+	email: string;
+	line1: string;
+	line2: string | null;
+	city: string;
+	state: string;
+	postalCode: string;
+	country: string;
+} | null {
+	if (!shipTo) return null;
+	return {
+		name: shipTo.name,
+		email,
+		line1: shipTo.line1,
+		line2: shipTo.line2,
+		city: shipTo.city,
+		state: shipTo.state,
+		postalCode: shipTo.postalCode,
+		country: shipTo.country,
+	};
+}
+
+/**
+ * NL-378 — rebuild BNPL billing from an Order's frozen ship-to snapshot, for the
+ * replay path (the client re-confirms and needs the details again). Null when the
+ * order has no ship-to (pickup-only).
+ */
+function bnplBillingFromOrderSnapshot(
+	order: {
+		shipToName: string | null;
+		shipToLine1: string | null;
+		shipToLine2: string | null;
+		shipToCity: string | null;
+		shipToState: string | null;
+		shipToPostalCode: string | null;
+		shipToCountry: string | null;
+		buyerEmailSnapshot: string;
+	} | null,
+): BnplBillingDetails | null {
+	if (!order?.shipToLine1) return null;
+	return {
+		name: order.shipToName ?? "",
+		email: order.buyerEmailSnapshot,
+		line1: order.shipToLine1,
+		line2: order.shipToLine2,
+		city: order.shipToCity ?? "",
+		state: order.shipToState ?? "",
+		postalCode: order.shipToPostalCode ?? "",
+		country: order.shipToCountry ?? "",
+	};
+}
+
 function buildPaymentIntentMetadata(input: {
 	fresh: ComputedCheckoutTotals;
 	buyerId: string;
@@ -1286,6 +1481,62 @@ async function loadReplayWalletContext(input: {
 		);
 	}
 	return { customerId, stripePaymentMethodId };
+}
+
+/**
+ * NL-378 — BNPL replay context. No saved payment method (BNPL has none): just
+ * the Stripe customer plus the ship-to snapshot frozen on the Orders at
+ * materialize time (the source the Klarna `billing_details`/`shipping` came
+ * from on the original attempt — re-derived from the same place so the resumed
+ * PI is identical). Address is null for a pickup-only bundle.
+ */
+async function loadReplayBnplContext(input: {
+	db: PrismaClient;
+	buyerId: string;
+	orderIds: string[];
+}): Promise<{
+	customerId: string;
+	address: ReturnType<typeof toBnplAddress>;
+}> {
+	const [buyer, order] = await Promise.all([
+		input.db.user.findUnique({
+			where: { id: input.buyerId },
+			select: { email: true, billing: { select: { customerId: true } } },
+		}),
+		input.db.order.findFirst({
+			where: { id: { in: input.orderIds }, shipToLine1: { not: null } },
+			select: {
+				shipToName: true,
+				shipToLine1: true,
+				shipToLine2: true,
+				shipToCity: true,
+				shipToState: true,
+				shipToPostalCode: true,
+				shipToCountry: true,
+				shipToPhone: true,
+			},
+		}),
+	]);
+	const customerId = buyer?.billing?.customerId;
+	if (!customerId || !buyer) {
+		throw errors.badRequest("Buyer wallet missing during BNPL replay", {
+			code: "REPLAY_BUYER_WALLET_MISSING",
+		});
+	}
+	const shipTo: ShipToSnapshot | null =
+		order?.shipToLine1 != null
+			? {
+					name: order.shipToName ?? "",
+					line1: order.shipToLine1,
+					line2: order.shipToLine2,
+					city: order.shipToCity ?? "",
+					state: order.shipToState ?? "",
+					postalCode: order.shipToPostalCode ?? "",
+					country: order.shipToCountry ?? "",
+					phone: order.shipToPhone,
+				}
+			: null;
+	return { customerId, address: toBnplAddress(shipTo, buyer.email) };
 }
 
 export type { CheckoutListing, ComputedCheckoutTotals };

@@ -81,9 +81,14 @@ interface MaterializeInput {
 	shipFromBySellerProfile: Map<string, ShipFromSnapshot>;
 	/** PickupLocation snapshot keyed by pickupLocationId; required for any pickup group. */
 	pickupSnapshotByLocationId: Map<string, PickupSnapshot>;
-	/** Card brand/last4 snapshot from the buyer's PaymentMethod row at claim time. */
+	/** Card brand/last4 snapshot from the buyer's PaymentMethod row at claim time.
+	 *  Both null on the BNPL rail (Affirm/Klarna have no brand/last4). */
 	paymentMethodBrand: string | null;
 	paymentMethodLast4: string | null;
+	/** NL-378 — the payment rail: `card` | `affirm` | `klarna`. Authoritative
+	 *  because each PI is single-method by construction (the selected rail is the
+	 *  charged rail). Frozen on every Order in the bundle. */
+	paymentMethodType: string;
 	/** Active vacation period for any seller that was on vacation when the
 	 *  buyer claimed. Sellers not on vacation are absent — the snapshot
 	 *  helper handles `null` and writes null fields for those orders. */
@@ -301,6 +306,7 @@ export async function materializeOrders(input: MaterializeInput): Promise<{
 			paymentStatus: PaymentStatus.pending,
 			paymentMethodBrand: input.paymentMethodBrand,
 			paymentMethodLast4: input.paymentMethodLast4,
+			paymentMethodType: input.paymentMethodType,
 			idempotencyKey: input.idempotencyKey,
 			idempotencyPayloadHash: input.idempotencyPayloadHash,
 			fulfillmentMode: group.fulfillmentMode,
