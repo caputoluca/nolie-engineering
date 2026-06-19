@@ -3,6 +3,7 @@ import { generatePickupCode } from "@nolie/core/orders";
 import {
 	type DbClient,
 	FulfillmentMode,
+	type Grader,
 	ListingStatus,
 	type Offer,
 	OfferState,
@@ -13,6 +14,7 @@ import {
 	Prisma,
 } from "@nolie/db";
 import {
+	BUNDLE_BOX_ALLOWANCE_LBS,
 	getLetterPreset,
 	getPreset,
 	LETTER_PLACEHOLDER_PARCEL_DIMS,
@@ -20,6 +22,8 @@ import {
 	LETTER_SERVICE_CODE,
 	LETTER_UPGRADE_PARCEL_PRESET_KEY,
 	PACKAGE_PRESETS,
+	SLAB_CLASS_PRESET_KEYS,
+	slabOrRawContentWeightLbs,
 } from "@nolie/shipping/presets";
 import { captureHolds } from "@nolie/wallet";
 
@@ -31,6 +35,10 @@ import { captureHolds } from "@nolie/wallet";
  */
 export interface ListingPackageDims {
 	shippingPresetKey: string | null;
+	/** Grading company (NL-374); null for raw cards and sealed. On a slab-class
+	 *  preset the bundle line's content weight is resolved from this — a graded
+	 *  slab and a raw card in the same `padded_mailer` weigh very differently. */
+	grader: Grader | null;
 	packageWeightLbs: Prisma.Decimal | null;
 	packageLengthIn: Prisma.Decimal | null;
 	packageWidthIn: Prisma.Decimal | null;
@@ -107,15 +115,25 @@ const FALLBACK_LINE_DIMS: BundleDims = {
 };
 
 /**
- * Bundle-level package dims for a multi-item Order. Weight sums; LWH take
- * the per-line max. A line without listing parcel dims falls back to its
- * legacy ShippingLabel row, then to a fallback box. The fallback is
- * *expected* for letter-tagged lines in a default-parcel bundle (normal
- * mixed checkout): such a line rides inside the bundle's real parcel, so it
- * contributes the upgrade box's LWH (for the max) but only ~1 oz of weight
- * (`LETTER_RIDEALONG_WEIGHT_LBS`), not a whole `padded_mailer`. Only a
- * *non-letter* listing reaching the fallback is flagged for Sentry — that's
- * the unexpected case, and it keeps the full upgrade box as a safe over-estimate.
+ * Bundle-level package dims for a multi-item Order that ships as ONE box.
+ * Declared weight = `max(box ceiling, one carton + Σ real content)`:
+ *   - box ceiling = the heaviest line's full band weight, an APV-safe floor
+ *     that keeps a single item (and a light 2–3 item bundle) at its own band;
+ *   - content = each line's REAL item weight, summed, so the declaration tracks
+ *     what's actually in the box instead of N band-ceilings. Slab-class lines
+ *     (padded_mailer/standard_card) resolve content grader-aware — a slab's real
+ *     weight by grading company, or ~1 oz for a raw card — because the preset
+ *     conflates the two; box-class lines use the preset's `contentWeightLbs`;
+ *     custom-dims lines use their stored (self-packaged) weight;
+ *   - one carton (`BUNDLE_BOX_ALLOWANCE_LBS`) is added once, and only when a
+ *     loose preset item is present (custom + letter lines are self-packaged).
+ *
+ * This kills two over-declarations that bought far costlier labels (NL-345
+ * follow-up, orders 586db9f2 / a5154d19): summing band ceilings (five slabs →
+ * 2.5 lb) and treating a ~1 oz raw card as a 4 oz slab. LWH take the per-line
+ * max. A line with no parcel dims falls back to its legacy ShippingLabel row,
+ * then to a fallback box; only a *non-letter* listing reaching that fallback is
+ * flagged for Sentry (via onAnomalousFallback at the call site).
  */
 export function computeBundleDims(
 	lineItems: { listing: ListingPackageDims }[],
@@ -129,14 +147,45 @@ export function computeBundleDims(
 			l.packageWidthIn &&
 			l.packageHeightIn
 		) {
+			// Real per-line CONTENT weight (the carton is added once below):
+			//  - slab-class preset (padded_mailer/standard_card): a slab OR a raw
+			//    card, so resolve grader-aware from Listing.grader.
+			//  - other preset (small/medium/large box): its own contentWeightLbs.
+			//  - custom dims (no preset): the seller's stored weight IS real and
+			//    already self-packaged — it's the content and adds no carton.
+			const presetKey = l.shippingPresetKey;
+			const preset = presetKey ? getPreset(presetKey) : undefined;
+			let contentWeight: Prisma.Decimal;
+			let needsBox: boolean;
+			if (presetKey && SLAB_CLASS_PRESET_KEYS.has(presetKey)) {
+				contentWeight = new Prisma.Decimal(slabOrRawContentWeightLbs(l.grader));
+				needsBox = true;
+			} else if (preset?.contentWeightLbs != null) {
+				contentWeight = new Prisma.Decimal(preset.contentWeightLbs);
+				needsBox = true;
+			} else {
+				contentWeight = l.packageWeightLbs;
+				needsBox = preset != null;
+			}
 			return {
-				weightLbs: l.packageWeightLbs,
+				fullWeight: l.packageWeightLbs,
+				contentWeight,
+				needsBox,
 				lengthIn: l.packageLengthIn,
 				widthIn: l.packageWidthIn,
 				heightIn: l.packageHeightIn,
 			};
 		}
-		if (l.shippingLabel) return l.shippingLabel;
+		if (l.shippingLabel) {
+			return {
+				fullWeight: l.shippingLabel.weightLbs,
+				contentWeight: l.shippingLabel.weightLbs,
+				needsBox: false,
+				lengthIn: l.shippingLabel.lengthIn,
+				widthIn: l.shippingLabel.widthIn,
+				heightIn: l.shippingLabel.heightIn,
+			};
+		}
 		const isLetterTagged =
 			l.shippingPresetKey != null &&
 			getLetterPreset(l.shippingPresetKey) != null;
@@ -145,24 +194,50 @@ export function computeBundleDims(
 			// shouldn't happen — over-estimate at the full upgrade box and
 			// flag it (Sentry via onAnomalousFallback at the call site).
 			anomalousFallback = true;
-			return FALLBACK_LINE_DIMS;
+			return {
+				fullWeight: FALLBACK_LINE_DIMS.weightLbs,
+				contentWeight: FALLBACK_LINE_DIMS.weightLbs,
+				needsBox: false,
+				lengthIn: FALLBACK_LINE_DIMS.lengthIn,
+				widthIn: FALLBACK_LINE_DIMS.widthIn,
+				heightIn: FALLBACK_LINE_DIMS.heightIn,
+			};
 		}
-		// A letter-tagged line is a raw single riding inside the bundle's
-		// real parcel — always present here, since an all-letter bundle is
-		// routed to a non-null preset upstream and never reaches this fn.
-		// Keep the upgrade box for the LWH max, but add only the card's
-		// ~1 oz, not a whole padded_mailer (8 oz). The latter over-stated
-		// bundle weight and bought a costlier label than the real shipment.
+		// A letter-tagged line is a raw single riding inside the bundle's real
+		// parcel — always present here, since an all-letter bundle is routed
+		// to a non-null preset upstream and never reaches this fn. It never
+		// owns the box (lightest line); ride at ~1 oz, not a whole mailer.
+		const letterRide = new Prisma.Decimal(LETTER_RIDEALONG_WEIGHT_LBS);
 		return {
-			...FALLBACK_LINE_DIMS,
-			weightLbs: new Prisma.Decimal(LETTER_RIDEALONG_WEIGHT_LBS),
+			fullWeight: letterRide,
+			contentWeight: letterRide,
+			needsBox: false,
+			lengthIn: FALLBACK_LINE_DIMS.lengthIn,
+			widthIn: FALLBACK_LINE_DIMS.widthIn,
+			heightIn: FALLBACK_LINE_DIMS.heightIn,
 		};
 	});
 
-	const sumWeight = dimsPerLine.reduce(
-		(acc, d) => acc.add(d.weightLbs),
-		new Prisma.Decimal(0),
-	);
+	// The bundle ships in ONE box. Declared weight = max(box band ceiling, one
+	// carton + the summed real content of every line). The ceiling (heaviest
+	// line's full band weight) floors single-item and light bundles inside the
+	// box's band; the content sum takes over once the real combined contents
+	// exceed it. The carton is added once and only when a loose (preset) item
+	// is present — custom-dims and letter lines are already self-packaged.
+	let boxCeiling = new Prisma.Decimal(0);
+	let contentSum = new Prisma.Decimal(0);
+	let anyNeedsBox = false;
+	for (const d of dimsPerLine) {
+		if (d.fullWeight.greaterThan(boxCeiling)) boxCeiling = d.fullWeight;
+		contentSum = contentSum.add(d.contentWeight);
+		if (d.needsBox) anyNeedsBox = true;
+	}
+	const declaredContent = anyNeedsBox
+		? contentSum.add(new Prisma.Decimal(BUNDLE_BOX_ALLOWANCE_LBS))
+		: contentSum;
+	const weightLbs = boxCeiling.greaterThan(declaredContent)
+		? boxCeiling
+		: declaredContent;
 	const maxBy = (key: "lengthIn" | "widthIn" | "heightIn") =>
 		dimsPerLine.reduce(
 			(max, d) => (d[key].greaterThan(max) ? d[key] : max),
@@ -170,7 +245,7 @@ export function computeBundleDims(
 		);
 	return {
 		dims: {
-			weightLbs: sumWeight,
+			weightLbs,
 			lengthIn: maxBy("lengthIn"),
 			widthIn: maxBy("widthIn"),
 			heightIn: maxBy("heightIn"),
@@ -220,6 +295,7 @@ const ORDER_FOR_FINALIZATION_SELECT = {
 			listing: {
 				select: {
 					shippingPresetKey: true,
+					grader: true,
 					packageWeightLbs: true,
 					packageLengthIn: true,
 					packageWidthIn: true,
