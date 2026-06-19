@@ -107,23 +107,28 @@ const FALLBACK_LINE_DIMS: BundleDims = {
 };
 
 /**
- * Bundle-level package dims for a multi-item Order. A same-seller bundle ships
- * as ONE box: the heaviest line "owns" that box and contributes its full
- * (band-ceiling) weight; every other line adds only its *ride-along* content
- * weight, never a whole second box. LWH take the per-line max.
+ * Bundle-level package dims for a multi-item Order that ships as ONE box.
+ * Declared weight = the larger of (a) the box's band CEILING — the heaviest
+ * line's full weight, an APV-safe floor — and (b) the summed real CONTENT of
+ * every line. LWH take the per-line max.
  *
- * Why not sum the full per-line weights: a preset's `weightLbs` is the USPS
- * band CEILING (a `padded_mailer` declares 8 oz but holds a ~2–3 oz slab).
- * Summing ceilings declared e.g. five slabs at 2.5 lb when the real shipment
- * is ~6 oz, buying a far costlier label (NL-345 follow-up — see orders
- * 586db9f2 / a5154d19). The ride-along weight is sized to each preset's
- * heaviest realistic content so the bundle weight stays APV-safe (never
- * under-declares). This generalizes the letter ride-along (NL-391) — a letter
- * line already rode at ~1 oz, not a whole `padded_mailer` — to parcel lines.
+ * Why not just sum the per-line weights: a preset's `weightLbs` is the USPS
+ * band CEILING (a `padded_mailer` declares 8 oz but holds a ~2–3 oz slab), so
+ * summing ceilings declared five slabs at 2.5 lb when the real shipment is
+ * ~6 oz, buying a far costlier label (NL-345 follow-up — orders 586db9f2 /
+ * a5154d19). And adding weight ON TOP of the owner's ceiling tips a light
+ * bundle into the next band for nothing — a slab + two cards is ~6 oz, still
+ * inside the 8 oz band, and must not be billed at 12 oz. So each line
+ * contributes only its realistic *content* weight to the sum, and the box
+ * ceiling is a floor: light additions ride inside the box's existing band
+ * headroom, and the weight rises above the box only when the real combined
+ * content exceeds it. Content weights are sized to each preset's heaviest
+ * realistic item, so the result never under-declares (APV-safe). Generalizes
+ * the letter ride-along (NL-391) — a letter contributes ~1 oz, not a mailer.
  *
  * A line without listing parcel dims falls back to its legacy ShippingLabel
  * row, then to a fallback box. The fallback is *expected* for letter-tagged
- * lines (they carry no parcel dims and ride at `LETTER_RIDEALONG_WEIGHT_LBS`).
+ * lines (they carry no parcel dims and contribute `LETTER_RIDEALONG_WEIGHT_LBS`).
  * Only a *non-letter* listing reaching the fallback is flagged for Sentry —
  * the unexpected case — keeping the full upgrade box as a safe over-estimate.
  */
@@ -139,10 +144,11 @@ export function computeBundleDims(
 			l.packageWidthIn &&
 			l.packageHeightIn
 		) {
-			// A preset listing stores the band-ceiling weight; prefer the
-			// preset's ride-along content weight for the non-owner case. A
-			// custom-dims listing has no resolvable preset, so its stored
-			// weight IS its real weight — it rides (and sums) at that.
+			// A preset listing's stored weight is the band CEILING (the box
+			// floor); its realistic content weight comes from the preset's
+			// rideAlongWeightLbs. A custom-dims listing has no resolvable preset,
+			// so its stored weight IS its real weight — it contributes that to
+			// both the ceiling and the content sum.
 			const preset = l.shippingPresetKey
 				? getPreset(l.shippingPresetKey)
 				: undefined;
@@ -197,21 +203,19 @@ export function computeBundleDims(
 		};
 	});
 
-	// The heaviest line owns the single box (its full weight); the rest add
-	// only their ride-along content weight. The first line at the max weight is
-	// the owner — ties don't matter, the full weight is identical across them.
-	let ownerWeight = new Prisma.Decimal(0);
+	// The bundle ships in ONE box. Declared weight = max(box band ceiling,
+	// summed content): the ceiling (heaviest line's full weight) is an APV-safe
+	// floor, and light additions ride inside its band headroom — the weight
+	// rises above the box only when the real combined content exceeds it.
+	let boxCeiling = new Prisma.Decimal(0);
+	let contentSum = new Prisma.Decimal(0);
 	for (const d of dimsPerLine) {
-		if (d.fullWeight.greaterThan(ownerWeight)) ownerWeight = d.fullWeight;
+		if (d.fullWeight.greaterThan(boxCeiling)) boxCeiling = d.fullWeight;
+		contentSum = contentSum.add(d.rideAlongWeight);
 	}
-	let ownerTaken = false;
-	const weightLbs = dimsPerLine.reduce((acc, d) => {
-		if (!ownerTaken && d.fullWeight.equals(ownerWeight)) {
-			ownerTaken = true;
-			return acc.add(d.fullWeight);
-		}
-		return acc.add(d.rideAlongWeight);
-	}, new Prisma.Decimal(0));
+	const weightLbs = boxCeiling.greaterThan(contentSum)
+		? boxCeiling
+		: contentSum;
 	const maxBy = (key: "lengthIn" | "widthIn" | "heightIn") =>
 		dimsPerLine.reduce(
 			(max, d) => (d[key].greaterThan(max) ? d[key] : max),
