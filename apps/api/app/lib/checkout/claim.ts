@@ -729,8 +729,8 @@ export async function claimCheckout(
 		});
 	} else if (isBnpl) {
 		if (!customerId) {
-			throw errors.internal("Non-guest claim reached charge with no customer", {
-				code: "CHECKOUT_CHARGE_CONTEXT_MISSING",
+			throw errors.internal("BNPL claim reached charge with no customer", {
+				code: "BNPL_CHARGE_NO_CUSTOMER",
 			});
 		}
 		piResult = await payments.customer.createBnplCheckoutPaymentIntent({
@@ -748,7 +748,7 @@ export async function claimCheckout(
 			throw errors.internal(
 				"Card claim reached charge with no customer/method",
 				{
-					code: "CHECKOUT_CHARGE_CONTEXT_MISSING",
+					code: "CARD_CHARGE_NO_CONTEXT",
 				},
 			);
 		}
@@ -1149,12 +1149,19 @@ async function resumeWithoutLinkedPI({
 		});
 	} else if (isGuest) {
 		// Guest resume — recreate the same empty PI (idempotency-keyed, so Stripe
-		// returns the original if it ever landed). No saved customer or method:
-		// the buyer re-confirms with a freshly-entered card against the returned
-		// clientSecret, exactly like the first attempt.
+		// returns the original if it ever landed). The buyer re-confirms with a
+		// freshly-entered card against the returned clientSecret. Resolve the
+		// customer the same way the first attempt does (`claimCheckout`): undefined
+		// for a pure guest today, but a later phase may mint one — both call sites
+		// must stay identical so a resume can't open a customer-mismatched PI.
+		const guestBuyer = await db.user.findUnique({
+			where: { id: buyerId },
+			select: { billing: { select: { customerId: true } } },
+		});
 		piResult = await payments.customer.createGuestCheckoutPaymentIntent({
 			idempotencyKey: body.idempotencyKey,
 			buyerId,
+			customerId: guestBuyer?.billing?.customerId ?? undefined,
 			amountCents: chargedAmountCents,
 			taxCalculationId: quote?.taxCalculationId ?? undefined,
 			metadata: replayMetadata,
