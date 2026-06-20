@@ -26,6 +26,7 @@ import type {
 import {
 	CheckoutClaimErrorCode,
 	isBnplClaim,
+	isGuestClaim,
 } from "@nolie/schemas/checkout/claim";
 import type { FulfillmentMethodType } from "@nolie/schemas/fulfillment";
 import { getSpendableBalance, holdCredits } from "@nolie/wallet";
@@ -90,7 +91,9 @@ interface ClaimInput {
 	analytics: ServerAnalytics;
 	marketing: ServerMarketing;
 	buyerId: string;
-	/** Card rail (`{ paymentMethodId }`) or BNPL rail (`{ bnpl }`) — NL-378. */
+	/** Card rail (`{ paymentMethodId }`, saved card), BNPL rail (`{ bnpl }`,
+	 *  NL-378), or guest rail (`{ collectPaymentMethod: true }`, a freshly-
+	 *  collected card with no saved customer/method — NL-298). */
 	body: CheckoutClaimBody;
 	/** §19 — the claim request's originating-impression triad (from the
 	 *  `X-NL-Referrer-*` headers). Fallback for cartless Buy-Now lines whose
@@ -125,6 +128,7 @@ export async function claimCheckout(
 ): Promise<CheckoutClaimSuccess> {
 	const { db, payments, buyerId, body } = input;
 	const isBnpl = isBnplClaim(body);
+	const isGuest = isGuestClaim(body);
 
 	// 0) Validate idempotency key format up-front. Cheap synchronous check —
 	//    rejects low-entropy / malformed keys before they hit any DB or Stripe
@@ -137,7 +141,9 @@ export async function claimCheckout(
 	const payloadHash = computeIdempotencyPayloadHash(
 		isBnpl
 			? { quoteId: body.quoteId, bnpl: body.bnpl }
-			: { quoteId: body.quoteId, paymentMethodId: body.paymentMethodId },
+			: isGuest
+				? { quoteId: body.quoteId, collectPaymentMethod: true }
+				: { quoteId: body.quoteId, paymentMethodId: body.paymentMethodId },
 	);
 
 	// 1) Idempotency replay — same buyer + same key returns the same Order set
@@ -217,10 +223,10 @@ export async function claimCheckout(
 			// by the same number the drift check approved.
 			getSpendableBalance({ db, userId: buyerId }),
 			// Card rail only — load the selected saved payment method (scoped to
-			// this buyer's billing). BNPL has none, so we skip the lookup entirely
-			// rather than fetch-and-ignore. Parallel with the reads above, so no
-			// added latency on the card path.
-			isBnpl
+			// this buyer's billing). BNPL and the guest rail have no saved method,
+			// so we skip the lookup entirely rather than fetch-and-ignore. Parallel
+			// with the reads above, so no added latency on the card path.
+			isBnpl || isGuest
 				? Promise.resolve(null)
 				: db.paymentMethod.findFirst({
 						where: {
@@ -250,15 +256,25 @@ export async function claimCheckout(
 		);
 	}
 
-	const customerId = buyer?.billing?.customerId;
-	if (!buyer || !customerId) {
+	if (!buyer) {
+		// buyerId comes from the authenticated session (or a freshly-minted guest
+		// User), so a missing row is an internal inconsistency, not a client error.
+		throw errors.internal("Buyer not found for checkout claim", {
+			code: "BUYER_NOT_FOUND",
+		});
+	}
+	const customerId = buyer.billing?.customerId;
+	// Saved-card and BNPL rails charge a pre-saved customer; the guest rail
+	// charges a freshly-collected method client-side and needs no customer here.
+	if (!isGuest && !customerId) {
 		throw errors.badRequest(
 			"Buyer is missing a Stripe customer. Set up payment first.",
 			{ code: "BUYER_MISSING_WALLET" },
 		);
 	}
-	// Card rail requires the saved payment method (loaded above); BNPL has none.
-	if (!isBnpl && !paymentMethod) {
+	// Card rail requires the saved payment method (loaded above); BNPL and the
+	// guest rail have none.
+	if (!isBnpl && !isGuest && !paymentMethod) {
 		throw errors.badRequest("Payment method not found for this buyer", {
 			code: "PAYMENT_METHOD_NOT_FOUND",
 		});
@@ -693,27 +709,59 @@ export async function claimCheckout(
 		idempotencyKey: body.idempotencyKey,
 		creditAppliedCents: credit.totalCreditCents,
 	});
-	const piResult = isBnpl
-		? await payments.customer.createBnplCheckoutPaymentIntent({
-				idempotencyKey: body.idempotencyKey,
-				buyerId,
-				customerId,
-				provider: body.bnpl,
-				amountCents: chargedAmountCents,
-				taxCalculationId: fresh.taxCalculationId ?? undefined,
-				metadata: piMetadata,
-				address: toBnplAddress(shipTo, buyer.email),
-			})
-		: await payments.customer.createCheckoutPaymentIntent({
-				idempotencyKey: body.idempotencyKey,
-				buyerId,
-				customerId,
-				// biome-ignore lint/style/noNonNullAssertion: card rail guaranteed a PM above.
-				paymentMethodId: paymentMethod!.stripePaymentMethodId,
-				amountCents: chargedAmountCents,
-				taxCalculationId: fresh.taxCalculationId ?? undefined,
-				metadata: piMetadata,
+	// One Stripe call per rail. The guest rail charges customer-less (the fresh
+	// card is attached client-side at confirm); the card and BNPL rails charge
+	// the saved customer the gates above already required — each branch re-checks
+	// what it reads so the values narrow to non-null without a cast or assertion.
+	let piResult: Awaited<
+		ReturnType<typeof payments.customer.createCheckoutPaymentIntent>
+	>;
+	if (isGuest) {
+		piResult = await payments.customer.createGuestCheckoutPaymentIntent({
+			idempotencyKey: body.idempotencyKey,
+			buyerId,
+			// May be absent — a guest has no saved customer; the PI is created
+			// customer-less and the fresh card is attached at confirm.
+			customerId: customerId ?? undefined,
+			amountCents: chargedAmountCents,
+			taxCalculationId: fresh.taxCalculationId ?? undefined,
+			metadata: piMetadata,
+		});
+	} else if (isBnpl) {
+		if (!customerId) {
+			throw errors.internal("Non-guest claim reached charge with no customer", {
+				code: "CHECKOUT_CHARGE_CONTEXT_MISSING",
 			});
+		}
+		piResult = await payments.customer.createBnplCheckoutPaymentIntent({
+			idempotencyKey: body.idempotencyKey,
+			buyerId,
+			customerId,
+			provider: body.bnpl,
+			amountCents: chargedAmountCents,
+			taxCalculationId: fresh.taxCalculationId ?? undefined,
+			metadata: piMetadata,
+			address: toBnplAddress(shipTo, buyer.email),
+		});
+	} else {
+		if (!customerId || !paymentMethod) {
+			throw errors.internal(
+				"Card claim reached charge with no customer/method",
+				{
+					code: "CHECKOUT_CHARGE_CONTEXT_MISSING",
+				},
+			);
+		}
+		piResult = await payments.customer.createCheckoutPaymentIntent({
+			idempotencyKey: body.idempotencyKey,
+			buyerId,
+			customerId,
+			paymentMethodId: paymentMethod.stripePaymentMethodId,
+			amountCents: chargedAmountCents,
+			taxCalculationId: fresh.taxCalculationId ?? undefined,
+			metadata: piMetadata,
+		});
+	}
 	if (!piResult.success) {
 		if (piResult.error === PaymentErrorCode.rate_limit_exceeded) {
 			throw errors.tooManyRequests(
@@ -939,7 +987,13 @@ async function replayIfExists({
 		// just the buyer's last redirect not completing, and the retry confirms
 		// fresh via `confirmAffirmPayment`/`confirmKlarnaPayment` client-side. So
 		// for BNPL we skip the re-attach and return the same clientSecret as-is.
-		if (!isBnplClaim(body) && pi.status === "requires_payment_method") {
+		// The guest rail likewise has no saved method — the buyer re-confirms with
+		// a freshly-entered card against the same clientSecret — so it skips too.
+		if (
+			!isBnplClaim(body) &&
+			!isGuestClaim(body) &&
+			pi.status === "requires_payment_method"
+		) {
 			const { stripePaymentMethodId } = await loadReplayWalletContext({
 				db,
 				buyerId,
@@ -1012,6 +1066,7 @@ async function resumeWithoutLinkedPI({
 	}[];
 }): Promise<CheckoutClaimSuccess> {
 	const isBnpl = isBnplClaim(body);
+	const isGuest = isGuestClaim(body);
 
 	const orderIds = siblings.map((s) => s.id);
 	const sellerProfileIds = Array.from(
@@ -1091,6 +1146,18 @@ async function resumeWithoutLinkedPI({
 			taxCalculationId: quote?.taxCalculationId ?? undefined,
 			metadata: replayMetadata,
 			address,
+		});
+	} else if (isGuest) {
+		// Guest resume — recreate the same empty PI (idempotency-keyed, so Stripe
+		// returns the original if it ever landed). No saved customer or method:
+		// the buyer re-confirms with a freshly-entered card against the returned
+		// clientSecret, exactly like the first attempt.
+		piResult = await payments.customer.createGuestCheckoutPaymentIntent({
+			idempotencyKey: body.idempotencyKey,
+			buyerId,
+			amountCents: chargedAmountCents,
+			taxCalculationId: quote?.taxCalculationId ?? undefined,
+			metadata: replayMetadata,
 		});
 	} else {
 		const { customerId, stripePaymentMethodId } = await loadReplayWalletContext(
