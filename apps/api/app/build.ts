@@ -85,7 +85,9 @@ export async function buildApp(options?: BuildAppOptions) {
 		genReqId: idGenerator,
 		trustProxy: true,
 		requestTimeout: REQUEST_TIMEOUT,
-		maxParamLength: 120,
+		routerOptions: {
+			maxParamLength: 120,
+		},
 	});
 
 	fastify.log.info("Starting NoLie API server...");
