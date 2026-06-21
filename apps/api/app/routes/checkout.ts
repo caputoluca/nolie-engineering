@@ -1,4 +1,3 @@
-import { errors } from "@nolie/errors/http";
 import {
 	CheckoutClaimBodySchema,
 	CheckoutClaimSuccessSchema,
@@ -28,29 +27,35 @@ import { buildCheckoutQuote } from "../lib/checkout/quote.js";
 import { createRoutes } from "../lib/factory.js";
 
 export const checkoutRoutes = createRoutes((create, app) => {
-	// Resolve the buyer for a quote (NL-298 guest checkout). Signed in →
-	// the session user. Signed out → mint-or-dedupe a passwordless `User` from
-	// the email on the body (the mint point); the typed ship-to rides back as
-	// `guestShipTo`. No identity at all → 401, since we can't build a quote.
+	// Resolve the buyer for a quote (NL-298 guest checkout). Three lanes, keyed on
+	// the two independent axes — identity and address:
+	//   - Signed in → the session user.
+	//   - Signed out with an email (the no-wallet card lane, email-first) →
+	//     mint-or-dedupe a passwordless `User`; the email is the mint trigger.
+	//   - Signed out without an email (the wallet lane's `onShippingAddressChange`,
+	//     or a first-paint preview) → buyerId null. The express sheet reveals the
+	//     email only at confirm, so the priced quote is persisted identity-less and
+	//     the minted User is stamped on at confirm (`stampGuestQuoteBuyer`).
+	// The typed ship-to rides back as `guestShipTo` whenever the body carries one,
+	// regardless of identity.
 	async function resolveQuoteBuyer(
 		sessionUserId: string | undefined,
 		guest: GuestCheckoutInput | undefined,
-	): Promise<{ buyerId: string; guestShipTo: GuestCheckoutShipTo | null }> {
+	): Promise<{
+		buyerId: string | null;
+		guestShipTo: GuestCheckoutShipTo | null;
+	}> {
 		if (sessionUserId) return { buyerId: sessionUserId, guestShipTo: null };
-		if (!guest) {
-			throw errors.unauthorized(
-				"Enter your email to check out as a guest, or sign in.",
-				{ code: "CHECKOUT_IDENTITY_REQUIRED" },
-			);
-		}
+		const guestShipTo = guest?.shippingAddress ?? null;
+		if (!guest?.email) return { buyerId: null, guestShipTo };
 		const { userId } = await resolveCheckoutBuyer({
 			db: app.prisma,
 			auth: app.auth,
 			email: guest.email,
-			firstName: guest.firstName,
+			firstName: guest.firstName ?? "",
 			lastName: guest.lastName ?? "",
 		});
-		return { buyerId: userId, guestShipTo: guest.shippingAddress ?? null };
+		return { buyerId: userId, guestShipTo };
 	}
 
 	// POST not GET — building a quote inserts a CheckoutQuote row + calls

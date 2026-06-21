@@ -841,7 +841,10 @@ interface PersistedQuoteLine {
 
 interface PersistedQuote {
 	id: string;
-	buyerId: string;
+	// Nullable since NL-298 Phase 5 (the wallet lane's identity-less quote). A
+	// real claim always stamps a buyer first, so `ensureQuoteUsable`'s
+	// `buyerId !== buyerId` check rejects a still-null (unstamped) quote.
+	buyerId: string | null;
 	consumedByOrderId: string | null;
 	expiresAt: Date;
 	shippingAddressId: string | null;
