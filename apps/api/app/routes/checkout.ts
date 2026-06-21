@@ -91,6 +91,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 			// Anonymous buy-now returns a real address-less preview; anonymous
 			// cart-source returns an empty quote (the guest cart is client-side only).
 			const sessionUserId = request.session?.user?.id;
+			const isGuest = !sessionUserId;
 			const { buyerId, guestShipTo } = await resolveQuoteBuyer(
 				sessionUserId,
 				request.body.guest,
@@ -103,9 +104,14 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				requestedShippingAddressId: request.body.shippingAddressId,
 				fulfillmentChoiceByListing: request.body.fulfillment,
 				useCredit: request.body.useCredit,
+				// Wallet credit is an authenticated-buyer entitlement (NL-298): a
+				// sessionless quote dedupes a typed email to a real account, so the
+				// lib skips that account's wallet entirely rather than auto-spending
+				// its credit (which would zero out `payableCents`).
+				isGuest,
 				guestShipTo,
 			});
-			return reply.status(200).send({ ...quote, isGuest: !sessionUserId });
+			return reply.status(200).send({ ...quote, isGuest });
 		},
 	});
 
@@ -136,8 +142,9 @@ export const checkoutRoutes = createRoutes((create, app) => {
 			},
 		},
 		handler: async (request, reply) => {
+			const sessionUserId = request.session?.user?.id;
 			const { buyerId, guestShipTo } = await resolveQuoteBuyer(
-				request.session?.user?.id,
+				sessionUserId,
 				request.body.guest,
 			);
 			const full = await buildCheckoutQuote({
@@ -148,6 +155,9 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				requestedShippingAddressId: request.body.shippingAddressId,
 				fulfillmentChoiceByListing: request.body.fulfillment,
 				useCredit: request.body.useCredit,
+				// Sessionless quotes never touch a deduped account's wallet — see
+				// POST `/` above.
+				isGuest: !sessionUserId,
 				guestShipTo,
 			});
 			return reply.status(200).send({
