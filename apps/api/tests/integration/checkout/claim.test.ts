@@ -46,14 +46,19 @@ import {
 
 describe("POST /checkout/claim", () => {
 	describe("auth + input validation", () => {
-		it("returns 401 when unauthenticated", async () => {
+		it("treats an unauthenticated claim as a guest — an unknown quote is 422 INVALID_QUOTE", async () => {
+			// NL-298 — claim is `optional`-auth: a signed-out caller is a guest, and
+			// the quote cuid (not a session) is the capability. A nonexistent quote
+			// fails buyer resolution with the same INVALID_QUOTE the authed path
+			// throws — no 401.
 			const api = createUnauthenticatedClient();
 			const response = await api.post("/checkout/claim", {
-				quoteId: "anything",
-				paymentMethodId: "anything",
-				idempotencyKey: "anything",
+				quoteId: "does-not-exist",
+				collectPaymentMethod: true,
+				idempotencyKey: uniqueIdempotencyKey("anon-claim"),
 			});
-			expect(response.statusCode).toBe(401);
+			const body = await assertResponse<{ code: string }>(response, 422);
+			expect(body.code).toBe("INVALID_QUOTE");
 		});
 
 		it("returns 400 INVALID_IDEMPOTENCY_KEY_FORMAT for malformed keys", async () => {

@@ -9,8 +9,12 @@ type JSONOrZodSchema = z.ZodTypeAny | Record<string, unknown>;
 // Session type from the auth system
 type SessionType = NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>;
 
-interface CreateRouteAuth<TPublic extends boolean = false> extends AuthConfig {
+interface CreateRouteAuth<
+	TPublic extends boolean = false,
+	TOptional extends boolean = false,
+> extends AuthConfig {
 	public?: TPublic;
+	optional?: TOptional;
 }
 interface CreateRouteSchema<
 	TBody extends JSONOrZodSchema | undefined = undefined,
@@ -46,8 +50,9 @@ interface CreateRouteOptions<
 		JSONOrZodSchema
 	>,
 	TPublic extends boolean = false,
+	TOptional extends boolean = false,
 > extends Omit<RouteOptions, "handler"> {
-	auth?: CreateRouteAuth<TPublic>;
+	auth?: CreateRouteAuth<TPublic, TOptional>;
 	config?: Omit<RouteOptions["config"], "auth">;
 	schema?: CreateRouteSchema<TBody, TQuery, TParams, THeaders, TRes>;
 	handler: (
@@ -67,7 +72,9 @@ interface CreateRouteOptions<
 		}> &
 			(TPublic extends true
 				? { session: SessionType | null }
-				: { session: SessionType }),
+				: TOptional extends true
+					? { session: SessionType | null }
+					: { session: SessionType }),
 		reply: FastifyReply<{
 			Reply: TRes extends Record<number, z.ZodTypeAny>
 				? z.infer<TRes[keyof TRes]>
@@ -145,9 +152,18 @@ function createRoute<
 		JSONOrZodSchema
 	>,
 	TPublic extends boolean = false,
+	TOptional extends boolean = false,
 >(
 	fastify: FastifyInstance,
-	opts: CreateRouteOptions<TBody, TQuery, TParams, THeaders, TRes, TPublic>,
+	opts: CreateRouteOptions<
+		TBody,
+		TQuery,
+		TParams,
+		THeaders,
+		TRes,
+		TPublic,
+		TOptional
+	>,
 ) {
 	const { schema, handler, auth, config, ...rest } = opts;
 
@@ -171,8 +187,17 @@ type RouterFn = <
 		JSONOrZodSchema
 	>,
 	TPublic extends boolean = false,
+	TOptional extends boolean = false,
 >(
-	opts: CreateRouteOptions<TBody, TQuery, TParams, THeaders, TRes, TPublic>,
+	opts: CreateRouteOptions<
+		TBody,
+		TQuery,
+		TParams,
+		THeaders,
+		TRes,
+		TPublic,
+		TOptional
+	>,
 ) => void;
 type RouterMethod = <
 	TBody extends JSONOrZodSchema | undefined = undefined,
@@ -184,10 +209,19 @@ type RouterMethod = <
 		JSONOrZodSchema
 	>,
 	TPublic extends boolean = false,
+	TOptional extends boolean = false,
 >(
 	url: string,
 	opts: Omit<
-		CreateRouteOptions<TBody, TQuery, TParams, THeaders, TRes, TPublic>,
+		CreateRouteOptions<
+			TBody,
+			TQuery,
+			TParams,
+			THeaders,
+			TRes,
+			TPublic,
+			TOptional
+		>,
 		"method" | "url"
 	>,
 ) => void;

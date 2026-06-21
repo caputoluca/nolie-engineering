@@ -10,6 +10,15 @@ import {
 
 export interface AuthConfig {
 	public?: boolean;
+	/**
+	 * Optional auth (NL-298): resolve the session when a cookie is present, but
+	 * continue without one instead of 401ing. Distinct from `public`, which
+	 * skips session resolution entirely — that would blind the route to a
+	 * logged-in cookie and treat every caller as anonymous. Use this for routes
+	 * that serve both signed-in and signed-out callers (guest checkout), then
+	 * read `request.session?.user?.id`.
+	 */
+	optional?: boolean;
 	role?: UserRoleType | UserRoleType[];
 }
 
@@ -51,6 +60,11 @@ export const protectPlugin = fp(
 				const session = await getSession(request.headers, fastify.auth);
 
 				if (!session) {
+					// Optional-auth routes serve anonymous callers (guest checkout):
+					// no session is fine, just continue with `request.session` unset.
+					if (authConfig?.optional) {
+						return;
+					}
 					fastify.log.warn(
 						{
 							url: request.url,

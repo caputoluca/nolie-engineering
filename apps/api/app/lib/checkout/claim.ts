@@ -280,10 +280,14 @@ export async function claimCheckout(
 		});
 	}
 
-	const shipAddress =
+	// Authed quotes resolve the ship-to from the saved-address book; a guest
+	// quote (NL-298) carries the typed ship-to raw on the quote itself. Both
+	// converge on the same shape so the country gate, tax address, and Order
+	// ship-to snapshot below are rail-agnostic.
+	const shipAddress: ClaimShipAddress | null =
 		quote.shippingAddressId && buyer.shippingAddresses
 			? (buyer.shippingAddresses[0] ?? null)
-			: null;
+			: guestShipAddressFromQuote(quote);
 	if (quote.shippingAddressId && !shipAddress) {
 		throw errors.badRequest("Shipping address not found for this buyer", {
 			code: "SHIPPING_ADDRESS_NOT_FOUND",
@@ -841,6 +845,17 @@ interface PersistedQuote {
 	consumedByOrderId: string | null;
 	expiresAt: Date;
 	shippingAddressId: string | null;
+	// NL-298 — a guest's typed ship-to, persisted raw on the quote (guests have
+	// no saved `ShippingAddress`). Null on authed quotes, which carry a
+	// `shippingAddressId` instead. Read back here for the tax recompute + the
+	// Order ship-to snapshot.
+	guestShipToName: string | null;
+	guestShipToLine1: string | null;
+	guestShipToLine2: string | null;
+	guestShipToCity: string | null;
+	guestShipToState: string | null;
+	guestShipToPostalCode: string | null;
+	guestShipToCountry: string | null;
 	cartHash: string | null;
 	totalCents: number;
 	appliedCreditCents: number;
@@ -873,6 +888,42 @@ function ensureQuoteUsable(
 		});
 	}
 	return quote;
+}
+
+/** Unified ship-to shape — a saved-address row or a guest's quote-borne ship-to. */
+interface ClaimShipAddress {
+	id: string | null;
+	fullName: string;
+	line1: string;
+	line2: string | null;
+	city: string;
+	state: string;
+	postalCode: string;
+	country: string;
+}
+
+/**
+ * NL-298 — reconstruct the ship-to from a guest quote's persisted raw fields
+ * (the guest has no saved `ShippingAddress`). Null when the quote carries no
+ * guest ship-to (an authed quote, or a 100%-pickup guest quote). The seven
+ * columns are always written together, so a present `line1` implies the rest.
+ */
+function guestShipAddressFromQuote(
+	quote: PersistedQuote,
+): ClaimShipAddress | null {
+	if (!quote.guestShipToLine1) return null;
+	return {
+		// Guests always supply a recipient name (schema-required), so this is set
+		// whenever the address is; `?? ""` only satisfies the nullable column type.
+		id: null,
+		fullName: quote.guestShipToName ?? "",
+		line1: quote.guestShipToLine1,
+		line2: quote.guestShipToLine2,
+		city: quote.guestShipToCity ?? "",
+		state: quote.guestShipToState ?? "",
+		postalCode: quote.guestShipToPostalCode ?? "",
+		country: quote.guestShipToCountry ?? "",
+	};
 }
 
 async function replayIfExists({
