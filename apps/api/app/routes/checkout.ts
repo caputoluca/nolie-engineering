@@ -1,6 +1,7 @@
 import {
 	CheckoutClaimBodySchema,
 	CheckoutClaimSuccessSchema,
+	isGuestClaim,
 } from "@nolie/schemas/checkout/claim";
 import {
 	CheckoutConfirmationQuerySchema,
@@ -22,6 +23,7 @@ import {
 	getGuestClaimBuyerId,
 	onboardGuestOnFirstPurchase,
 	resolveCheckoutBuyer,
+	stampGuestQuoteBuyer,
 } from "../lib/checkout/guest-buyer.js";
 import { buildCheckoutQuote } from "../lib/checkout/quote.js";
 import { createRoutes } from "../lib/factory.js";
@@ -216,6 +218,28 @@ export const checkoutRoutes = createRoutes((create, app) => {
 			// snapshots it onto the Order.
 			const sessionUserId = request.session?.user?.id;
 			const isGuest = !sessionUserId;
+
+			// Wallet lane (NL-298 Phase 5): the express sheet revealed the email +
+			// full address only now, at confirm. Mint/dedupe the buyer and stamp it
+			// + the finalized ship-to onto the identity-less quote (buyerId null)
+			// before claiming — so the quote carries a real buyer + complete address
+			// by the time `claimCheckout` runs, exactly as the card lane does at
+			// quote time. Ignored when authed (the session buyer wins).
+			const walletIdentity = isGuestClaim(request.body)
+				? request.body.walletIdentity
+				: undefined;
+			if (isGuest && walletIdentity) {
+				await stampGuestQuoteBuyer({
+					db: app.prisma,
+					auth: app.auth,
+					quoteId: request.body.quoteId,
+					email: walletIdentity.email,
+					firstName: walletIdentity.firstName,
+					lastName: walletIdentity.lastName ?? "",
+					shipTo: walletIdentity.shipTo,
+				});
+			}
+
 			const buyerId =
 				sessionUserId ??
 				(await getGuestClaimBuyerId({

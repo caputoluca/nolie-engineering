@@ -129,6 +129,15 @@ export async function claimCheckout(
 	const { db, payments, buyerId, body } = input;
 	const isBnpl = isBnplClaim(body);
 	const isGuest = isGuestClaim(body);
+	// NL-298 Phase 5 — the wallet lane priced its quote from the redacted,
+	// street-less address Apple/Google reveal at `onShippingAddressChange`
+	// (ZIP-centroid tax). The buyer authorized that exact total in the sheet and
+	// we can't raise it, so the tax recompute below must reproduce the ZIP-centroid
+	// basis (recompute street-less) rather than rooftop — else an intra-ZIP tax
+	// boundary would trip a spurious `PRICE_CHANGED` after the sheet authorized.
+	// `walletIdentity` (present only on this lane's claim) is the signal; the
+	// finalized street is for the Order's shipping snapshot, not the tax.
+	const isWalletLane = isGuestClaim(body) && !!body.walletIdentity;
 
 	// 0) Validate idempotency key format up-front. Cheap synchronous check —
 	//    rejects low-entropy / malformed keys before they hit any DB or Stripe
@@ -327,11 +336,18 @@ export async function claimCheckout(
 	const pickupSnapshotByLocationId = await loadPickupSnapshots(db, listings);
 
 	// 5) Resolve the tax address. Mirror quote-time logic: if any ship line, use
-	//    buyer ship-to; else first pickup location.
+	//    buyer ship-to; else first pickup location. For the wallet lane, strip the
+	//    street so the recompute reproduces the ZIP-centroid basis the buyer
+	//    authorized in the sheet (the quote was priced street-less). The full
+	//    `shipAddress` still drives the country gate + the Order ship-to snapshot.
+	const taxShipAddress =
+		isWalletLane && shipAddress
+			? { ...shipAddress, line1: undefined }
+			: shipAddress;
 	const taxAddress = resolveClaimTaxAddress({
 		listings,
 		buyerChoiceByListing,
-		shipAddress,
+		shipAddress: taxShipAddress,
 		pickupSnapshotByLocationId,
 	});
 	if (!taxAddress) {
@@ -1399,7 +1415,8 @@ async function loadPickupSnapshots(
 }
 
 interface TaxAddress {
-	line1: string;
+	/** Optional — absent for the wallet lane's ZIP-centroid (street-less) tax basis. */
+	line1?: string;
 	line2: string | null;
 	city: string;
 	state: string;
@@ -1411,7 +1428,7 @@ function resolveClaimTaxAddress(input: {
 	listings: CheckoutListing[];
 	buyerChoiceByListing: Map<string, FulfillmentMethodType>;
 	shipAddress: {
-		line1: string;
+		line1?: string;
 		line2: string | null;
 		city: string;
 		state: string;
