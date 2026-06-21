@@ -20,7 +20,7 @@ import {
 import { claimCheckout } from "../lib/checkout/claim.js";
 import { getCheckoutConfirmation } from "../lib/checkout/confirmation.js";
 import {
-	getGuestClaimContext,
+	getGuestClaimBuyerId,
 	onboardGuestOnFirstPurchase,
 	resolveCheckoutBuyer,
 } from "../lib/checkout/guest-buyer.js";
@@ -177,24 +177,19 @@ export const checkoutRoutes = createRoutes((create, app) => {
 			},
 		},
 		handler: async (request, reply) => {
+			// Guest claim (NL-298) has no session: the buyer comes off the quote
+			// (the quote cuid is the bearer capability), resolved before the claim
+			// so `claimCheckout`'s `quote.buyerId === buyerId` check passes by
+			// construction. The ship-to rides the quote into the claim, which
+			// snapshots it onto the Order.
 			const sessionUserId = request.session?.user?.id;
-			// Guest claim (NL-298) has no session: the buyer + ship-to come off
-			// the quote (the quote cuid is the bearer capability). Resolved before
-			// the claim so `claimCheckout`'s `quote.buyerId === buyerId` check
-			// passes by construction.
-			let buyerId: string;
-			let guestContext: Awaited<
-				ReturnType<typeof getGuestClaimContext>
-			> | null = null;
-			if (sessionUserId) {
-				buyerId = sessionUserId;
-			} else {
-				guestContext = await getGuestClaimContext({
+			const isGuest = !sessionUserId;
+			const buyerId =
+				sessionUserId ??
+				(await getGuestClaimBuyerId({
 					db: app.prisma,
 					quoteId: request.body.quoteId,
-				});
-				buyerId = guestContext.buyerId;
-			}
+				}));
 
 			const result = await claimCheckout({
 				db: app.prisma,
@@ -209,11 +204,11 @@ export const checkoutRoutes = createRoutes((create, app) => {
 			});
 
 			// First-purchase onboarding (exactly-once via the `guestOnboardedAt`
-			// CAS) — fires the deferred signup side-effects and saves the ship-to
-			// as the new account's default address. Runs only on the sessionless
-			// guest path; the CAS no-ops for a deduped real account, so a typed
-			// email never mutates someone else's account.
-			if (guestContext) {
+			// CAS) — fires the deferred signup side-effects. Runs only on the
+			// sessionless guest path; the CAS no-ops for a deduped real account, so
+			// a typed email never mutates someone else's account. The address book
+			// is NOT populated here (deferred to the Phase 6 verified claim).
+			if (isGuest) {
 				await onboardGuestOnFirstPurchase({
 					db: app.prisma,
 					queues: app.queues,
@@ -223,7 +218,6 @@ export const checkoutRoutes = createRoutes((create, app) => {
 					ipAddress: request.ip,
 					userAgent: request.headers["user-agent"] ?? null,
 					referralHeaders: request.headers,
-					guestShipTo: guestContext.shipTo,
 				});
 			}
 
