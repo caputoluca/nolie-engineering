@@ -62,6 +62,16 @@ export const checkoutRoutes = createRoutes((create, app) => {
 	// Stripe Tax. Side-effectful, so it shouldn't be cacheable / idempotent.
 	create.post("/", {
 		auth: { optional: true },
+		// Auth-optional since NL-298 — cap anonymous callers tighter than the global
+		// tier (this can build a quote + call Stripe Tax). SSR's bundled call is
+		// allowlisted via the internal token, so this only bites browser/direct hits.
+		config: {
+			rateLimit: {
+				max: app.rateLimiting.limits.checkoutQuote.max,
+				timeWindow: app.rateLimiting.limits.checkoutQuote.timeWindow,
+				keyGenerator: app.rateLimiting.keyGenerators.checkoutQuote,
+			},
+		},
 		schema: {
 			body: CheckoutQuoteBodySchema,
 			response: {
@@ -104,6 +114,16 @@ export const checkoutRoutes = createRoutes((create, app) => {
 	// the Stripe Tax call when the buyer toggles back to a recently-seen state.
 	create.post("/quote", {
 		auth: { optional: true },
+		// The browser-facing recompute + the guest preview/priced quote (a guest
+		// quote skips the cart-hash dedupe, so every priced call is a fresh Stripe
+		// Tax calc). Tighter than the global tier; SSR is allowlisted.
+		config: {
+			rateLimit: {
+				max: app.rateLimiting.limits.checkoutQuote.max,
+				timeWindow: app.rateLimiting.limits.checkoutQuote.timeWindow,
+				keyGenerator: app.rateLimiting.keyGenerators.checkoutQuote,
+			},
+		},
 		schema: {
 			body: CheckoutQuoteLightBodySchema,
 			response: {
