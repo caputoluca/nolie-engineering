@@ -48,7 +48,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 			auth: app.auth,
 			email: guest.email,
 			firstName: guest.firstName,
-			lastName: guest.lastName,
+			lastName: guest.lastName ?? "",
 		});
 		return { buyerId: userId, guestShipTo: guest.shippingAddress ?? null };
 	}
