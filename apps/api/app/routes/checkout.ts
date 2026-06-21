@@ -1,3 +1,4 @@
+import { errors } from "@nolie/errors/http";
 import {
 	CheckoutClaimBodySchema,
 	CheckoutClaimSuccessSchema,
@@ -72,6 +73,18 @@ export const checkoutRoutes = createRoutes((create, app) => {
 			},
 		},
 		handler: async (request, reply) => {
+			// The full quote is the page's SSR entry point + the authed init. An
+			// anonymous request with no guest body is the signed-out *session probe*:
+			// 401 so the page renders the public guest checkout, which fetches its own
+			// address-less preview client-side via POST /checkout/quote (the light
+			// recompute endpoint, which does serve anonymous previews). A guest body
+			// (the card lane's email or the wallet lane's address) is a real guest
+			// quote and proceeds through the tri-state resolver.
+			if (!request.session?.user?.id && !request.body.guest) {
+				throw errors.unauthorized("Sign in or check out as a guest.", {
+					code: "CHECKOUT_IDENTITY_REQUIRED",
+				});
+			}
 			const { buyerId, guestShipTo } = await resolveQuoteBuyer(
 				request.session?.user?.id,
 				request.body.guest,
