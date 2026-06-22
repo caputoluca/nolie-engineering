@@ -48,7 +48,6 @@ import { healthRoutes } from "./routes/health.js";
 import { klaviyoRoutes } from "./routes/klaviyo.js";
 import { listingRoutes } from "./routes/listings/index.js";
 import { meRoutes } from "./routes/me/index.js";
-import { moderationRoutes } from "./routes/moderations.js";
 import { offerRoutes } from "./routes/offers.js";
 import { realtimeRoutes } from "./routes/realtime.js";
 import { recentlyViewedRoutes } from "./routes/recently-viewed.js";
@@ -210,7 +209,6 @@ export async function buildApp(options?: BuildAppOptions) {
 		prefix: "/shipping/easypost",
 	});
 	await fastify.register(klaviyoRoutes, { prefix: "/klaviyo" });
-	await fastify.register(moderationRoutes, { prefix: "/moderations" });
 	await fastify.register(sitemapRoutes, { prefix: "/sitemap" });
 	await fastify.register(exploreRoutes, { prefix: "/explore" });
 	await fastify.register(sellersRoutes, { prefix: "/sellers" });
