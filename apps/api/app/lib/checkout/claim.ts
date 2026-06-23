@@ -485,7 +485,11 @@ export async function claimCheckout(
 				state: shipAddress.state,
 				postalCode: shipAddress.postalCode,
 				country: shipAddress.country,
-				phone: buyer.phone,
+				// NL-298 — a guest never provides a phone (the typed ship-to carries
+				// none) and a typed email can dedupe to a real account, so the deduped
+				// account's phone must NOT snapshot onto the Order: it would surface on
+				// the sessionless, token-scoped confirmation (a cross-account PII leak).
+				phone: isGuest ? null : buyer.phone,
 			}
 		: null;
 
@@ -745,9 +749,13 @@ export async function claimCheckout(
 		piResult = await payments.customer.createGuestCheckoutPaymentIntent({
 			idempotencyKey: body.idempotencyKey,
 			buyerId,
-			// May be absent — a guest has no saved customer; the PI is created
-			// customer-less and the fresh card is attached at confirm.
-			customerId: customerId ?? undefined,
+			// Always customer-less on the guest rail: the fresh card is attached at
+			// confirm. NL-298 — never inherit the customer of a deduped real account
+			// (a typed email isn't proof of inbox ownership). Attaching the guest
+			// charge to their Stripe customer breaks isolation and would, once
+			// `setup_future_usage` ships (card vault), vault a stranger's card onto
+			// their customer.
+			customerId: undefined,
 			amountCents: chargedAmountCents,
 			taxCalculationId: fresh.taxCalculationId ?? undefined,
 			metadata: piMetadata,
