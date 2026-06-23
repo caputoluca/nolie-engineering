@@ -367,7 +367,12 @@ export async function claimCheckout(
 		items: groupableItems,
 		groups: validatedGroups,
 		taxAddress,
-		taxExempt: buyer.taxExemptStatus === "approved",
+		// NL-298 — a guest's typed email can dedupe to a real (possibly tax-exempt)
+		// account, but a typed email is not proof of inbox ownership, so the
+		// exemption must not apply on a sessionless claim. Mirrors the quote path,
+		// which skips the buyer load entirely for guests. To use the exemption, the
+		// buyer signs in.
+		taxExempt: !isGuest && buyer.taxExemptStatus === "approved",
 		payments,
 	});
 
