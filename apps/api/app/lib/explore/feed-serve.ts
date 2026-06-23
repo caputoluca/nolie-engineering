@@ -112,13 +112,24 @@ interface FeedRow {
  * resident). A scroll that outlives the retain window finds its epoch swept and
  * ends gracefully (empty page, null cursor) — far beyond any real session at a
  * ≤10-min roll cadence.
+ *
+ * Returns `null` to signal "this epoch isn't materialized — fall back" when a
+ * FRESH page finds no `feed_entry` rows for the epoch at all. Serving auto-
+ * enables after the worker's first good tick (it can't be flipped manually —
+ * prod Redis is private), so the API must self-protect: if a later tick stops
+ * materializing while the flag stays on, a `null` here routes the dispatcher to
+ * the snapshot path instead of serving an empty /explore. An honest empty
+ * filtered result (epoch IS materialized, the filter just matched nothing) is a
+ * real empty page, NOT a `null`. Continuation pages never return `null` — an
+ * empty continuation is the end of the scroll, and falling back mid-scroll
+ * would restart at the snapshot's offset 0 and re-serve the whole feed.
  */
 export async function loadMaterializedExploreListings(
 	db: DbClient,
 	query: ExploreQueryType,
 	currentEpoch: number,
 	requestQueryId: string,
-): Promise<LoadExploreListingsResult> {
+): Promise<LoadExploreListingsResult | null> {
 	const limit = query.limit ?? DEFAULT_EXPLORE_LIMIT;
 	const parsed = query.cursor ? decodeCursor(query.cursor) : null;
 
@@ -171,6 +182,21 @@ export async function loadMaterializedExploreListings(
 	const pageRows = rows.slice(0, limit);
 
 	if (pageRows.length === 0) {
+		// A continuation page that runs dry is the end of the scroll (or a swept
+		// epoch) — terminate gracefully, never fall back mid-scroll.
+		if (parsed) {
+			return { listings: [], nextCursor: null, impressions: [], queryId };
+		}
+		// Fresh page with no rows: distinguish an unmaterialized epoch (→ null,
+		// caller falls back to the snapshot path) from a filter that legitimately
+		// matched nothing (→ honest empty page). The existence probe is a single
+		// indexed LIMIT 1, run only in this rare zero-result case.
+		const present = await db.$queryRaw<{ ok: number }[]>`
+			SELECT 1 AS ok FROM "feed_entry"
+			WHERE "surface" = 'explore' AND "epoch" = ${epoch}
+			LIMIT 1
+		`;
+		if (present.length === 0) return null;
 		return { listings: [], nextCursor: null, impressions: [], queryId };
 	}
 

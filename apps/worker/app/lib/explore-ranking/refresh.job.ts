@@ -10,6 +10,7 @@ import {
 	computeRankScore,
 	DEFAULT_RANKING_CONFIG,
 	DEFAULT_SLOT_POLICY,
+	EXPLORE_FEED_SERVING_ENABLED_KEY,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
 	effectivePriceUSD,
@@ -1317,6 +1318,18 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 	// the epoch, so flip the kill switch on — but NX, so a human "0" stays a
 	// durable disable and we never overwrite an intentional kill.
 	await redis.set(EXPLORE_RANKING_ENABLED_KEY, "1", "NX");
+
+	// NL-384: self-enable the materialized serving path the SAME way, gated on a
+	// successful materialize (rows written for the now-current epoch). Prod Redis
+	// is on a private network, so there's no manual flip — the first good tick
+	// turns serving on, exactly like the kill switch above. NX so an ops "0"
+	// (the one off-switch, via the same prod-network escape hatch as the kill
+	// switch) is a durable disable. The API serve path still fails safe to the
+	// snapshot path if a later tick stops materializing, so auto-on can't strand
+	// /explore on an empty epoch.
+	if (feedEntriesWritten > 0) {
+		await redis.set(EXPLORE_FEED_SERVING_ENABLED_KEY, "1", "NX");
+	}
 
 	logger.info(
 		{

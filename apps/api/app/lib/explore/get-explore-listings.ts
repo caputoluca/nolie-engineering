@@ -672,10 +672,17 @@ export async function getExploreListings(
 					parseEpoch(epochRaw),
 					queryId,
 				);
-				if (onImpressions && result.impressions.length > 0) {
-					onImpressions(result.impressions);
+				// `null` ⇒ this epoch isn't materialized yet (the pre-first-tick
+				// window, or a worker materialize outage). Fall through to the
+				// snapshot path WITHOUT a Sentry error — it's an expected,
+				// self-healing state, not a fault. A genuine throw is the fault and
+				// is reported below.
+				if (result) {
+					if (onImpressions && result.impressions.length > 0) {
+						onImpressions(result.impressions);
+					}
+					return result;
 				}
-				return result;
 			} catch (err) {
 				reportError(err, { operation: "getExploreListings.feedEntry" });
 				logger.error(
