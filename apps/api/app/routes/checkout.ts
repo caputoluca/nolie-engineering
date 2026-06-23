@@ -1,6 +1,7 @@
 import {
 	CheckoutClaimBodySchema,
 	CheckoutClaimSuccessSchema,
+	isGuestClaim,
 } from "@nolie/schemas/checkout/claim";
 import {
 	CheckoutConfirmationQuerySchema,
@@ -9,6 +10,8 @@ import {
 import {
 	CheckoutQuoteBodySchema,
 	CheckoutQuoteResponseSchema,
+	type GuestCheckoutInput,
+	type GuestCheckoutShipTo,
 } from "@nolie/schemas/checkout/quote";
 import {
 	CheckoutQuoteLightBodySchema,
@@ -16,32 +19,99 @@ import {
 } from "@nolie/schemas/checkout/quote-light";
 import { claimCheckout } from "../lib/checkout/claim.js";
 import { getCheckoutConfirmation } from "../lib/checkout/confirmation.js";
+import {
+	getGuestClaimBuyerId,
+	onboardGuestOnFirstPurchase,
+	resolveCheckoutBuyer,
+	stampGuestQuoteBuyer,
+} from "../lib/checkout/guest-buyer.js";
 import { buildCheckoutQuote } from "../lib/checkout/quote.js";
 import { createRoutes } from "../lib/factory.js";
 
 export const checkoutRoutes = createRoutes((create, app) => {
+	// Resolve the buyer for a quote (NL-298 guest checkout). Three lanes, keyed on
+	// the two independent axes — identity and address:
+	//   - Signed in → the session user.
+	//   - Signed out with an email (the no-wallet card lane, email-first) →
+	//     mint-or-dedupe a passwordless `User`; the email is the mint trigger.
+	//   - Signed out without an email (the wallet lane's `onShippingAddressChange`,
+	//     or a first-paint preview) → buyerId null. The express sheet reveals the
+	//     email only at confirm, so the priced quote is persisted identity-less and
+	//     the minted User is stamped on at confirm (`stampGuestQuoteBuyer`).
+	// The typed ship-to rides back as `guestShipTo` whenever the body carries one,
+	// regardless of identity.
+	async function resolveQuoteBuyer(
+		sessionUserId: string | undefined,
+		guest: GuestCheckoutInput | undefined,
+	): Promise<{
+		buyerId: string | null;
+		guestShipTo: GuestCheckoutShipTo | null;
+	}> {
+		if (sessionUserId) return { buyerId: sessionUserId, guestShipTo: null };
+		const guestShipTo = guest?.shippingAddress ?? null;
+		if (!guest?.email) return { buyerId: null, guestShipTo };
+		const { userId } = await resolveCheckoutBuyer({
+			db: app.prisma,
+			auth: app.auth,
+			email: guest.email,
+			firstName: guest.firstName ?? "",
+			lastName: guest.lastName ?? "",
+		});
+		return { buyerId: userId, guestShipTo };
+	}
+
 	// POST not GET — building a quote inserts a CheckoutQuote row + calls
 	// Stripe Tax. Side-effectful, so it shouldn't be cacheable / idempotent.
 	create.post("/", {
+		auth: { optional: true },
+		// Auth-optional since NL-298 — cap anonymous callers tighter than the global
+		// tier (this can build a quote + call Stripe Tax). SSR's bundled call is
+		// allowlisted via the internal token, so this only bites browser/direct hits.
+		config: {
+			rateLimit: {
+				max: app.rateLimiting.limits.checkoutQuote.max,
+				timeWindow: app.rateLimiting.limits.checkoutQuote.timeWindow,
+				keyGenerator: app.rateLimiting.keyGenerators.checkoutQuote,
+			},
+		},
 		schema: {
 			body: CheckoutQuoteBodySchema,
 			response: {
 				200: CheckoutQuoteResponseSchema,
 				400: app.getErrorSchema("badRequest"),
+				401: app.getErrorSchema("unauthorized"),
 				404: app.getErrorSchema("notFound"),
 			},
 		},
 		handler: async (request, reply) => {
+			// The full quote is the page's SSR entry point + the authed init. It
+			// resolves the session (optional auth) and stamps `isGuest` so the SSR
+			// page can branch signed-out → public guest checkout and seed this same
+			// response as the guest page's first-paint preview (no client refetch).
+			// Anonymous buy-now returns a real address-less preview; anonymous
+			// cart-source returns an empty quote (the guest cart is client-side only).
+			const sessionUserId = request.session?.user?.id;
+			const isGuest = !sessionUserId;
+			const { buyerId, guestShipTo } = await resolveQuoteBuyer(
+				sessionUserId,
+				request.body.guest,
+			);
 			const quote = await buildCheckoutQuote({
 				db: app.prisma,
 				payments: app.payments,
-				buyerId: request.session.user.id,
+				buyerId,
 				listingIds: request.body.listingIds,
 				requestedShippingAddressId: request.body.shippingAddressId,
 				fulfillmentChoiceByListing: request.body.fulfillment,
 				useCredit: request.body.useCredit,
+				// Wallet credit is an authenticated-buyer entitlement (NL-298): a
+				// sessionless quote dedupes a typed email to a real account, so the
+				// lib skips that account's wallet entirely rather than auto-spending
+				// its credit (which would zero out `payableCents`).
+				isGuest,
+				guestShipTo,
 			});
-			return reply.status(200).send(quote);
+			return reply.status(200).send({ ...quote, isGuest });
 		},
 	});
 
@@ -51,23 +121,44 @@ export const checkoutRoutes = createRoutes((create, app) => {
 	// values from the bundled init call. Cart-hash dedupe (in the lib) skips
 	// the Stripe Tax call when the buyer toggles back to a recently-seen state.
 	create.post("/quote", {
+		auth: { optional: true },
+		// The browser-facing recompute + the guest preview/priced quote (a guest
+		// quote skips the cart-hash dedupe, so every priced call is a fresh Stripe
+		// Tax calc). Tighter than the global tier; SSR is allowlisted.
+		config: {
+			rateLimit: {
+				max: app.rateLimiting.limits.checkoutQuote.max,
+				timeWindow: app.rateLimiting.limits.checkoutQuote.timeWindow,
+				keyGenerator: app.rateLimiting.keyGenerators.checkoutQuote,
+			},
+		},
 		schema: {
 			body: CheckoutQuoteLightBodySchema,
 			response: {
 				200: CheckoutQuoteLightResponseSchema,
 				400: app.getErrorSchema("badRequest"),
+				401: app.getErrorSchema("unauthorized"),
 				404: app.getErrorSchema("notFound"),
 			},
 		},
 		handler: async (request, reply) => {
+			const sessionUserId = request.session?.user?.id;
+			const { buyerId, guestShipTo } = await resolveQuoteBuyer(
+				sessionUserId,
+				request.body.guest,
+			);
 			const full = await buildCheckoutQuote({
 				db: app.prisma,
 				payments: app.payments,
-				buyerId: request.session.user.id,
+				buyerId,
 				listingIds: request.body.listingIds,
 				requestedShippingAddressId: request.body.shippingAddressId,
 				fulfillmentChoiceByListing: request.body.fulfillment,
 				useCredit: request.body.useCredit,
+				// Sessionless quotes never touch a deduped account's wallet — see
+				// POST `/` above.
+				isGuest: !sessionUserId,
+				guestShipTo,
 			});
 			return reply.status(200).send({
 				quoteId: full.quoteId,
@@ -84,23 +175,25 @@ export const checkoutRoutes = createRoutes((create, app) => {
 		},
 	});
 
-	// Powers the post-checkout success page. Buyer-scoped lookup by
-	// PaymentIntent ID — converges the 3DS-redirect path (Stripe appends
-	// `?payment_intent=…` to the return_url) and the synchronous path on a
-	// single shape. URL `client_secret` is intentionally ignored; we auth
-	// via session.
+	// Powers the post-checkout success page. Authed → buyer-scoped lookup by
+	// PaymentIntent ID. Guest (no session) → token-scoped by PaymentIntent ID
+	// alone (the high-entropy PI id Stripe appends to the return_url is the
+	// bearer capability; no session is minted on the guest path). URL
+	// `client_secret` is intentionally ignored.
 	create.get("/confirmation", {
+		auth: { optional: true },
 		schema: {
 			query: CheckoutConfirmationQuerySchema,
 			response: {
 				200: CheckoutConfirmationResponseSchema,
+				400: app.getErrorSchema("badRequest"),
 				404: app.getErrorSchema("notFound"),
 			},
 		},
 		handler: async (request, reply) => {
 			const result = await getCheckoutConfirmation({
 				db: app.prisma,
-				buyerId: request.session.user.id,
+				buyerId: request.session?.user?.id ?? null,
 				paymentIntentId: request.query.paymentIntentId,
 				orderId: request.query.orderId,
 			});
@@ -109,6 +202,7 @@ export const checkoutRoutes = createRoutes((create, app) => {
 	});
 
 	create.post("/claim", {
+		auth: { optional: true },
 		config: {
 			rateLimit: {
 				max: app.rateLimiting.limits.checkoutClaim.max,
@@ -127,6 +221,42 @@ export const checkoutRoutes = createRoutes((create, app) => {
 			},
 		},
 		handler: async (request, reply) => {
+			// Guest claim (NL-298) has no session: the buyer comes off the quote
+			// (the quote cuid is the bearer capability), resolved before the claim
+			// so `claimCheckout`'s `quote.buyerId === buyerId` check passes by
+			// construction. The ship-to rides the quote into the claim, which
+			// snapshots it onto the Order.
+			const sessionUserId = request.session?.user?.id;
+			const isGuest = !sessionUserId;
+
+			// Wallet lane (NL-298 Phase 5): the express sheet revealed the email +
+			// full address only now, at confirm. Mint/dedupe the buyer and stamp it
+			// + the finalized ship-to onto the identity-less quote (buyerId null)
+			// before claiming — so the quote carries a real buyer + complete address
+			// by the time `claimCheckout` runs, exactly as the card lane does at
+			// quote time. Ignored when authed (the session buyer wins).
+			const walletIdentity = isGuestClaim(request.body)
+				? request.body.walletIdentity
+				: undefined;
+			if (isGuest && walletIdentity) {
+				await stampGuestQuoteBuyer({
+					db: app.prisma,
+					auth: app.auth,
+					quoteId: request.body.quoteId,
+					email: walletIdentity.email,
+					firstName: walletIdentity.firstName,
+					lastName: walletIdentity.lastName ?? "",
+					shipTo: walletIdentity.shipTo,
+				});
+			}
+
+			const buyerId =
+				sessionUserId ??
+				(await getGuestClaimBuyerId({
+					db: app.prisma,
+					quoteId: request.body.quoteId,
+				}));
+
 			const result = await claimCheckout({
 				db: app.prisma,
 				payments: app.payments,
@@ -134,10 +264,29 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				realtime: app.realtime,
 				analytics: app.analytics,
 				marketing: app.marketing,
-				buyerId: request.session.user.id,
+				buyerId,
 				body: request.body,
 				requestReferrer: request.referrer,
 			});
+
+			// First-purchase onboarding (exactly-once via the `guestOnboardedAt`
+			// CAS) — fires the deferred signup side-effects. Runs only on the
+			// sessionless guest path; the CAS no-ops for a deduped real account, so
+			// a typed email never mutates someone else's account. The address book
+			// is NOT populated here (deferred to the Phase 6 verified claim).
+			if (isGuest) {
+				await onboardGuestOnFirstPurchase({
+					db: app.prisma,
+					queues: app.queues,
+					analytics: app.analytics,
+					marketing: app.marketing,
+					userId: buyerId,
+					ipAddress: request.ip,
+					userAgent: request.headers["user-agent"] ?? null,
+					referralHeaders: request.headers,
+				});
+			}
+
 			return reply.status(200).send(result);
 		},
 	});

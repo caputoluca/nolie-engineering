@@ -15,21 +15,29 @@ export { validateIdempotencyKeyFormat } from "../utils/idempotency.js";
  * caller bugs that would otherwise silently confirm a payment for the wrong
  * cart / wrong card / wrong rail.
  *
- * The payment selection is a union (NL-378): a saved card (`paymentMethodId`)
- * or a BNPL provider (`bnpl`). Each contributes its own discriminant to the
- * canonical payload so a card↔BNPL key reuse is caught like any other mismatch.
+ * The payment selection is a union: a saved card (`paymentMethodId`), a BNPL
+ * provider (`bnpl`, NL-378), or the guest freshly-collected rail
+ * (`collectPaymentMethod`, NL-298). Each contributes its own discriminant to
+ * the canonical payload so a cross-rail key reuse is caught like any other
+ * mismatch.
  */
 export function computeIdempotencyPayloadHash(
 	input:
 		| { quoteId: string; paymentMethodId: string }
-		| { quoteId: string; bnpl: string },
+		| { quoteId: string; bnpl: string }
+		| { quoteId: string; collectPaymentMethod: true },
 ): string {
 	const canonical =
 		"bnpl" in input
 			? JSON.stringify({ quoteId: input.quoteId, bnpl: input.bnpl })
-			: JSON.stringify({
-					quoteId: input.quoteId,
-					paymentMethodId: input.paymentMethodId,
-				});
+			: "collectPaymentMethod" in input
+				? JSON.stringify({
+						quoteId: input.quoteId,
+						collectPaymentMethod: true,
+					})
+				: JSON.stringify({
+						quoteId: input.quoteId,
+						paymentMethodId: input.paymentMethodId,
+					});
 	return createHash("sha256").update(canonical).digest("hex");
 }

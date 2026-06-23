@@ -26,6 +26,7 @@ import type {
 import {
 	CheckoutClaimErrorCode,
 	isBnplClaim,
+	isGuestClaim,
 } from "@nolie/schemas/checkout/claim";
 import type { FulfillmentMethodType } from "@nolie/schemas/fulfillment";
 import { getSpendableBalance, holdCredits } from "@nolie/wallet";
@@ -90,7 +91,9 @@ interface ClaimInput {
 	analytics: ServerAnalytics;
 	marketing: ServerMarketing;
 	buyerId: string;
-	/** Card rail (`{ paymentMethodId }`) or BNPL rail (`{ bnpl }`) — NL-378. */
+	/** Card rail (`{ paymentMethodId }`, saved card), BNPL rail (`{ bnpl }`,
+	 *  NL-378), or guest rail (`{ collectPaymentMethod: true }`, a freshly-
+	 *  collected card with no saved customer/method — NL-298). */
 	body: CheckoutClaimBody;
 	/** §19 — the claim request's originating-impression triad (from the
 	 *  `X-NL-Referrer-*` headers). Fallback for cartless Buy-Now lines whose
@@ -125,6 +128,16 @@ export async function claimCheckout(
 ): Promise<CheckoutClaimSuccess> {
 	const { db, payments, buyerId, body } = input;
 	const isBnpl = isBnplClaim(body);
+	const isGuest = isGuestClaim(body);
+	// NL-298 Phase 5 — the wallet lane priced its quote from the redacted,
+	// street-less address Apple/Google reveal at `onShippingAddressChange`
+	// (ZIP-centroid tax). The buyer authorized that exact total in the sheet and
+	// we can't raise it, so the tax recompute below must reproduce the ZIP-centroid
+	// basis (recompute street-less) rather than rooftop — else an intra-ZIP tax
+	// boundary would trip a spurious `PRICE_CHANGED` after the sheet authorized.
+	// `walletIdentity` (present only on this lane's claim) is the signal; the
+	// finalized street is for the Order's shipping snapshot, not the tax.
+	const isWalletLane = isGuestClaim(body) && !!body.walletIdentity;
 
 	// 0) Validate idempotency key format up-front. Cheap synchronous check —
 	//    rejects low-entropy / malformed keys before they hit any DB or Stripe
@@ -137,7 +150,9 @@ export async function claimCheckout(
 	const payloadHash = computeIdempotencyPayloadHash(
 		isBnpl
 			? { quoteId: body.quoteId, bnpl: body.bnpl }
-			: { quoteId: body.quoteId, paymentMethodId: body.paymentMethodId },
+			: isGuest
+				? { quoteId: body.quoteId, collectPaymentMethod: true }
+				: { quoteId: body.quoteId, paymentMethodId: body.paymentMethodId },
 	);
 
 	// 1) Idempotency replay — same buyer + same key returns the same Order set
@@ -217,10 +232,10 @@ export async function claimCheckout(
 			// by the same number the drift check approved.
 			getSpendableBalance({ db, userId: buyerId }),
 			// Card rail only — load the selected saved payment method (scoped to
-			// this buyer's billing). BNPL has none, so we skip the lookup entirely
-			// rather than fetch-and-ignore. Parallel with the reads above, so no
-			// added latency on the card path.
-			isBnpl
+			// this buyer's billing). BNPL and the guest rail have no saved method,
+			// so we skip the lookup entirely rather than fetch-and-ignore. Parallel
+			// with the reads above, so no added latency on the card path.
+			isBnpl || isGuest
 				? Promise.resolve(null)
 				: db.paymentMethod.findFirst({
 						where: {
@@ -250,24 +265,38 @@ export async function claimCheckout(
 		);
 	}
 
-	const customerId = buyer?.billing?.customerId;
-	if (!buyer || !customerId) {
+	if (!buyer) {
+		// buyerId comes from the authenticated session (or a freshly-minted guest
+		// User), so a missing row is an internal inconsistency, not a client error.
+		throw errors.internal("Buyer not found for checkout claim", {
+			code: "BUYER_NOT_FOUND",
+		});
+	}
+	const customerId = buyer.billing?.customerId;
+	// Saved-card and BNPL rails charge a pre-saved customer; the guest rail
+	// charges a freshly-collected method client-side and needs no customer here.
+	if (!isGuest && !customerId) {
 		throw errors.badRequest(
 			"Buyer is missing a Stripe customer. Set up payment first.",
 			{ code: "BUYER_MISSING_WALLET" },
 		);
 	}
-	// Card rail requires the saved payment method (loaded above); BNPL has none.
-	if (!isBnpl && !paymentMethod) {
+	// Card rail requires the saved payment method (loaded above); BNPL and the
+	// guest rail have none.
+	if (!isBnpl && !isGuest && !paymentMethod) {
 		throw errors.badRequest("Payment method not found for this buyer", {
 			code: "PAYMENT_METHOD_NOT_FOUND",
 		});
 	}
 
-	const shipAddress =
+	// Authed quotes resolve the ship-to from the saved-address book; a guest
+	// quote (NL-298) carries the typed ship-to raw on the quote itself. Both
+	// converge on the same shape so the country gate, tax address, and Order
+	// ship-to snapshot below are rail-agnostic.
+	const shipAddress: ClaimShipAddress | null =
 		quote.shippingAddressId && buyer.shippingAddresses
 			? (buyer.shippingAddresses[0] ?? null)
-			: null;
+			: guestShipAddressFromQuote(quote);
 	if (quote.shippingAddressId && !shipAddress) {
 		throw errors.badRequest("Shipping address not found for this buyer", {
 			code: "SHIPPING_ADDRESS_NOT_FOUND",
@@ -307,11 +336,18 @@ export async function claimCheckout(
 	const pickupSnapshotByLocationId = await loadPickupSnapshots(db, listings);
 
 	// 5) Resolve the tax address. Mirror quote-time logic: if any ship line, use
-	//    buyer ship-to; else first pickup location.
+	//    buyer ship-to; else first pickup location. For the wallet lane, strip the
+	//    street so the recompute reproduces the ZIP-centroid basis the buyer
+	//    authorized in the sheet (the quote was priced street-less). The full
+	//    `shipAddress` still drives the country gate + the Order ship-to snapshot.
+	const taxShipAddress =
+		isWalletLane && shipAddress
+			? { ...shipAddress, line1: undefined }
+			: shipAddress;
 	const taxAddress = resolveClaimTaxAddress({
 		listings,
 		buyerChoiceByListing,
-		shipAddress,
+		shipAddress: taxShipAddress,
 		pickupSnapshotByLocationId,
 	});
 	if (!taxAddress) {
@@ -331,7 +367,12 @@ export async function claimCheckout(
 		items: groupableItems,
 		groups: validatedGroups,
 		taxAddress,
-		taxExempt: buyer.taxExemptStatus === "approved",
+		// NL-298 — a guest's typed email can dedupe to a real (possibly tax-exempt)
+		// account, but a typed email is not proof of inbox ownership, so the
+		// exemption must not apply on a sessionless claim. Mirrors the quote path,
+		// which skips the buyer load entirely for guests. To use the exemption, the
+		// buyer signs in.
+		taxExempt: !isGuest && buyer.taxExemptStatus === "approved",
 		payments,
 	});
 
@@ -444,7 +485,11 @@ export async function claimCheckout(
 				state: shipAddress.state,
 				postalCode: shipAddress.postalCode,
 				country: shipAddress.country,
-				phone: buyer.phone,
+				// NL-298 — a guest never provides a phone (the typed ship-to carries
+				// none) and a typed email can dedupe to a real account, so the deduped
+				// account's phone must NOT snapshot onto the Order: it would surface on
+				// the sessionless, token-scoped confirmation (a cross-account PII leak).
+				phone: isGuest ? null : buyer.phone,
 			}
 		: null;
 
@@ -693,27 +738,63 @@ export async function claimCheckout(
 		idempotencyKey: body.idempotencyKey,
 		creditAppliedCents: credit.totalCreditCents,
 	});
-	const piResult = isBnpl
-		? await payments.customer.createBnplCheckoutPaymentIntent({
-				idempotencyKey: body.idempotencyKey,
-				buyerId,
-				customerId,
-				provider: body.bnpl,
-				amountCents: chargedAmountCents,
-				taxCalculationId: fresh.taxCalculationId ?? undefined,
-				metadata: piMetadata,
-				address: toBnplAddress(shipTo, buyer.email),
-			})
-		: await payments.customer.createCheckoutPaymentIntent({
-				idempotencyKey: body.idempotencyKey,
-				buyerId,
-				customerId,
-				// biome-ignore lint/style/noNonNullAssertion: card rail guaranteed a PM above.
-				paymentMethodId: paymentMethod!.stripePaymentMethodId,
-				amountCents: chargedAmountCents,
-				taxCalculationId: fresh.taxCalculationId ?? undefined,
-				metadata: piMetadata,
+	// One Stripe call per rail. The guest rail charges customer-less (the fresh
+	// card is attached client-side at confirm); the card and BNPL rails charge
+	// the saved customer the gates above already required — each branch re-checks
+	// what it reads so the values narrow to non-null without a cast or assertion.
+	let piResult: Awaited<
+		ReturnType<typeof payments.customer.createCheckoutPaymentIntent>
+	>;
+	if (isGuest) {
+		piResult = await payments.customer.createGuestCheckoutPaymentIntent({
+			idempotencyKey: body.idempotencyKey,
+			buyerId,
+			// Always customer-less on the guest rail: the fresh card is attached at
+			// confirm. NL-298 — never inherit the customer of a deduped real account
+			// (a typed email isn't proof of inbox ownership). Attaching the guest
+			// charge to their Stripe customer breaks isolation and would, once
+			// `setup_future_usage` ships (card vault), vault a stranger's card onto
+			// their customer.
+			customerId: undefined,
+			amountCents: chargedAmountCents,
+			taxCalculationId: fresh.taxCalculationId ?? undefined,
+			metadata: piMetadata,
+		});
+	} else if (isBnpl) {
+		if (!customerId) {
+			throw errors.internal("BNPL claim reached charge with no customer", {
+				code: "BNPL_CHARGE_NO_CUSTOMER",
 			});
+		}
+		piResult = await payments.customer.createBnplCheckoutPaymentIntent({
+			idempotencyKey: body.idempotencyKey,
+			buyerId,
+			customerId,
+			provider: body.bnpl,
+			amountCents: chargedAmountCents,
+			taxCalculationId: fresh.taxCalculationId ?? undefined,
+			metadata: piMetadata,
+			address: toBnplAddress(shipTo, buyer.email),
+		});
+	} else {
+		if (!customerId || !paymentMethod) {
+			throw errors.internal(
+				"Card claim reached charge with no customer/method",
+				{
+					code: "CARD_CHARGE_NO_CONTEXT",
+				},
+			);
+		}
+		piResult = await payments.customer.createCheckoutPaymentIntent({
+			idempotencyKey: body.idempotencyKey,
+			buyerId,
+			customerId,
+			paymentMethodId: paymentMethod.stripePaymentMethodId,
+			amountCents: chargedAmountCents,
+			taxCalculationId: fresh.taxCalculationId ?? undefined,
+			metadata: piMetadata,
+		});
+	}
 	if (!piResult.success) {
 		if (piResult.error === PaymentErrorCode.rate_limit_exceeded) {
 			throw errors.tooManyRequests(
@@ -789,10 +870,24 @@ interface PersistedQuoteLine {
 
 interface PersistedQuote {
 	id: string;
-	buyerId: string;
+	// Nullable since NL-298 Phase 5 (the wallet lane's identity-less quote). A
+	// real claim always stamps a buyer first, so `ensureQuoteUsable`'s
+	// `buyerId !== buyerId` check rejects a still-null (unstamped) quote.
+	buyerId: string | null;
 	consumedByOrderId: string | null;
 	expiresAt: Date;
 	shippingAddressId: string | null;
+	// NL-298 — a guest's typed ship-to, persisted raw on the quote (guests have
+	// no saved `ShippingAddress`). Null on authed quotes, which carry a
+	// `shippingAddressId` instead. Read back here for the tax recompute + the
+	// Order ship-to snapshot.
+	guestShipToName: string | null;
+	guestShipToLine1: string | null;
+	guestShipToLine2: string | null;
+	guestShipToCity: string | null;
+	guestShipToState: string | null;
+	guestShipToPostalCode: string | null;
+	guestShipToCountry: string | null;
 	cartHash: string | null;
 	totalCents: number;
 	appliedCreditCents: number;
@@ -825,6 +920,42 @@ function ensureQuoteUsable(
 		});
 	}
 	return quote;
+}
+
+/** Unified ship-to shape — a saved-address row or a guest's quote-borne ship-to. */
+interface ClaimShipAddress {
+	id: string | null;
+	fullName: string;
+	line1: string;
+	line2: string | null;
+	city: string;
+	state: string;
+	postalCode: string;
+	country: string;
+}
+
+/**
+ * NL-298 — reconstruct the ship-to from a guest quote's persisted raw fields
+ * (the guest has no saved `ShippingAddress`). Null when the quote carries no
+ * guest ship-to (an authed quote, or a 100%-pickup guest quote). The seven
+ * columns are always written together, so a present `line1` implies the rest.
+ */
+function guestShipAddressFromQuote(
+	quote: PersistedQuote,
+): ClaimShipAddress | null {
+	if (!quote.guestShipToLine1) return null;
+	return {
+		// Guests always supply a recipient name (schema-required), so this is set
+		// whenever the address is; `?? ""` only satisfies the nullable column type.
+		id: null,
+		fullName: quote.guestShipToName ?? "",
+		line1: quote.guestShipToLine1,
+		line2: quote.guestShipToLine2,
+		city: quote.guestShipToCity ?? "",
+		state: quote.guestShipToState ?? "",
+		postalCode: quote.guestShipToPostalCode ?? "",
+		country: quote.guestShipToCountry ?? "",
+	};
 }
 
 async function replayIfExists({
@@ -939,7 +1070,13 @@ async function replayIfExists({
 		// just the buyer's last redirect not completing, and the retry confirms
 		// fresh via `confirmAffirmPayment`/`confirmKlarnaPayment` client-side. So
 		// for BNPL we skip the re-attach and return the same clientSecret as-is.
-		if (!isBnplClaim(body) && pi.status === "requires_payment_method") {
+		// The guest rail likewise has no saved method — the buyer re-confirms with
+		// a freshly-entered card against the same clientSecret — so it skips too.
+		if (
+			!isBnplClaim(body) &&
+			!isGuestClaim(body) &&
+			pi.status === "requires_payment_method"
+		) {
 			const { stripePaymentMethodId } = await loadReplayWalletContext({
 				db,
 				buyerId,
@@ -1012,6 +1149,7 @@ async function resumeWithoutLinkedPI({
 	}[];
 }): Promise<CheckoutClaimSuccess> {
 	const isBnpl = isBnplClaim(body);
+	const isGuest = isGuestClaim(body);
 
 	const orderIds = siblings.map((s) => s.id);
 	const sellerProfileIds = Array.from(
@@ -1091,6 +1229,22 @@ async function resumeWithoutLinkedPI({
 			taxCalculationId: quote?.taxCalculationId ?? undefined,
 			metadata: replayMetadata,
 			address,
+		});
+	} else if (isGuest) {
+		// Guest resume — recreate the same empty PI (idempotency-keyed, so Stripe
+		// returns the original if it ever landed). The buyer re-confirms with a
+		// freshly-entered card against the returned clientSecret. Always
+		// customer-less, identical to the first attempt (`claimCheckout`): NL-298 —
+		// never inherit a deduped real account's Stripe customer (a typed email
+		// isn't proof of inbox ownership). Keeping both call sites identical is what
+		// stops a resume from opening a customer-mismatched PI.
+		piResult = await payments.customer.createGuestCheckoutPaymentIntent({
+			idempotencyKey: body.idempotencyKey,
+			buyerId,
+			customerId: undefined,
+			amountCents: chargedAmountCents,
+			taxCalculationId: quote?.taxCalculationId ?? undefined,
+			metadata: replayMetadata,
 		});
 	} else {
 		const { customerId, stripePaymentMethodId } = await loadReplayWalletContext(
@@ -1271,7 +1425,8 @@ async function loadPickupSnapshots(
 }
 
 interface TaxAddress {
-	line1: string;
+	/** Optional — absent for the wallet lane's ZIP-centroid (street-less) tax basis. */
+	line1?: string;
 	line2: string | null;
 	city: string;
 	state: string;
@@ -1283,7 +1438,7 @@ function resolveClaimTaxAddress(input: {
 	listings: CheckoutListing[];
 	buyerChoiceByListing: Map<string, FulfillmentMethodType>;
 	shipAddress: {
-		line1: string;
+		line1?: string;
 		line2: string | null;
 		city: string;
 		state: string;
