@@ -9,6 +9,7 @@ import {
 	compareForSnapshot,
 	DEFAULT_RANKING_CONFIG,
 	DEFAULT_SLOT_POLICY,
+	EXPLORE_FEED_SERVING_ENABLED_KEY,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
 	effectivePriceUSD,
@@ -24,6 +25,7 @@ import {
 import { logger } from "../../logger.js";
 import { queryListings } from "../listings/query.js";
 import { reportError } from "../observability/sentry/report.js";
+import { loadMaterializedExploreListings } from "./feed-serve.js";
 import {
 	type ExploreFilters,
 	entryMatchesFilters,
@@ -60,7 +62,7 @@ interface PageSlice {
 	impressions: ExploreImpression[];
 }
 
-interface LoadExploreListingsResult extends PageSlice {
+export interface LoadExploreListingsResult extends PageSlice {
 	/**
 	 * The query id this page is attributed under — the value the route echoes
 	 * back to the client, which then stamps it on every downstream action.
@@ -629,10 +631,15 @@ export async function getExploreListings(
 	// successful refresh; humans only ever set "0" to disable.
 	let enabledRaw: string | null | undefined;
 	let epochRaw: string | null | undefined;
+	// NL-384 serving-path flag, read in the SAME round trip — chooses between
+	// the materialized `feed_entry` keyset path and the in-memory snapshot path
+	// once ranking is enabled. Fail-safe to the snapshot path on anything but "1".
+	let feedServingRaw: string | null | undefined;
 	try {
-		[enabledRaw, epochRaw] = await redis.mget(
+		[enabledRaw, epochRaw, feedServingRaw] = await redis.mget(
 			EXPLORE_RANKING_ENABLED_KEY,
 			EXPLORE_RANK_EPOCH_KEY,
+			EXPLORE_FEED_SERVING_ENABLED_KEY,
 		);
 	} catch {
 		return {
@@ -652,6 +659,32 @@ export async function getExploreListings(
 	// here serves exactly today's feed and pages us, instead of breaking the
 	// page until a human with prod-network Redis access can set "0" (§10).
 	try {
+		// NL-384 three-tier serve: when the serving flag is on, page the
+		// materialized `feed_entry` table (SQL filter-then-rank, no cliff). On any
+		// error fall THROUGH to the snapshot path below — which itself falls back
+		// to legacy in the outer catch — so the new path can never harden a
+		// regression into a 500.
+		if (feedServingRaw === "1") {
+			try {
+				const result = await loadMaterializedExploreListings(
+					db,
+					query,
+					parseEpoch(epochRaw),
+					queryId,
+				);
+				if (onImpressions && result.impressions.length > 0) {
+					onImpressions(result.impressions);
+				}
+				return result;
+			} catch (err) {
+				reportError(err, { operation: "getExploreListings.feedEntry" });
+				logger.error(
+					{ err, event: "explore_feed_entry_fallback" },
+					"feed_entry serving path threw; serving snapshot",
+				);
+			}
+		}
+
 		const result = await loadRankedExploreListings(
 			db,
 			query,
