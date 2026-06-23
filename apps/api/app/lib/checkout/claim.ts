@@ -1233,18 +1233,15 @@ async function resumeWithoutLinkedPI({
 	} else if (isGuest) {
 		// Guest resume — recreate the same empty PI (idempotency-keyed, so Stripe
 		// returns the original if it ever landed). The buyer re-confirms with a
-		// freshly-entered card against the returned clientSecret. Resolve the
-		// customer the same way the first attempt does (`claimCheckout`): undefined
-		// for a pure guest today, but a later phase may mint one — both call sites
-		// must stay identical so a resume can't open a customer-mismatched PI.
-		const guestBuyer = await db.user.findUnique({
-			where: { id: buyerId },
-			select: { billing: { select: { customerId: true } } },
-		});
+		// freshly-entered card against the returned clientSecret. Always
+		// customer-less, identical to the first attempt (`claimCheckout`): NL-298 —
+		// never inherit a deduped real account's Stripe customer (a typed email
+		// isn't proof of inbox ownership). Keeping both call sites identical is what
+		// stops a resume from opening a customer-mismatched PI.
 		piResult = await payments.customer.createGuestCheckoutPaymentIntent({
 			idempotencyKey: body.idempotencyKey,
 			buyerId,
-			customerId: guestBuyer?.billing?.customerId ?? undefined,
+			customerId: undefined,
 			amountCents: chargedAmountCents,
 			taxCalculationId: quote?.taxCalculationId ?? undefined,
 			metadata: replayMetadata,
