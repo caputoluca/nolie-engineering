@@ -1,11 +1,16 @@
 import { DAY_MS, SOLD_VISIBILITY_DAYS } from "@nolie/core/constants/listings";
 import { EngagementEventName } from "@nolie/core/engagement/catalog";
 import {
+	applyDiversity,
+	applySlotPolicy,
+	compareForSnapshot,
 	computeDemandMultiplier,
 	computePriceMult,
 	computeRankBaseScore,
 	computeRankScore,
 	DEFAULT_RANKING_CONFIG,
+	DEFAULT_SLOT_POLICY,
+	EXPLORE_FEED_SERVING_ENABLED_KEY,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
 	effectivePriceUSD,
@@ -14,6 +19,7 @@ import {
 	type QuantileValue,
 	quantileNormalize,
 	RANK_BASE_VERSION,
+	type SlotCandidate,
 	TOKEN_BOOST_MIN,
 	TOKEN_BOOST_VERSION,
 	TOKEN_DICTIONARY,
@@ -25,9 +31,34 @@ import {
 } from "@nolie/core/seller-trust";
 import { ListingStatus, Prisma } from "@nolie/db";
 import type { WorkerContextBase } from "../context.js";
-import { reportWarning } from "../observability/sentry/report.js";
+import { reportError, reportWarning } from "../observability/sentry/report.js";
 
 const UPDATE_CHUNK = 500;
+
+// Materialized-feed surface this job writes (NL-384). One value today;
+// "trending"/"deals" rails would be additional surfaces in the same table.
+const EXPLORE_SURFACE = "explore";
+
+// `feed_entry` insert batch size — keeps any single INSERT well under the
+// Postgres parameter ceiling (4 cols × this ≪ 65535) and mirrors `UPDATE_CHUNK`.
+const FEED_ENTRY_CHUNK = 1000;
+
+// Upper bound on the candidate set the materialized order is built from
+// (NL-384). MIRRORS `EXPLORE_CANDIDATE_LIMIT` in the API's
+// `get-explore-listings.ts` — the worker and the still-live snapshot path MUST
+// order from the identical candidate set during the dual-write period, so this
+// is duplicated deliberately and retired with the snapshot path in PR4. At the
+// current catalog (~1.7k) this does not bind: the full eligible set is
+// materialized, so PR3's SQL filter-then-rank can't under-return (the
+// filter-then-truncate cliff the migration removes). It is a far-out safety
+// ceiling, not a top-K cut; raise it when the eligible catalog approaches it.
+const EXPLORE_CANDIDATE_LIMIT = 5000;
+
+function parseEpoch(raw: string | null): number {
+	if (raw == null) return 0;
+	const n = Number.parseInt(raw, 10);
+	return Number.isFinite(n) ? n : 0;
+}
 
 // View-demand aggregation window. Bounds the `engagement_event` scan; the
 // freshness semantics live in the exponential decay below — at the 7d
@@ -877,6 +908,119 @@ async function aggregateDemand(
 }
 
 /**
+ * Materialize the fully-resolved /explore feed order into `feed_entry` for one
+ * epoch (NL-384, docs/explore-serving-migration.md). Runs AFTER the rankScore
+ * write above so it reads this tick's fresh scores. Reproduces the API's
+ * `selectRankedCandidateIds` exactly — the same explore-served `where`, the
+ * same candidate `orderBy`/`take`, and the same pure ordering chain
+ * (`compareForSnapshot` → `applyDiversity` → `applySlotPolicy`) from
+ * `@nolie/core/explore`. The candidate read + `where` are duplicated from the
+ * API on purpose: during the dual-write period both paths MUST order from the
+ * identical set, and the API copy is retired in PR4 when the snapshot path goes
+ * away (until then the pure ordering functions are the shared single source).
+ *
+ * `position` is the dense 0-based index into the resolved order — the keyset
+ * tiebreaker PR3 paginates on. No filter keys are stored (PR1 decision: add
+ * them only if PR3's EXPLAIN shows over-scan), so the row is just the ordered
+ * `listingId`.
+ *
+ * Write ordering is idempotent and retain-one (docs §"epoch freeze"): clear any
+ * partial rows from a crashed prior attempt at this (not-yet-published) epoch,
+ * insert the new order, then sweep `epoch < current` so the epoch being served
+ * (`epoch - 1`) survives for mid-scroll readers. Returns the row count written.
+ */
+async function materializeFeedOrder(
+	ctx: WorkerContextBase,
+	epoch: number,
+): Promise<number> {
+	const { prisma } = ctx;
+
+	const rows = await prisma.listing.findMany({
+		// Mirror of the API `buildExploreWhere()` — the explore-served set.
+		where: {
+			listingAssets: { some: {} },
+			hidden: false,
+			status: {
+				in: [
+					ListingStatus.active,
+					ListingStatus.scheduled,
+					ListingStatus.pending,
+					ListingStatus.reserved,
+					ListingStatus.failed,
+				],
+			},
+		},
+		select: {
+			id: true,
+			sellerProfileId: true,
+			title: true,
+			sortPriority: true,
+			sortTimeMs: true,
+			rankScore: true,
+			rankBaseScore: true,
+			createdAt: true,
+			listingType: true,
+			price: true,
+			startingBid: true,
+			demandEngagement: true,
+			demandIntent: true,
+			feedImpressions: true,
+		},
+		orderBy: [{ sortPriority: "asc" }, { rankScore: "desc" }, { id: "asc" }],
+		take: EXPLORE_CANDIDATE_LIMIT,
+	});
+
+	rows.sort(compareForSnapshot);
+	let orderedIds = applyDiversity(rows, DEFAULT_RANKING_CONFIG);
+
+	if (process.env.ENABLE_SLOT_POLICY !== "false") {
+		const rowById = new Map(rows.map((r) => [r.id, r]));
+		const candidates: SlotCandidate[] = [];
+		for (const id of orderedIds) {
+			const r = rowById.get(id);
+			if (!r) continue;
+			candidates.push({
+				id: r.id,
+				sortPriority: r.sortPriority,
+				rankBaseScore: r.rankBaseScore,
+				createdAt: r.createdAt,
+				sellerProfileId: r.sellerProfileId,
+				priceUSD: effectivePriceUSD(r),
+				demandEngagement: r.demandEngagement,
+				demandIntent: r.demandIntent,
+				feedImpressions: r.feedImpressions,
+			});
+		}
+		orderedIds = applySlotPolicy(candidates, Date.now(), DEFAULT_SLOT_POLICY);
+	}
+
+	// Idempotency: a same-epoch retry (the job crashed after a partial insert
+	// but before rolling the epoch) clears its own rows first. Safe because this
+	// epoch is not yet published.
+	await prisma.feedEntry.deleteMany({
+		where: { surface: EXPLORE_SURFACE, epoch },
+	});
+	for (let i = 0; i < orderedIds.length; i += FEED_ENTRY_CHUNK) {
+		const chunk = orderedIds.slice(i, i + FEED_ENTRY_CHUNK);
+		await prisma.feedEntry.createMany({
+			data: chunk.map((listingId, j) => ({
+				surface: EXPLORE_SURFACE,
+				epoch,
+				position: i + j,
+				listingId,
+			})),
+		});
+	}
+	// Retain-one sweep: keep this epoch and the one still being served
+	// (`epoch - 1`); drop everything older.
+	await prisma.feedEntry.deleteMany({
+		where: { surface: EXPLORE_SURFACE, epoch: { lt: epoch - 1 } },
+	});
+
+	return orderedIds.length;
+}
+
+/**
  * /explore default-feed ranking refresh (NL-284 docs/explore-ranking.md §7;
  * NL-310 v2 commit #6 extends with sellerTrust; explore-ranking-v3 PR2 swaps
  * the token-CVR multiplier for a view-demand one; explore-ranking-v4 decays
@@ -1132,20 +1276,68 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 		`;
 	}
 
+	// NL-384: materialize the resolved feed order into `feed_entry` for the
+	// NEXT epoch BEFORE rolling the epoch, so no reader ever observes an epoch
+	// whose rows aren't written yet (PR3 serves the keyset scan from this).
+	// Decoupled via try/catch: PR2 still serves the live feed from the Redis
+	// snapshot, so a materialize failure must never block the epoch roll or the
+	// snapshot refresh below. PR3 revisits coupling when it serves from here.
+	const currentEpoch = parseEpoch(await redis.get(EXPLORE_RANK_EPOCH_KEY));
+	const nextEpoch = currentEpoch + 1;
+	let feedEntriesWritten = 0;
+	try {
+		feedEntriesWritten = await materializeFeedOrder(ctx, nextEpoch);
+	} catch (err) {
+		reportError(err, {
+			operation: "explore_feed_materialize",
+			extra: { nextEpoch },
+		});
+		logger.error(
+			{ err, event: "explore_feed_materialize_failed", nextEpoch },
+			"feed_entry materialize failed; live snapshot path unaffected",
+		);
+	}
+
 	// Rolls fresh snapshots: the explore snapshot cache key carries this
-	// epoch, so a successful refresh retires all frozen page orders (§8).
-	await redis.incr(EXPLORE_RANK_EPOCH_KEY);
+	// epoch, so a successful refresh retires all frozen page orders (§8). The
+	// incr publishes `nextEpoch`; a mismatch means another roller raced us
+	// (the repeatable job is single-flight, so this is a real anomaly worth a
+	// warning, not a crash).
+	const rolledEpoch = await redis.incr(EXPLORE_RANK_EPOCH_KEY);
+	if (rolledEpoch !== nextEpoch) {
+		reportWarning(
+			"Explore epoch rolled out from under feed_entry materialize",
+			{
+				operation: "explore_feed_materialize",
+				extra: { nextEpoch, rolledEpoch },
+			},
+		);
+	}
 
 	// Self-enable (§10): a successful run has proven scores exist and rolled
 	// the epoch, so flip the kill switch on — but NX, so a human "0" stays a
 	// durable disable and we never overwrite an intentional kill.
 	await redis.set(EXPLORE_RANKING_ENABLED_KEY, "1", "NX");
 
+	// NL-384: self-enable the materialized serving path the SAME way, gated on a
+	// successful materialize (rows written for the now-current epoch). Prod Redis
+	// is on a private network, so there's no manual flip — the first good tick
+	// turns serving on, exactly like the kill switch above. NX so an ops "0"
+	// (the one off-switch, via the same prod-network escape hatch as the kill
+	// switch) is a durable disable. The API serve path still fails safe to the
+	// snapshot path if a later tick stops materializing, so auto-on can't strand
+	// /explore on an empty epoch.
+	if (feedEntriesWritten > 0) {
+		await redis.set(EXPLORE_FEED_SERVING_ENABLED_KEY, "1", "NX");
+	}
+
 	logger.info(
 		{
 			event: "explore_rank_refresh",
 			rowsScanned: scanRows.length,
 			rowsUpdated,
+			// NL-384: rows written to `feed_entry` for the next epoch this tick.
+			feedEntriesWritten,
 			sellersTrustUpdated,
 			sellerTrustMax,
 			addToCartMax,
