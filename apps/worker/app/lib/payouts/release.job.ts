@@ -307,11 +307,11 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			"payout.release: orphan Earning — falling back to legacy single-Transfer path",
 		);
 
-		// Legacy gate: skip if ANY line has a pending/refunded dispute.
-		// Same conservatism as pre-NL-183.
+		// Legacy gate: skip if ANY line has a pending/awaiting_return/refunded
+		// dispute. Same conservatism as pre-NL-183.
 		const legacyBlocked = earning.order.lineItems.some((li) => {
 			const s = li.fulfillmentDispute?.status;
-			return s === "pending" || s === "refunded";
+			return s === "pending" || s === "awaiting_return" || s === "refunded";
 		});
 		if (legacyBlocked) {
 			logger.info(
@@ -344,9 +344,11 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			// Categorise the skip for telemetry — one log line, one reason.
 			const reason = releasable.hasPendingDisputes
 				? "held_by_pending_dispute"
-				: releasable.hasRefundedLines
-					? "held_by_refunded_dispute"
-					: "all_lines_paid";
+				: releasable.hasAwaitingReturn
+					? "held_by_awaiting_return"
+					: releasable.hasRefundedLines
+						? "held_by_refunded_dispute"
+						: "all_lines_paid";
 			logger.info(
 				{
 					earningId,
