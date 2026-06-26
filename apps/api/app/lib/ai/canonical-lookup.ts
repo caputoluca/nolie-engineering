@@ -67,11 +67,17 @@ function trimLeadingZeros(num: string): string {
 // — even for cards numbered beyond it like Special Illustration Rares. Skip
 // the denominator for alphanumeric promo IDs ("SWSH001", "SM-P 045") where
 // there is no printed denominator on the card.
+//
+// The denominator is zero-padded to the numerator's width because the card
+// face shares one width across both halves (TCGdex's `localId` is already
+// padded, e.g. "091", but `official` is a bare integer, e.g. 86 — so the
+// face reads "091/086", not "091/86").
 function formatCardNumber(detail: TcgdexCardDetail): string {
 	const official = detail.set.cardCount?.official;
 	if (!official || official <= 0) return detail.localId;
 	if (!/^\d+$/.test(detail.localId)) return detail.localId;
-	return `${detail.localId}/${official}`;
+	const denominator = String(official).padStart(detail.localId.length, "0");
+	return `${detail.localId}/${denominator}`;
 }
 
 /** Empty string is the AI's "not visible" sentinel; treat as null. */

@@ -21,14 +21,19 @@
  * as a string-literal union here so this module stays dep-light.
  * Values produced by the Prisma client are assignable to this type.
  *
- *  - `pending`  — open dispute, blocks payout for this line
- *  - `refunded` — buyer was refunded, no payout for this line
- *  - `released` — admin chose `pay_seller`; line is releasable
- *  - `absorbed` — admin chose `platform_absorb`; buyer refunded AND
- *                 seller paid (platform takes the loss); releasable
+ *  - `pending`          — open dispute, blocks payout for this line
+ *  - `awaiting_return`  — NL-355: resolved for buyer but the refund is
+ *                         gated on the item shipping back; blocks payout
+ *                         exactly like `pending` until the return is
+ *                         delivered (then it flips to `refunded`)
+ *  - `refunded`         — buyer was refunded, no payout for this line
+ *  - `released`         — admin chose `pay_seller`; line is releasable
+ *  - `absorbed`         — admin chose `platform_absorb`; buyer refunded AND
+ *                         seller paid (platform takes the loss); releasable
  */
 export type ReleasableDisputeStatus =
 	| "pending"
+	| "awaiting_return"
 	| "refunded"
 	| "released"
 	| "absorbed";
@@ -83,6 +88,13 @@ export interface GetReleasableLinesResult {
 	 * excluded. Caller may still release the rest.
 	 */
 	hasRefundedLines: boolean;
+	/**
+	 * True when ≥1 unpaid line is held back by an `awaiting_return` dispute
+	 * (NL-355: buyer won, refund gated on the return). Caller may still
+	 * release the rest; the held line ships once the return is delivered and
+	 * the dispute flips to `refunded`/`absorbed`.
+	 */
+	hasAwaitingReturn: boolean;
 }
 
 /**
@@ -90,9 +102,9 @@ export interface GetReleasableLinesResult {
  *
  * A line is releasable this run when:
  *   • It hasn't been paid yet (paidAt IS NULL).
- *   • Its FulfillmentDispute (if any) is not in `pending` or
- *     `refunded` state — undisputed, or resolved as `released` /
- *     `absorbed` (both unblock payout).
+ *   • Its FulfillmentDispute (if any) is not in `pending`,
+ *     `awaiting_return`, or `refunded` state — undisputed, or resolved as
+ *     `released` / `absorbed` (both unblock payout).
  *   • Its remaining net
  *     (netCents − refundedNetCents + platformAbsorbedNetCents) is positive.
  *     The absorbed-net term adds back slices the platform ate (buyer was
@@ -102,7 +114,8 @@ export interface GetReleasableLinesResult {
  * dispute resolves pays only the lines that still need money.
  *
  * Empty input → `{ lines: [], totalCents: 0, allBlocked: true,
- * hasPendingDisputes: false, hasRefundedLines: false }`.
+ * hasPendingDisputes: false, hasRefundedLines: false,
+ * hasAwaitingReturn: false }`.
  */
 export function getReleasableLines(earning: {
 	lines: readonly ReleasableLineInput[];
@@ -111,6 +124,7 @@ export function getReleasableLines(earning: {
 	let totalCents = 0;
 	let hasPendingDisputes = false;
 	let hasRefundedLines = false;
+	let hasAwaitingReturn = false;
 
 	for (const line of earning.lines) {
 		// Already paid in a prior release run — skip silently.
@@ -120,6 +134,10 @@ export function getReleasableLines(earning: {
 
 		if (disputeStatus === "pending") {
 			hasPendingDisputes = true;
+			continue;
+		}
+		if (disputeStatus === "awaiting_return") {
+			hasAwaitingReturn = true;
 			continue;
 		}
 		if (disputeStatus === "refunded") {
@@ -141,5 +159,6 @@ export function getReleasableLines(earning: {
 		allBlocked: releasable.length === 0,
 		hasPendingDisputes,
 		hasRefundedLines,
+		hasAwaitingReturn,
 	};
 }
