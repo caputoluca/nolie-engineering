@@ -31,6 +31,20 @@
  * are untouched — they live entirely in `computeRankBaseScore`. Kill switch:
  * `ENABLE_TOKEN_BOOST=false` still writes 1.0 to every row → additive collapse.
  *
+ * v5 (explore-ranking-v5, this commit): the v3/v4 demand multiplier became the
+ * single strongest lever (a 2.0× swing), so the feed was engagement-dominated —
+ * high-view randoms held the top and popular CHARACTERS never surfaced. v5 (a)
+ * cuts demand to a tiebreaker (`demandSensitivity` 1.0 → 0.3, `DEMAND_MULT_MAX`
+ * 2.0 → 1.3) and (b) adds an independent curated-character DESIRABILITY
+ * multiplier (`computeDesirabilityMultiplier`): a fresh Charizard/Pikachu/
+ * starter surfaces on the dictionary's intrinsic chase weight, NOT on accrued
+ * engagement, gated to $20+ so it can't elevate cheap junk. Demand and
+ * desirability are now co-equal (both max ~1.3×), so neither dominates and the
+ * premium-price base still does the load-bearing quality work. Validated
+ * current-vs-proposed on the June 2026 prod CSV
+ * (apps/worker/scripts/preview-desirability-ranking.ts). Kill switch:
+ * `desirabilityStrength = 0` → desirability collapses to 1.0× everywhere.
+ *
  * No I/O, no clock: `now` is injected into `computeRankScore` so the worker
  * refresh job is the sole owner of the time-varying term. Weights, sensitivity,
  * cap and penalties live in an immutable `RankingConfig` that is PASSED IN —
@@ -133,15 +147,54 @@ export interface RankingConfig {
 	 * Sensitivity of the view-demand multiplier to a listing's normalized
 	 * demand (explore-ranking-v3 PR2). The multiplier form is
 	 * `clamp(1 + k · normalizedDemand, [TOKEN_BOOST_MIN, DEMAND_MULT_MAX])`,
-	 * where `normalizedDemand ∈ [0,1]` is the min-max-normalized log1p of the
-	 * listing's subject-pooled engagement (distinct viewers + weighted
-	 * saves/carts). At `k = 1.0` the top-demand listing earns the full 2.0×
-	 * and a zero-demand listing collapses to 1.0× (neutral). Replaces the
-	 * inverted Empirical-Bayes token-CVR z-score, which was mathematically
-	 * inert at our ~0.18% catalog conversion rate (docs/explore-ranking-v3.md
-	 * §5.2). Tunable post-deploy from the live demand distribution.
+	 * where `normalizedDemand ∈ [0,1]` is the rank-quantile-normalized log1p of
+	 * the listing's subject-pooled engagement (distinct viewers + weighted
+	 * saves/carts).
+	 *
+	 * v5 dialed this DOWN 1.0 → 0.3 alongside `DEMAND_MULT_MAX` 2.0 → 1.3. At
+	 * k = 1.0 the demand multiplier was the single strongest lever in the feed
+	 * (a 2× swing), so engagement dominated: high-view randoms held the top
+	 * while popular CHARACTERS never surfaced. At k = 0.3 the top-demand listing
+	 * earns ×1.3 and a zero-demand one stays ×1.0 — demand becomes a tiebreaker,
+	 * not a hammer, and the independent curated-character desirability
+	 * multiplier (`computeDesirabilityMultiplier`) does the surfacing work
+	 * recency was over-weighting. The June 2026 prod CSV replay
+	 * (preview-desirability-ranking.ts) is the validation. Tunable post-deploy.
 	 */
 	demandSensitivity: number;
+	/**
+	 * Strength of the curated-character DESIRABILITY multiplier
+	 * (explore-ranking-v5). Scales each matched character's curated dictionary
+	 * `weight` (in `[1.0, 1.30]` by dictionary convention) down toward neutral:
+	 * `1 + (weight − 1) · strength`, then clamped to `desirabilityMultMax`. At
+	 * 0.667 the dictionary ceiling 1.30 maps to ×1.20 ("medium") while the
+	 * relative chase ladder is preserved (a 1.15 starter → ×1.10). This is the
+	 * "popular Pokémon" lever — Charizard/Pikachu/starters surface intrinsically,
+	 * independent of on-platform engagement, unlike the demand multiplier. Set
+	 * to 0 to neutralize without touching the demand path. Validated medium on
+	 * the June 2026 prod replay (preview-desirability-ranking.ts).
+	 */
+	desirabilityStrength: number;
+	/**
+	 * Clamp ceiling on the desirability multiplier. Caps the chase boost so it
+	 * stays a co-equal of the (dialed-down) demand multiplier rather than the
+	 * new dominant lever — "has a chase character in the title" must not become
+	 * the feed's strongest signal, or we recreate the monotone-feed problem in a
+	 * different color. With demand capped at 1.3 the worst-case stack is
+	 * 1.3 × `desirabilityMultMax`.
+	 */
+	desirabilityMultMax: number;
+	/**
+	 * Minimum effective price (USD) a listing must clear before the desirability
+	 * multiplier applies. The QUALITY GATE for the chase boost: without it a
+	 * $9 beat-up "Charizard" rides the multiplier up exactly as much
+	 * (proportionally) as a $250 PSA-10 Charizard. At $20 the boost is a
+	 * tiebreaker among real listings; below it the listing scores on its base
+	 * alone (the premium plateau already demotes sub-$20). Price-only by
+	 * design — the prod replay showed adding a base-percentile gate produced a
+	 * byte-identical top-N, because the premium term already ties base to price.
+	 */
+	desirabilityMinPriceUSD: number;
 	/**
 	 * Subtractive penalty applied to `rankBaseScore` when the listing's title
 	 * or description matches any term in `NEGATIVE_KEYWORDS` (e.g. "wooden",
@@ -373,7 +426,14 @@ export const DEFAULT_RANKING_CONFIG: RankingConfig = {
 	perSellerWindow: 12,
 	lowEffortPenalty: 0.12,
 	longTitlePenalty: 0.04,
-	demandSensitivity: 1.0,
+	// v5: 1.0 → 0.3. With DEMAND_MULT_MAX 1.3 the top-demand listing earns ×1.3
+	// (was ×2.0) — engagement is now a tiebreaker, not the dominant lever.
+	demandSensitivity: 0.3,
+	// v5 curated-character desirability multiplier ("medium"): dictionary
+	// ceiling 1.30 → ×1.20, gated to $20+. See the config field docs.
+	desirabilityStrength: 0.667,
+	desirabilityMultMax: 1.2,
+	desirabilityMinPriceUSD: 20,
 	negativeKeywordPenalty: 0.08,
 	merchKeywordPenalty: 0.5,
 	// Image-resolution demerit (explore-ranking-v3 PR1, §5.1.4). v1 starting
@@ -483,12 +543,15 @@ export const MERCH_KEYWORDS: ReadonlyArray<string> = [
 export const TOKEN_BOOST_MIN = 1.0;
 
 /**
- * Demand-multiplier clamp ceiling (explore-ranking-v3 PR2). The top-demand
- * listing in the rankable scan earns `1 + demandSensitivity·1 = 2.0×` at the
- * default sensitivity; the clamp caps any future sensitivity retune so demand
- * can lift hard but never wholly dominate the additive base + recency.
+ * Demand-multiplier clamp ceiling. v5 dropped it 2.0 → 1.3 (with sensitivity
+ * 1.0 → 0.3): at the default sensitivity the top-demand listing earns
+ * `1 + 0.3·1 = 1.3×`. The 2.0× ceiling made the engagement multiplier the
+ * single strongest lever in the feed, so high-view randoms dominated the top
+ * and popular characters never surfaced (explore-ranking-v5). At 1.3 demand is
+ * a tiebreaker; the curated-character desirability multiplier
+ * (`computeDesirabilityMultiplier`) is the co-equal surfacing lever.
  */
-export const DEMAND_MULT_MAX = 2.0;
+export const DEMAND_MULT_MAX = 1.3;
 
 /**
  * Above this length the additive `longTitlePenalty` fires at the base-score
@@ -793,6 +856,15 @@ export interface RankScoreInput {
 	 * the unmodified demand-boosted score.
 	 */
 	priceMult?: number;
+	/**
+	 * Per-listing curated-character desirability multiplier from
+	 * `computeDesirabilityMultiplier` (explore-ranking-v5). Defaults to 1.0
+	 * (neutral) so legacy callers and the kill-switch path (strength 0) collapse
+	 * to the pre-v5 form. The refresh worker computes it from the listing's max
+	 * matched character weight + price; it is folded into `rankScore` (no stored
+	 * column — `tokenBoost` carries demand, not this).
+	 */
+	desirabilityMult?: number;
 }
 
 /**
@@ -900,7 +972,11 @@ export function computePriceMult(
  *     subject (a high-viewer/high-save Charizard outranks an ignored one);
  *   - priceMult differentiates listings within the same token bucket by
  *     how their price compares to that bucket's median (PSA 10 above raw,
- *     bulk-cheap below).
+ *     bulk-cheap below);
+ *   - desirabilityMult lifts a chase character (Charizard/Pikachu/starter)
+ *     intrinsically, independent of engagement — the "popular Pokémon" lever
+ *     (explore-ranking-v5). All three are scalar multipliers, so order is
+ *     irrelevant for the math.
  */
 export function computeRankScore(
 	{
@@ -909,6 +985,7 @@ export function computeRankScore(
 		now,
 		demandMult = TOKEN_BOOST_MIN,
 		priceMult = 1.0,
+		desirabilityMult = TOKEN_BOOST_MIN,
 	}: RankScoreInput,
 	config: RankingConfig,
 ): number {
@@ -918,7 +995,10 @@ export function computeRankScore(
 	);
 	const recency = 0.5 ** (ageHours / config.recencyHalfLifeHours);
 	return (
-		(rankBaseScore + config.weights.recency * recency) * demandMult * priceMult
+		(rankBaseScore + config.weights.recency * recency) *
+		demandMult *
+		priceMult *
+		desirabilityMult
 	);
 }
 
@@ -959,6 +1039,53 @@ export function computeDemandMultiplier(
 ): number {
 	const raw = 1 + config.demandSensitivity * input.normalizedDemand;
 	return Math.max(TOKEN_BOOST_MIN, Math.min(DEMAND_MULT_MAX, raw));
+}
+
+export interface ComputeDesirabilityMultiplierInput {
+	/**
+	 * Highest curated desirability weight among the listing's matched tokens
+	 * (`maxMatchedDesirabilityWeight` over @nolie/core's dictionary), in
+	 * `[1.0, 1.30]`. 1.0 = matched no chase character → neutral.
+	 */
+	maxMatchedWeight: number;
+	/**
+	 * Listing's effective price in USD. Below `desirabilityMinPriceUSD` the
+	 * multiplier collapses to neutral (the quality gate). Null when unpriced →
+	 * also neutral.
+	 */
+	priceUSD: number | null;
+}
+
+/**
+ * Per-listing curated-character DESIRABILITY multiplier (explore-ranking-v5).
+ * Pure function over the listing's max matched character weight + price.
+ *
+ *   priceUSD < desirabilityMinPriceUSD (or null) → 1.0 (gated out)
+ *   raw  = 1 + (maxMatchedWeight − 1) · desirabilityStrength
+ *   mult = clamp(raw, [TOKEN_BOOST_MIN, desirabilityMultMax])
+ *
+ * The "popular Pokémon" lever: a fresh Charizard/Pikachu/starter surfaces on
+ * intrinsic chase-card desirability, NOT on accrued engagement (that's the
+ * separate, now-dialed-down demand multiplier). The price gate is load-bearing —
+ * without it the multiplier amplifies a $9 beat-up "Charizard" as hard
+ * (proportionally) as a $250 PSA 10. Independent of and composed
+ * multiplicatively with demand + price mults in `computeRankScore`, so it lifts
+ * the listing's whole quality stack (premium + trust + recency) together rather
+ * than competing with any one term. Kill path: `desirabilityStrength = 0` →
+ * every listing collapses to 1.0×.
+ */
+export function computeDesirabilityMultiplier(
+	input: ComputeDesirabilityMultiplierInput,
+	config: RankingConfig,
+): number {
+	if (
+		input.priceUSD === null ||
+		input.priceUSD < config.desirabilityMinPriceUSD
+	)
+		return TOKEN_BOOST_MIN;
+	const raw =
+		1 + (Math.max(1, input.maxMatchedWeight) - 1) * config.desirabilityStrength;
+	return Math.max(TOKEN_BOOST_MIN, Math.min(config.desirabilityMultMax, raw));
 }
 
 export interface QuantileValue {
