@@ -123,7 +123,8 @@ export const INSTANT_WITHDRAWAL_FEE_MIN_CENTS = 50;
  */
 export function computeInstantWithdrawalFeeCents(amountCents: number): number {
 	const proportional = Number(
-		(BigInt(INSTANT_WITHDRAWAL_FEE_BPS) * BigInt(amountCents) + 5000n) / 10000n,
+		(BigInt(INSTANT_WITHDRAWAL_FEE_BPS) * BigInt(amountCents) + BigInt(5000)) /
+			BigInt(10000),
 	);
 	return Math.max(INSTANT_WITHDRAWAL_FEE_MIN_CENTS, proportional);
 }
@@ -143,7 +144,7 @@ export function computeStripeInstantCostCents(
 	// Half-up integer math (BigInt) to mirror the fee helper above.
 	return Number(
 		(BigInt(STRIPE_INSTANT_PAYOUT_COST_BPS) * BigInt(payoutAmountCents) +
-			5000n) /
-			10000n,
+			BigInt(5000)) /
+			BigInt(10000),
 	);
 }
