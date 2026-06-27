@@ -5,6 +5,7 @@ import { SortPriority } from "../../src/auctions/sort.js";
 import {
 	applyDiversity,
 	computeDemandMultiplier,
+	computeDesirabilityMultiplier,
 	computeImageDemerit,
 	computePriceMult,
 	computeRankBaseScore,
@@ -21,6 +22,11 @@ import {
 	type RankingConfig,
 	TOKEN_BOOST_MIN,
 } from "../../src/explore/ranking.js";
+import {
+	maxMatchedDesirabilityWeight,
+	TOKEN_DICTIONARY,
+} from "../../src/explore/token-dictionary.js";
+import { matchTokens } from "../../src/explore/tokenization.js";
 
 const HOUR_MS = 3_600_000;
 
@@ -595,7 +601,7 @@ describe("computeRankScore", () => {
 
 		// Neutral: (base + 0.20·1) · 1.0
 		expect(neutral).toBeCloseTo(additive, 10);
-		// Boosted: (base + 0.20·1) · 2.0
+		// Boosted: (base + 0.20·1) · DEMAND_MULT_MAX (1.3 since v5)
 		expect(boosted).toBeCloseTo(additive * DEMAND_MULT_MAX, 10);
 		expect(boosted).toBeCloseTo(neutral * DEMAND_MULT_MAX, 10);
 	});
@@ -634,6 +640,46 @@ describe("computeRankScore", () => {
 			DEFAULT_RANKING_CONFIG,
 		);
 
+		expect(omitted).toBe(explicit);
+	});
+
+	it("multiplies demandMult, priceMult and desirabilityMult together", () => {
+		const now = new Date("2026-05-21T12:00:00Z");
+		const createdAt = now; // age 0 → recency 1
+		const additive = FRESH_BASE + RECENCY_W;
+
+		const score = computeRankScore(
+			{
+				rankBaseScore: FRESH_BASE,
+				createdAt,
+				now,
+				demandMult: 1.3,
+				priceMult: 1.05,
+				desirabilityMult: 1.2,
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
+		expect(score).toBeCloseTo(additive * 1.3 * 1.05 * 1.2, 10);
+	});
+
+	it("defaults desirabilityMult to neutral when omitted (back-compat)", () => {
+		const now = new Date("2026-05-21T12:00:00Z");
+		const createdAt = now;
+		const omitted = computeRankScore(
+			{ rankBaseScore: 0.05, createdAt, now, demandMult: 1.3, priceMult: 1.05 },
+			DEFAULT_RANKING_CONFIG,
+		);
+		const explicit = computeRankScore(
+			{
+				rankBaseScore: 0.05,
+				createdAt,
+				now,
+				demandMult: 1.3,
+				priceMult: 1.05,
+				desirabilityMult: TOKEN_BOOST_MIN,
+			},
+			DEFAULT_RANKING_CONFIG,
+		);
 		expect(omitted).toBe(explicit);
 	});
 });
@@ -710,9 +756,9 @@ describe("computeDemandMultiplier", () => {
 		expect(mult).toBe(TOKEN_BOOST_MIN);
 	});
 
-	it("returns DEMAND_MULT_MAX at full normalized demand (default sensitivity 1.0)", () => {
-		// 1 + 1.0·1 = 2.0 = DEMAND_MULT_MAX — the most-demanded listing earns
-		// the full ceiling.
+	it("returns DEMAND_MULT_MAX at full normalized demand (default sensitivity 0.3)", () => {
+		// v5: 1 + 0.3·1 = 1.3 = DEMAND_MULT_MAX — the most-demanded listing earns
+		// the full (dialed-down) ceiling.
 		const mult = computeDemandMultiplier(
 			{ normalizedDemand: 1 },
 			DEFAULT_RANKING_CONFIG,
@@ -721,25 +767,25 @@ describe("computeDemandMultiplier", () => {
 	});
 
 	it("scales linearly between the floor and ceiling", () => {
-		// At the default sensitivity 1.0, mult = 1 + normalizedDemand.
+		// v5: at the default sensitivity 0.3, mult = 1 + 0.3·normalizedDemand.
 		expect(
 			computeDemandMultiplier(
 				{ normalizedDemand: 0.25 },
 				DEFAULT_RANKING_CONFIG,
 			),
-		).toBeCloseTo(1.25, 10);
+		).toBeCloseTo(1.075, 10);
 		expect(
 			computeDemandMultiplier(
 				{ normalizedDemand: 0.5 },
 				DEFAULT_RANKING_CONFIG,
 			),
-		).toBeCloseTo(1.5, 10);
+		).toBeCloseTo(1.15, 10);
 		expect(
 			computeDemandMultiplier(
 				{ normalizedDemand: 0.8 },
 				DEFAULT_RANKING_CONFIG,
 			),
-		).toBeCloseTo(1.8, 10);
+		).toBeCloseTo(1.24, 10);
 	});
 
 	it("is monotonic: more demand never lowers the multiplier", () => {
@@ -775,11 +821,10 @@ describe("computeDemandMultiplier", () => {
 			...DEFAULT_RANKING_CONFIG,
 			demandSensitivity: 0.5,
 		};
-		// 1 + 0.5·1 = 1.5 at full demand with half sensitivity.
-		expect(computeDemandMultiplier({ normalizedDemand: 1 }, halfK)).toBeCloseTo(
-			1.5,
-			10,
-		);
+		// 1 + 0.5·0.5 = 1.25 (under the 1.3 ceiling, so the slope is observable).
+		expect(
+			computeDemandMultiplier({ normalizedDemand: 0.5 }, halfK),
+		).toBeCloseTo(1.25, 10);
 		// A sensitivity above the headroom still clamps at the ceiling.
 		const bigK: RankingConfig = {
 			...DEFAULT_RANKING_CONFIG,
@@ -801,6 +846,140 @@ describe("computeDemandMultiplier", () => {
 		expect(computeDemandMultiplier({ normalizedDemand: 0.5 }, off)).toBe(
 			TOKEN_BOOST_MIN,
 		);
+	});
+});
+
+describe("maxMatchedDesirabilityWeight", () => {
+	const charizardWeight = TOKEN_DICTIONARY.characters.find(
+		(c) => c.token === "charizard",
+	)?.weight as number;
+
+	it("returns the matched character's curated weight", () => {
+		const w = maxMatchedDesirabilityWeight(
+			matchTokens("PSA 10 Charizard 4/102 1st Edition", TOKEN_DICTIONARY),
+		);
+		expect(w).toBe(charizardWeight);
+		expect(w).toBeGreaterThan(1.0);
+	});
+
+	it("returns 1.0 (neutral) when no chase character matches", () => {
+		expect(
+			maxMatchedDesirabilityWeight(
+				matchTokens("Random storage binder 9-pocket", TOKEN_DICTIONARY),
+			),
+		).toBe(1.0);
+	});
+
+	it("takes the MAX across multiple matched characters, never the sum", () => {
+		// A "Charizard Pikachu" title is one chase signal, not two — mirrors the
+		// anti-stuffing semantics in matchTokens.
+		const squirtleWeight = TOKEN_DICTIONARY.characters.find(
+			(c) => c.token === "squirtle",
+		)?.weight as number;
+		const w = maxMatchedDesirabilityWeight([
+			{ tokenKind: "character", tokenValue: "squirtle" },
+			{ tokenKind: "character", tokenValue: "charizard" },
+		]);
+		expect(w).toBe(Math.max(charizardWeight, squirtleWeight));
+	});
+
+	it("excludes non-character kinds: a set-only match stays neutral", () => {
+		// Sets carry a curated weight but are deliberately NOT desirability —
+		// set demand already rides the pooling.
+		expect(
+			maxMatchedDesirabilityWeight([
+				{ tokenKind: "set", tokenValue: "lost_origin" },
+				{ tokenKind: "rarity", tokenValue: "psa_10" },
+			]),
+		).toBe(1.0);
+	});
+});
+
+describe("computeDesirabilityMultiplier", () => {
+	const STRENGTH = DEFAULT_RANKING_CONFIG.desirabilityStrength; // 0.667
+	const MAXMULT = DEFAULT_RANKING_CONFIG.desirabilityMultMax; // 1.2
+	const MINPRICE = DEFAULT_RANKING_CONFIG.desirabilityMinPriceUSD; // 20
+
+	it("scales the curated weight toward neutral by desirabilityStrength", () => {
+		// Mid-tier chase weights scale proportionally (under the clamp), so the
+		// dictionary's relative chase ladder is preserved.
+		expect(
+			computeDesirabilityMultiplier(
+				{ maxMatchedWeight: 1.15, priceUSD: 50 },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBeCloseTo(1 + 0.15 * STRENGTH, 10);
+		expect(
+			computeDesirabilityMultiplier(
+				{ maxMatchedWeight: 1.2, priceUSD: 50 },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBeCloseTo(1 + 0.2 * STRENGTH, 10);
+		// The dictionary's top weight (1.30 → 1.2001) lands at the ceiling: the
+		// "medium" design leans on the clamp to pin the strongest chase at ×1.20.
+		expect(
+			computeDesirabilityMultiplier(
+				{ maxMatchedWeight: 1.3, priceUSD: 50 },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBe(MAXMULT);
+	});
+
+	it("returns neutral 1.0 for a non-chase listing (weight 1.0)", () => {
+		expect(
+			computeDesirabilityMultiplier(
+				{ maxMatchedWeight: 1.0, priceUSD: 50 },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBe(TOKEN_BOOST_MIN);
+	});
+
+	it("gates out below desirabilityMinPriceUSD: cheap chase junk stays neutral", () => {
+		// The load-bearing quality gate — a $9 'Charizard' gets no chase boost.
+		expect(
+			computeDesirabilityMultiplier(
+				{ maxMatchedWeight: 1.3, priceUSD: MINPRICE - 1 },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBe(TOKEN_BOOST_MIN);
+		// Boundary: exactly at the threshold qualifies (>=).
+		expect(
+			computeDesirabilityMultiplier(
+				{ maxMatchedWeight: 1.3, priceUSD: MINPRICE },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBeGreaterThan(TOKEN_BOOST_MIN);
+	});
+
+	it("treats an unpriced listing as gated (neutral)", () => {
+		expect(
+			computeDesirabilityMultiplier(
+				{ maxMatchedWeight: 1.3, priceUSD: null },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBe(TOKEN_BOOST_MIN);
+	});
+
+	it("clamps to desirabilityMultMax for an out-of-range weight", () => {
+		expect(
+			computeDesirabilityMultiplier(
+				{ maxMatchedWeight: 2.0, priceUSD: 50 },
+				DEFAULT_RANKING_CONFIG,
+			),
+		).toBe(MAXMULT);
+	});
+
+	it("is fully reversible: desirabilityStrength=0 ⇒ always neutral", () => {
+		const off: RankingConfig = {
+			...DEFAULT_RANKING_CONFIG,
+			desirabilityStrength: 0,
+		};
+		expect(
+			computeDesirabilityMultiplier(
+				{ maxMatchedWeight: 1.3, priceUSD: 50 },
+				off,
+			),
+		).toBe(TOKEN_BOOST_MIN);
 	});
 });
 

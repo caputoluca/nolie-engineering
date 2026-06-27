@@ -5,6 +5,7 @@ import {
 	applySlotPolicy,
 	compareForSnapshot,
 	computeDemandMultiplier,
+	computeDesirabilityMultiplier,
 	computePriceMult,
 	computeRankBaseScore,
 	computeRankScore,
@@ -16,6 +17,7 @@ import {
 	effectivePriceUSD,
 	type MatchedToken,
 	matchTokens,
+	maxMatchedDesirabilityWeight,
 	type QuantileValue,
 	quantileNormalize,
 	RANK_BASE_VERSION,
@@ -1092,6 +1094,9 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 	const priceMultEnabled = process.env.ENABLE_PRICE_MULT !== "false";
 	const premiumPriceEnabled = process.env.ENABLE_PREMIUM_PRICE !== "false";
 	const imageDemeritEnabled = process.env.ENABLE_IMAGE_DEMERIT !== "false";
+	// v5 curated-character desirability multiplier. Independent kill switch
+	// (config `desirabilityStrength=0` is the in-code path; this is the ops one).
+	const desirabilityEnabled = process.env.ENABLE_DESIRABILITY !== "false";
 
 	// Sequential: demand aggregation needs listing IDs from the scan. The
 	// cart/save/purchase kill switches drop their term from the composite.
@@ -1129,6 +1134,7 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 	let demandMultMax = TOKEN_BOOST_MIN;
 	let priceMultMax = 1.0;
 	let priceMultMin = 1.0;
+	let desirabilityMultMax = TOKEN_BOOST_MIN;
 
 	const pending = scanRows.map((r) => {
 		const sellerTrust = trustMap.get(r.sellerProfileId) ?? 0;
@@ -1214,8 +1220,32 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			},
 			DEFAULT_RANKING_CONFIG,
 		);
+		// v5 curated-character desirability multiplier (the "popular Pokémon"
+		// lever). Independent of demand: reads the listing's max matched
+		// character weight from the dictionary, gated to $20+ inside the pure
+		// scorer. Folded into rankScore — no stored column (tokenBoost carries
+		// demand). Kill switch writes the neutral 1.0×.
+		const desirabilityMult = desirabilityEnabled
+			? computeDesirabilityMultiplier(
+					{
+						maxMatchedWeight: maxMatchedDesirabilityWeight(matches ?? []),
+						priceUSD,
+					},
+					DEFAULT_RANKING_CONFIG,
+				)
+			: TOKEN_BOOST_MIN;
+		if (desirabilityMult > desirabilityMultMax)
+			desirabilityMultMax = desirabilityMult;
+
 		const rankScore = computeRankScore(
-			{ rankBaseScore, createdAt: r.createdAt, now, demandMult, priceMult },
+			{
+				rankBaseScore,
+				createdAt: r.createdAt,
+				now,
+				demandMult,
+				priceMult,
+				desirabilityMult,
+			},
 			DEFAULT_RANKING_CONFIG,
 		);
 		if (rankScore < scoreMin) scoreMin = rankScore;
@@ -1347,6 +1377,9 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			demandMultMax,
 			engagementMax: demand.engagementMax,
 			demandListings: demand.normalizedDemandByListing.size,
+			// v5: peak curated-character desirability multiplier this tick.
+			desirabilityMultMax,
+			desirabilityEnabled,
 			priceMultMax,
 			priceMultMin,
 			overallMedianPrice: demand.overallMedianPrice,
