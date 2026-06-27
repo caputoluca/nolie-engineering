@@ -2,7 +2,6 @@ import { DAY_MS, SOLD_VISIBILITY_DAYS } from "@nolie/core/constants/listings";
 import { EngagementEventName } from "@nolie/core/engagement/catalog";
 import {
 	applyDiversity,
-	applySlotPolicy,
 	compareForSnapshot,
 	computeDemandMultiplier,
 	computeDesirabilityMultiplier,
@@ -10,7 +9,6 @@ import {
 	computeRankBaseScore,
 	computeRankScore,
 	DEFAULT_RANKING_CONFIG,
-	DEFAULT_SLOT_POLICY,
 	EXPLORE_FEED_SERVING_ENABLED_KEY,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
@@ -21,7 +19,6 @@ import {
 	type QuantileValue,
 	quantileNormalize,
 	RANK_BASE_VERSION,
-	type SlotCandidate,
 	TOKEN_BOOST_MIN,
 	TOKEN_BOOST_VERSION,
 	TOKEN_DICTIONARY,
@@ -915,8 +912,8 @@ async function aggregateDemand(
  * write above so it reads this tick's fresh scores. Reproduces the API's
  * `selectRankedCandidateIds` exactly — the same explore-served `where`, the
  * same candidate `orderBy`/`take`, and the same pure ordering chain
- * (`compareForSnapshot` → `applyDiversity` → `applySlotPolicy`) from
- * `@nolie/core/explore`. The candidate read + `where` are duplicated from the
+ * (`compareForSnapshot` → `applyDiversity`) from `@nolie/core/explore`. The
+ * candidate read + `where` are duplicated from the
  * API on purpose: during the dual-write period both paths MUST order from the
  * identical set, and the API copy is retired in PR4 when the snapshot path goes
  * away (until then the pure ordering functions are the shared single source).
@@ -959,42 +956,13 @@ async function materializeFeedOrder(
 			sortPriority: true,
 			sortTimeMs: true,
 			rankScore: true,
-			rankBaseScore: true,
-			createdAt: true,
-			listingType: true,
-			price: true,
-			startingBid: true,
-			demandEngagement: true,
-			demandIntent: true,
-			feedImpressions: true,
 		},
 		orderBy: [{ sortPriority: "asc" }, { rankScore: "desc" }, { id: "asc" }],
 		take: EXPLORE_CANDIDATE_LIMIT,
 	});
 
 	rows.sort(compareForSnapshot);
-	let orderedIds = applyDiversity(rows, DEFAULT_RANKING_CONFIG);
-
-	if (process.env.ENABLE_SLOT_POLICY !== "false") {
-		const rowById = new Map(rows.map((r) => [r.id, r]));
-		const candidates: SlotCandidate[] = [];
-		for (const id of orderedIds) {
-			const r = rowById.get(id);
-			if (!r) continue;
-			candidates.push({
-				id: r.id,
-				sortPriority: r.sortPriority,
-				rankBaseScore: r.rankBaseScore,
-				createdAt: r.createdAt,
-				sellerProfileId: r.sellerProfileId,
-				priceUSD: effectivePriceUSD(r),
-				demandEngagement: r.demandEngagement,
-				demandIntent: r.demandIntent,
-				feedImpressions: r.feedImpressions,
-			});
-		}
-		orderedIds = applySlotPolicy(candidates, Date.now(), DEFAULT_SLOT_POLICY);
-	}
+	const orderedIds = applyDiversity(rows, DEFAULT_RANKING_CONFIG);
 
 	// Idempotency: a same-epoch retry (the job crashed after a partial insert
 	// but before rolling the epoch) clears its own rows first. Safe because this
