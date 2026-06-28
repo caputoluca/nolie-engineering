@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { SortPriority } from "../../src/auctions/sort.js";
 import {
+	applyDither,
 	applyDiversity,
 	computeDemandMultiplier,
 	computeDesirabilityMultiplier,
@@ -20,6 +21,7 @@ import {
 	PLATEAU_LO_USD,
 	quantileNormalize,
 	type RankingConfig,
+	type SnapshotOrderCandidate,
 	TOKEN_BOOST_MIN,
 } from "../../src/explore/ranking.js";
 import {
@@ -1251,6 +1253,84 @@ describe("applyDiversity", () => {
 
 		expect(result).toHaveLength(3);
 		expect(result).toEqual(["a1", "b1", "a2"]);
+	});
+});
+
+describe("applyDither", () => {
+	const snap = (
+		id: string,
+		sortPriority = SortPriority.ACTIVE_BIN,
+		sortTimeMs = 0n,
+	): SnapshotOrderCandidate => ({ id, sortPriority, sortTimeMs, rankScore: 0 });
+
+	// A canonical ranked bucket, ids in score order ("0" = top).
+	const ranked = (n: number, priority = SortPriority.ACTIVE_BIN) =>
+		Array.from({ length: n }, (_, i) => snap(`${i}`, priority));
+
+	it("is a no-op when epsilon ≤ 1 (kill switch) or fewer than 2 items", () => {
+		const items = ranked(10);
+		const ids = items.map((c) => c.id);
+		expect(applyDither(items, 1.0, 42).map((c) => c.id)).toEqual(ids);
+		expect(applyDither(items, 0.5, 42).map((c) => c.id)).toEqual(ids);
+		expect(applyDither(ranked(1), 1.8, 42).map((c) => c.id)).toEqual(["0"]);
+	});
+
+	it("is deterministic for a given seed (idempotent on same-epoch retry)", () => {
+		const a = applyDither(ranked(20), 1.8, 7).map((c) => c.id);
+		const b = applyDither(ranked(20), 1.8, 7).map((c) => c.id);
+		expect(a).toEqual(b);
+	});
+
+	it("rotates the order across epochs — the top is not always the top score", () => {
+		// Across many seeds, some epoch must surface a non-top-scored card at
+		// position 0; otherwise the feed would still be frozen.
+		const topVaries = Array.from(
+			{ length: 30 },
+			(_, seed) => applyDither(ranked(20), 1.8, seed + 1)[0]?.id,
+		);
+		expect(new Set(topVaries).size).toBeGreaterThan(1);
+	});
+
+	it("preserves every id exactly once (never drops or duplicates)", () => {
+		const items = ranked(50);
+		const result = applyDither(items, 2.0, 99);
+		expect(result).toHaveLength(items.length);
+		expect(new Set(result.map((c) => c.id))).toEqual(
+			new Set(items.map((c) => c.id)),
+		);
+	});
+
+	it("never moves an item across its sortPriority bucket", () => {
+		// ACTIVE_BIN block then SCHEDULED block; high ε to stress the shuffle.
+		const items = [
+			...Array.from({ length: 8 }, (_, i) =>
+				snap(`bin${i}`, SortPriority.ACTIVE_BIN),
+			),
+			...Array.from({ length: 8 }, (_, i) =>
+				snap(`sch${i}`, SortPriority.SCHEDULED),
+			),
+		];
+		const result = applyDither(items, 3.0, 5).map((c) => c.id);
+		const lastBin = result.reduce(
+			(max, id, i) => (id.startsWith("bin") ? i : max),
+			-1,
+		);
+		const firstSched = result.findIndex((id) => id.startsWith("sch"));
+		expect(lastBin).toBeLessThan(firstSched);
+	});
+
+	it("leaves the ACTIVE_AUCTION bucket in ending-soonest order untouched", () => {
+		// Active auctions are ordered by sortTimeMs (ending soonest), a hard
+		// correctness property — dither must never reorder them, for any seed.
+		const auctions = Array.from({ length: 10 }, (_, i) =>
+			snap(`au${i}`, SortPriority.ACTIVE_AUCTION, BigInt(i)),
+		);
+		const expected = auctions.map((c) => c.id);
+		for (let seed = 0; seed < 20; seed++) {
+			expect(applyDither(auctions, 3.0, seed).map((c) => c.id)).toEqual(
+				expected,
+			);
+		}
 	});
 });
 

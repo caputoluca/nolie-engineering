@@ -554,6 +554,19 @@ export const TOKEN_BOOST_MIN = 1.0;
 export const DEMAND_MULT_MAX = 1.3;
 
 /**
+ * Default dither strength (ε) for the feed-rotation pass (`applyDither`). ε MUST
+ * be > 1 — the perturbation std-dev is `ln(ε)`, so ε ≤ 1 means zero noise (the
+ * no-op / kill-switch value). At ε ≈ 1.8 the very top still tends to hold while
+ * the mid-feed and tail reshuffle every epoch, giving fresh / under-served
+ * listings recurring trial impressions without scrambling the genuinely-best
+ * cards. Tune up toward ~2.5 to force the top itself to rotate harder, down
+ * toward ~1.3 to barely move it. This is the cheap, engagement-blind rotation
+ * lever that replaces the removed slot policy (Ted Dunning result dithering:
+ * `log(rank) + N(0, ln ε)`).
+ */
+export const DEFAULT_DITHER_EPSILON = 1.8;
+
+/**
  * Above this length the additive `longTitlePenalty` fires at the base-score
  * level. Picked at 60 — Etsy uses 70, eBay 60-70; TCG titles are naturally
  * short, so we cap tight (docs §2).
@@ -1194,6 +1207,96 @@ export function compareForSnapshot(
 		return b.rankScore - a.rankScore;
 	}
 	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * mulberry32 — a tiny, fast, well-distributed seeded PRNG. Deterministic per
+ * seed so the dither pass reproduces the IDENTICAL order when the worker
+ * re-runs the same epoch: the materialize job is idempotent (it deletes and
+ * rewrites the epoch's rows), so a retry MUST land the same order or a
+ * mid-scroll reader's keyset positions would shift under them.
+ */
+function mulberry32(seed: number): () => number {
+	let a = seed >>> 0;
+	return () => {
+		a = (a + 0x6d2b79f5) | 0;
+		let t = Math.imul(a ^ (a >>> 15), 1 | a);
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	};
+}
+
+/** Standard-normal sample via Box–Muller from a uniform PRNG. */
+function gaussian(rng: () => number): number {
+	// u ∈ (0,1] — `1 - rng()` guards the log against a 0 draw.
+	const u = 1 - rng();
+	const v = rng();
+	return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+/**
+ * Ted Dunning result dithering over an already-`compareForSnapshot`-ordered
+ * candidate list: re-sort each rankScore-ordered bucket by
+ * `log(rank) + N(0, ln ε)` so near-tied listings reshuffle each epoch and
+ * lower-ranked / fresh listings get recurring trial impressions instead of a
+ * frozen top. Because the noise sits on `log(rank)`, the spread is
+ * multiplicative — the very top barely moves while deep items can jump many
+ * slots, exactly the "give the tail a rotating shot without scrambling the best
+ * cards" behavior. Raise ε to rotate the top itself harder.
+ *
+ * This is the engagement-BLIND rotation lever that replaces the removed slot
+ * policy: it perturbs by rank only, never by demand/engagement, so it cannot
+ * reproduce the anchor-pool inversion that pinned old high-engagement cards
+ * above fresher, higher-scored ones.
+ *
+ * Two invariants are preserved so this drops in BEFORE `applyDiversity` (which
+ * then re-enforces the per-seller spacing on the dithered order):
+ *   - Never crosses a `sortPriority` bucket — a dithered ACTIVE_BIN row must not
+ *     leapfrog a SCHEDULED one. Buckets are contiguous runs in the sorted input
+ *     (same precondition `applyDiversity` documents); items stay in their bucket.
+ *   - The ACTIVE_AUCTION bucket is left UNTOUCHED: it's ordered ending-soonest
+ *     on `sortTimeMs`, a hard correctness property — randomizing it could bury
+ *     an auction about to close.
+ *
+ * `seed` is the rank epoch (deterministic per tick, idempotent on retry). ε ≤ 1
+ * (or < 2 candidates) is a no-op returning the input order — the kill-switch /
+ * disabled path.
+ */
+export function applyDither<T extends SnapshotOrderCandidate>(
+	ordered: T[],
+	epsilon: number,
+	seed: number,
+): T[] {
+	if (epsilon <= 1 || ordered.length < 2) return ordered;
+	const sigma = Math.log(epsilon);
+	const rng = mulberry32(seed);
+	const out: T[] = [];
+
+	let bucketStart = 0;
+	for (let i = 1; i <= ordered.length; i++) {
+		if (
+			i === ordered.length ||
+			(ordered[i] as T).sortPriority !==
+				(ordered[bucketStart] as T).sortPriority
+		) {
+			const bucket = ordered.slice(bucketStart, i);
+			if ((bucket[0] as T).sortPriority === SortPriority.ACTIVE_AUCTION) {
+				// Ending-soonest order is load-bearing — never perturb it.
+				out.push(...bucket);
+			} else {
+				const keyed = bucket.map((c, rank) => ({
+					c,
+					// rank is 0-based within the bucket → log(rank + 1); index 0 → 0.
+					key: Math.log(rank + 1) + sigma * gaussian(rng),
+				}));
+				keyed.sort((a, b) => a.key - b.key);
+				for (const { c } of keyed) out.push(c);
+			}
+			bucketStart = i;
+		}
+	}
+
+	return out;
 }
 
 /**
