@@ -1,6 +1,7 @@
 import { DAY_MS, SOLD_VISIBILITY_DAYS } from "@nolie/core/constants/listings";
 import { EngagementEventName } from "@nolie/core/engagement/catalog";
 import {
+	applyDither,
 	applyDiversity,
 	compareForSnapshot,
 	computeDemandMultiplier,
@@ -8,6 +9,7 @@ import {
 	computePriceMult,
 	computeRankBaseScore,
 	computeRankScore,
+	DEFAULT_DITHER_EPSILON,
 	DEFAULT_RANKING_CONFIG,
 	EXPLORE_FEED_SERVING_ENABLED_KEY,
 	EXPLORE_RANK_EPOCH_KEY,
@@ -52,6 +54,14 @@ const FEED_ENTRY_CHUNK = 1000;
 // filter-then-truncate cliff the migration removes). It is a far-out safety
 // ceiling, not a top-K cut; raise it when the eligible catalog approaches it.
 const EXPLORE_CANDIDATE_LIMIT = 5000;
+
+// Feed-rotation dither strength (ε). Defaults to the core `DEFAULT_DITHER_EPSILON`
+// (1.8); override via env for live tuning without a code change. ε ≤ 1 disables
+// the perturbation (no-op) — the in-band kill switch alongside `ENABLE_FEED_DITHER`.
+const FEED_DITHER_EPSILON = (() => {
+	const raw = Number.parseFloat(process.env.FEED_DITHER_EPSILON ?? "");
+	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DITHER_EPSILON;
+})();
 
 function parseEpoch(raw: string | null): number {
 	if (raw == null) return 0;
@@ -962,7 +972,18 @@ async function materializeFeedOrder(
 	});
 
 	rows.sort(compareForSnapshot);
-	const orderedIds = applyDiversity(rows, DEFAULT_RANKING_CONFIG);
+	// Dither the rankScore-ordered buckets BEFORE diversity so fresh / under-served
+	// listings rotate into view each epoch instead of a frozen top (Ted Dunning
+	// result dithering). Seeded by the epoch → deterministic, so a same-epoch retry
+	// reproduces the identical order (the deleteMany→recreate below stays
+	// idempotent). Engagement-blind, so it can't reproduce the slot-policy
+	// inversion we removed. Kill switch: `ENABLE_FEED_DITHER=false` → serves the
+	// pure score order (or set `FEED_DITHER_EPSILON` ≤ 1).
+	const ditherEnabled = process.env.ENABLE_FEED_DITHER !== "false";
+	const ordered = ditherEnabled
+		? applyDither(rows, FEED_DITHER_EPSILON, epoch)
+		: rows;
+	const orderedIds = applyDiversity(ordered, DEFAULT_RANKING_CONFIG);
 
 	// Idempotency: a same-epoch retry (the job crashed after a partial insert
 	// but before rolling the epoch) clears its own rows first. Safe because this
@@ -1336,6 +1357,9 @@ export async function refresh(ctx: WorkerContextBase): Promise<void> {
 			rowsUpdated,
 			// NL-384: rows written to `feed_entry` for the next epoch this tick.
 			feedEntriesWritten,
+			// Feed-rotation dither: the ε in force this tick, or null when disabled.
+			feedDitherEpsilon:
+				process.env.ENABLE_FEED_DITHER !== "false" ? FEED_DITHER_EPSILON : null,
 			sellersTrustUpdated,
 			sellerTrustMax,
 			addToCartMax,
