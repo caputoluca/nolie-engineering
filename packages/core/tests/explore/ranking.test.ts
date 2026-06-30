@@ -11,7 +11,9 @@ import {
 	computePriceMult,
 	computeRankBaseScore,
 	computeRankScore,
+	computeRecencyLedScore,
 	DEFAULT_RANKING_CONFIG,
+	DEFAULT_RECENCY_LED_CONFIG,
 	DEMAND_MULT_MAX,
 	type DiversityCandidate,
 	LONG_TITLE_MAX_CHARS,
@@ -21,6 +23,8 @@ import {
 	PLATEAU_LO_USD,
 	quantileNormalize,
 	type RankingConfig,
+	RECENCY_LED_INELIGIBLE_TIER,
+	type RecencyLedInput,
 	type SnapshotOrderCandidate,
 	TOKEN_BOOST_MIN,
 } from "../../src/explore/ranking.js";
@@ -1483,5 +1487,122 @@ describe("ranking invariant (NL-345)", () => {
 		// The comment on RankScoreInput deliberately refers to the flag in prose
 		// (hyphenated) so the camelCase column identifier appears zero times.
 		expect(source).not.toContain("sellerPaysShipping");
+	});
+});
+
+describe("computeRecencyLedScore — gate → freshness → boosts", () => {
+	const NOW = new Date("2026-06-29T21:00:00Z");
+	const cfg = DEFAULT_RECENCY_LED_CONFIG;
+	const base = (over: Partial<RecencyLedInput> = {}): RecencyLedInput => ({
+		priceUSD: 50,
+		createdAt: new Date(NOW.getTime() - 5 * HOUR_MS),
+		now: NOW,
+		title: "Greninja ex 187/191 Surging Sparks",
+		description: null,
+		categoryId: "pokemon",
+		condition: "nm",
+		grader: null,
+		maxMatchedWeight: 1,
+		demandPct: 0,
+		...over,
+	});
+
+	it("gates out sub-floor, merch, and excluded-category listings below every eligible row", () => {
+		const eligible = computeRecencyLedScore(base(), cfg);
+		const cheap = computeRecencyLedScore(
+			base({ priceUSD: cfg.priceFloorUSD - 1 }),
+			cfg,
+		);
+		const binder = computeRecencyLedScore(
+			base({ title: "Vault X Premium Binder Pikachu" }),
+			cfg,
+		);
+		const accessory = computeRecencyLedScore(
+			base({ categoryId: "accessories" }),
+			cfg,
+		);
+
+		expect(eligible).toBeGreaterThan(0);
+		// Every gated row sits in the ineligible tier, far below any eligible one.
+		for (const gated of [cheap, binder, accessory]) {
+			expect(gated).toBeLessThan(RECENCY_LED_INELIGIBLE_TIER + 1);
+			expect(gated).toBeLessThan(eligible);
+		}
+	});
+
+	it("orders eligible listings fresher-first, and the freshest gated row still loses to the stalest eligible one", () => {
+		const fresh = computeRecencyLedScore(
+			base({ createdAt: new Date(NOW.getTime() - 2 * HOUR_MS) }),
+			cfg,
+		);
+		const stale = computeRecencyLedScore(
+			base({ createdAt: new Date(NOW.getTime() - 200 * HOUR_MS) }),
+			cfg,
+		);
+		const freshButGated = computeRecencyLedScore(
+			base({ priceUSD: 2, createdAt: NOW }),
+			cfg,
+		);
+
+		expect(fresh).toBeGreaterThan(stale); // freshness is the spine
+		expect(stale).toBeGreaterThan(freshButGated); // gate beats recency
+	});
+
+	it("applies chase / NM / Pokémon / price-tier as boosts on top of freshness", () => {
+		const plain = base({
+			title: "Bidoof 111/191 Surging Sparks",
+			categoryId: "onepiece",
+			condition: "lp",
+			grader: null,
+			priceUSD: 25,
+			maxMatchedWeight: 1,
+		});
+		const plainScore = computeRecencyLedScore(plain, cfg);
+
+		// Same freshness, each boost added in isolation must raise the score.
+		const charizardWeight = maxMatchedDesirabilityWeight(
+			matchTokens("Charizard ex 199/165", TOKEN_DICTIONARY),
+		);
+		expect(charizardWeight).toBeGreaterThan(1); // sanity: dictionary matched
+		expect(
+			computeRecencyLedScore(
+				{ ...plain, maxMatchedWeight: charizardWeight, priceUSD: 50 },
+				cfg,
+			),
+		).toBeGreaterThan(computeRecencyLedScore({ ...plain, priceUSD: 50 }, cfg));
+		expect(
+			computeRecencyLedScore({ ...plain, condition: "nm" }, cfg),
+		).toBeGreaterThan(plainScore); // NM
+		expect(
+			computeRecencyLedScore({ ...plain, grader: "psa" }, cfg),
+		).toBeGreaterThan(plainScore); // graded
+		expect(
+			computeRecencyLedScore({ ...plain, categoryId: "pokemon" }, cfg),
+		).toBeGreaterThan(plainScore); // Pokémon
+		expect(
+			computeRecencyLedScore({ ...plain, priceUSD: 100 }, cfg),
+		).toBeGreaterThan(plainScore); // price-tier
+	});
+
+	it("does not let the chase boost ride below the chase price gate", () => {
+		const charizardWeight = maxMatchedDesirabilityWeight(
+			matchTokens("Charizard ex 199/165", TOKEN_DICTIONARY),
+		);
+		const cheapChase = base({
+			title: "Charizard ex 199/165",
+			priceUSD: cfg.chaseMinPriceUSD - 1,
+			maxMatchedWeight: charizardWeight,
+		});
+		const cheapPlain = base({
+			title: "Bidoof 111/191",
+			priceUSD: cfg.chaseMinPriceUSD - 1,
+			maxMatchedWeight: 1,
+		});
+		// Both still eligible (above $15 floor) but the chase boost is gated off, so
+		// the only difference (the dictionary weight) must not move the score.
+		expect(computeRecencyLedScore(cheapChase, cfg)).toBeCloseTo(
+			computeRecencyLedScore(cheapPlain, cfg),
+			10,
+		);
 	});
 });
