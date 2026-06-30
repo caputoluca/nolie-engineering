@@ -232,12 +232,14 @@ async function refreshSellerTrust(
 	const rows = await prisma.$queryRaw<SellerTrustInputRow[]>`
 		WITH global_review AS (
 			SELECT AVG("rating")::float AS "avg" FROM "review"
+			WHERE "hidden" = false
 		),
 		per_seller_review AS (
 			SELECT "sellerProfileId",
 			       COUNT(*)::int        AS "count",
 			       AVG("rating")::float AS "average"
 			FROM "review"
+			WHERE "hidden" = false
 			GROUP BY "sellerProfileId"
 		),
 		per_seller_sales AS (
