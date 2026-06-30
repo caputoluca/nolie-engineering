@@ -531,6 +531,13 @@ export const MERCH_KEYWORDS: ReadonlyArray<string> = [
 	"cosplay",
 	"statue",
 	"magnet",
+	// Supplies/accessories that get miscategorized as cards (a binder/toploader
+	// photographed with a chase character on the cover). Whole-word matched.
+	"binder",
+	"toploader",
+	"top loader",
+	"deck box",
+	"card saver",
 ];
 
 /**
@@ -1099,6 +1106,124 @@ export function computeDesirabilityMultiplier(
 	const raw =
 		1 + (Math.max(1, input.maxMatchedWeight) - 1) * config.desirabilityStrength;
 	return Math.max(TOKEN_BOOST_MIN, Math.min(config.desirabilityMultMax, raw));
+}
+
+/**
+ * Recency-led explore ordering (stopgap, behind the worker's
+ * `ENABLE_EXPLORE_RECENCY_LED` switch). The v5 scorer froze the feed because
+ * `rankScore` is engagement-dominated and barely moves between ticks; this
+ * orders the /explore feed by FRESHNESS within an eligibility gate instead.
+ *
+ *   eligible = priceUSD ≥ floor AND not-merch/novelty AND category not excluded
+ *   freshness = 0.5^(ageHours / halfLife)
+ *   score(eligible)   = freshness · (1 + chase + demand + nice + pokemon + priceTier)
+ *   score(ineligible) = INELIGIBLE_TIER + freshness   ← always below every eligible row
+ *
+ * Pure + side-effect free, and DELIBERATELY scoped to the explore feed
+ * materialization — it never touches the shared `rankScore` column, so the
+ * profile "featured" sort and the Klaviyo trending feed are unaffected.
+ */
+export interface RecencyLedConfig {
+	/** Minimum effective price (USD) to be eligible for the fresh top. */
+	priceFloorUSD: number;
+	/** Freshness decay half-life (hours). */
+	freshnessHalfLifeHours: number;
+	/** Boost weights, all riding on top of freshness (multiplicative). */
+	chaseWeight: number;
+	demandWeight: number;
+	niceWeight: number;
+	pokemonWeight: number;
+	priceTierWeight: number;
+	/** Price-tier ramp: priceTier = clamp01((price − lo) / (hi − lo)). */
+	priceTierLoUSD: number;
+	priceTierHiUSD: number;
+	/** Categories never eligible for the fresh top (accessories, art). */
+	excludedCategories: ReadonlyArray<string>;
+	/** Effective price the chase boost gates on (cheap chase doesn't ride). */
+	chaseMinPriceUSD: number;
+}
+
+export const DEFAULT_RECENCY_LED_CONFIG: RecencyLedConfig = {
+	priceFloorUSD: 15,
+	freshnessHalfLifeHours: 30,
+	chaseWeight: 0.8,
+	demandWeight: 0.5,
+	niceWeight: 0.35,
+	pokemonWeight: 0.5,
+	priceTierWeight: 0.4,
+	priceTierLoUSD: 20,
+	priceTierHiUSD: 100,
+	excludedCategories: ["accessories", "art"],
+	chaseMinPriceUSD: 20,
+};
+
+/** Floor that puts every ineligible row below every eligible one in one sort key. */
+export const RECENCY_LED_INELIGIBLE_TIER = -1000;
+
+export interface RecencyLedInput {
+	priceUSD: number | null;
+	createdAt: Date;
+	now: Date;
+	title: string;
+	description: string | null;
+	/** `Listing.categoryId` (slug) or null. */
+	categoryId: string | null;
+	/** `Listing.condition` ("nm" | "lp" | …) or null (graded slabs are null). */
+	condition: string | null;
+	/** `Listing.grader` ("psa" | …) or null/empty for raw. */
+	grader: string | null;
+	/** `maxMatchedDesirabilityWeight(tokens)` — chase-character weight in [1, 1.3]. */
+	maxMatchedWeight: number;
+	/** Bot-filtered demand percentile in [0,1] (the worker's quantile-normalized demand). */
+	demandPct: number;
+}
+
+export function computeRecencyLedScore(
+	input: RecencyLedInput,
+	config: RecencyLedConfig,
+): number {
+	const ageHours = Math.max(
+		0,
+		(input.now.getTime() - input.createdAt.getTime()) / 3_600_000,
+	);
+	const freshness = 0.5 ** (ageHours / config.freshnessHalfLifeHours);
+
+	const price = input.priceUSD;
+	const eligible =
+		price !== null &&
+		price >= config.priceFloorUSD &&
+		!matchesMerchKeyword(input.title, input.description) &&
+		!matchesNegativeKeyword(input.title, input.description) &&
+		!(
+			input.categoryId !== null &&
+			config.excludedCategories.includes(input.categoryId)
+		);
+	if (!eligible) return RECENCY_LED_INELIGIBLE_TIER + freshness;
+
+	// chase ∈ [0,1] from the curated dictionary weight (1.0–1.3), $20-gated.
+	const chase =
+		(price as number) >= config.chaseMinPriceUSD
+			? clamp01((Math.max(1, input.maxMatchedWeight) - 1) / 0.3)
+			: 0;
+	const nice =
+		input.condition === "nm" || (input.grader != null && input.grader !== "")
+			? 1
+			: 0;
+	const pokemon = input.categoryId === "pokemon" ? 1 : 0;
+	const priceTier = clamp01(
+		((price as number) - config.priceTierLoUSD) /
+			(config.priceTierHiUSD - config.priceTierLoUSD),
+	);
+
+	return (
+		freshness *
+		(1 +
+			config.chaseWeight * chase +
+			config.demandWeight * clamp01(input.demandPct) +
+			config.niceWeight * nice +
+			config.pokemonWeight * pokemon +
+			config.priceTierWeight * priceTier)
+	);
 }
 
 export interface QuantileValue {

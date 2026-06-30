@@ -9,8 +9,10 @@ import {
 	computePriceMult,
 	computeRankBaseScore,
 	computeRankScore,
+	computeRecencyLedScore,
 	DEFAULT_DITHER_EPSILON,
 	DEFAULT_RANKING_CONFIG,
+	DEFAULT_RECENCY_LED_CONFIG,
 	EXPLORE_FEED_SERVING_ENABLED_KEY,
 	EXPLORE_RANK_EPOCH_KEY,
 	EXPLORE_RANKING_ENABLED_KEY,
@@ -966,10 +968,51 @@ async function materializeFeedOrder(
 			sortPriority: true,
 			sortTimeMs: true,
 			rankScore: true,
+			// Recency-led inputs (used only when ENABLE_EXPLORE_RECENCY_LED=true).
+			createdAt: true,
+			price: true,
+			startingBid: true,
+			listingType: true,
+			categoryId: true,
+			condition: true,
+			grader: true,
+			tokenBoost: true,
 		},
 		orderBy: [{ sortPriority: "asc" }, { rankScore: "desc" }, { id: "asc" }],
 		take: EXPLORE_CANDIDATE_LIMIT,
 	});
+
+	// Recency-led explore ordering (stopgap). ON by default; set
+	// ENABLE_EXPLORE_RECENCY_LED=false to fall back to the engagement-led
+	// `rankScore` order. Overwrites each candidate's IN-MEMORY rankScore with the
+	// freshness-gated score, so `compareForSnapshot` orders non-auction buckets by
+	// it while auctions stay ending-soonest (compareForSnapshot ignores rankScore
+	// for the ACTIVE_AUCTION bucket). The persisted rankScore column — shared with
+	// the profile "featured" sort and the Klaviyo trending feed — is NOT written.
+	// demandPct is recovered from the stored demand multiplier in `tokenBoost`
+	// (= clamp(1 + 0.3·demandPct)); the scorer re-clamps, so the raw inverse is fine.
+	if (process.env.ENABLE_EXPLORE_RECENCY_LED !== "false") {
+		const now = new Date();
+		for (const r of rows) {
+			r.rankScore = computeRecencyLedScore(
+				{
+					priceUSD: effectivePriceUSD(r),
+					createdAt: r.createdAt,
+					now,
+					title: r.title,
+					description: null,
+					categoryId: r.categoryId,
+					condition: r.condition,
+					grader: r.grader,
+					maxMatchedWeight: maxMatchedDesirabilityWeight(
+						matchTokens(r.title, TOKEN_DICTIONARY),
+					),
+					demandPct: (r.tokenBoost - 1) / 0.3,
+				},
+				DEFAULT_RECENCY_LED_CONFIG,
+			);
+		}
+	}
 
 	rows.sort(compareForSnapshot);
 	// Dither the rankScore-ordered buckets BEFORE diversity so fresh / under-served
