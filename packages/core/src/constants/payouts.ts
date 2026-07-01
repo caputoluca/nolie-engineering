@@ -2,9 +2,15 @@ import { addBusinessDays } from "../business-days.js";
 
 /**
  * Payout release window: Number of days after marking as fulfilled
- * before the seller payout is automatically released.
+ * before the seller payout is automatically released. Tracks the 2-day
+ * post-delivery dispute window (`DISPUTE_WINDOW_DAYS_AFTER_FULFILLMENT`)
+ * so payout never releases while the buyer can still dispute — closing the
+ * 1-day gap that forced a clawback. Propagates via `getPayoutReleaseDelayMs()`,
+ * applied at every parcel release site (delivery webhook, pickup auto-complete,
+ * deemed-delivered timeout). Fast payouts release at label purchase by design
+ * and are unaffected.
  */
-export const PAYOUT_RELEASE_WINDOW_IN_DAYS = 1;
+export const PAYOUT_RELEASE_WINDOW_IN_DAYS = 2;
 
 /**
  * Calculates the payout release delay in milliseconds.
