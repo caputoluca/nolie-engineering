@@ -171,6 +171,8 @@ export const checkoutRoutes = createRoutes((create, app) => {
 				bnplEligible: full.bnplEligible,
 				selectedShippingAddressId: full.selectedShippingAddressId,
 				shippingCountryNotSupported: full.shippingCountryNotSupported,
+				canPurchase: full.canPurchase,
+				cannotPurchaseReason: full.cannotPurchaseReason,
 			});
 		},
 	});

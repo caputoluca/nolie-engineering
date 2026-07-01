@@ -2,9 +2,15 @@ import { addBusinessDays } from "../business-days.js";
 
 /**
  * Payout release window: Number of days after marking as fulfilled
- * before the seller payout is automatically released.
+ * before the seller payout is automatically released. Tracks the 2-day
+ * post-delivery dispute window (`DISPUTE_WINDOW_DAYS_AFTER_FULFILLMENT`)
+ * so payout never releases while the buyer can still dispute — closing the
+ * 1-day gap that forced a clawback. Propagates via `getPayoutReleaseDelayMs()`,
+ * applied at every parcel release site (delivery webhook, pickup auto-complete,
+ * deemed-delivered timeout). Fast payouts release at label purchase by design
+ * and are unaffected.
  */
-export const PAYOUT_RELEASE_WINDOW_IN_DAYS = 1;
+export const PAYOUT_RELEASE_WINDOW_IN_DAYS = 2;
 
 /**
  * Calculates the payout release delay in milliseconds.
@@ -21,8 +27,9 @@ export function getPayoutReleaseDelayMs(): number {
  * label still gets the full buyer-noticing window before payout.
  *
  * Set just under Whatnot's 10-day standard, leaving a gap below the
- * 10-business-day deemed-delivered review-prompt clock
- * (DEEMED_DELIVERED_BUSINESS_DAYS). Widened from the original 3 days: the
+ * deemed-delivered review-prompt clock (DEEMED_DELIVERED_BUSINESS_DAYS,
+ * 10 BD) so the buyer-noticing window always leads payout. Widened from the
+ * original 3 days: the
  * loss-reserve model couldn't reliably absorb buyers filing INR after a
  * payout had already released, so the buyer-noticing window now leads the
  * payout. Revisit if INR rates stay well inside what the reserve covers.
@@ -60,13 +67,37 @@ export const DEEMED_SHIPPED_BUSINESS_DAYS = 2;
  *     payout via its own `releaseLetterPayouts` clock (same 7-BD beat).
  *     The main path for the letters that never emit a usable scan.
  *
- * 7 business days ≈ 9-11 calendar days. Was 10 under NL-285's
- * letter-only model; lowered once the letter rail started flipping on the
- * real `delivered` scan, leaving this clock as the no-scan fallback.
+ * 10 business days ≈ 14 calendar days. Widened back from 7 after parcels
+ * were deem-flipped to `delivered` while genuinely still in transit: 10 BD
+ * clears USPS Ground Advantage's realistic transit tail (2-5 BD quoted, plus
+ * the slow / late-scan long tail), so the clock rarely fires ahead of a real
+ * delivery scan. The parcel rail is additionally scan-guarded — a package the
+ * carrier still shows actively moving is held past this clock (see
+ * `PARCEL_ACTIVE_TRANSIT_GRACE_BUSINESS_DAYS` below). Restores NL-285's
+ * original 10-BD intent that `LETTER_PAYOUT_RELEASE_BUSINESS_DAYS` still
+ * documents itself as sitting just under.
  * Decoupled from buyer INR rights (user-initiated, time-from-purchase,
  * not status-gated).
  */
-export const DEEMED_DELIVERED_BUSINESS_DAYS = 7;
+export const DEEMED_DELIVERED_BUSINESS_DAYS = 10;
+
+/**
+ * Parcel-rail active-transit grace — the "not recently moving" half of the
+ * deemed-delivered scan guard (mirrors Walmart's "N days no movement" terminal
+ * check and the stalled-scan signal Route/ShipBob/Wonderment productize). The
+ * `promoteStaleOrders` cron will NOT deem a parcel `delivered` if the carrier
+ * posted an `in_transit` scan within this many business days — the package is
+ * demonstrably still moving, so the missed-scan backstop doesn't apply yet.
+ * Everything else still flips: `out_for_delivery` (reached destination, missed
+ * the final scan), a stale `in_transit` (moving a week ago, silent since), and
+ * never-scanned parcels. Letter rail is exempt (it rarely scans at all).
+ *
+ * 5 BD ≈ 7 calendar days, matching USPS's own missing-mail search floor — the
+ * defensible low end for "no longer actively moving" (below ~5 days of silence
+ * false-positives heavily, since normal transit scan gaps run 24-72h). Business
+ * days so a routine weekend gap between scans never reads as stalled.
+ */
+export const PARCEL_ACTIVE_TRANSIT_GRACE_BUSINESS_DAYS = 5;
 
 /**
  * Resolves the absolute timestamp at which a label is deemed shipped

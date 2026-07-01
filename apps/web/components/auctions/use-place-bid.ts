@@ -7,6 +7,7 @@ import {
 	type BidCreateResponse,
 	BidCreateSchema,
 } from "@nolie/schemas/auction/bid";
+import { BidValidationCode } from "@nolie/schemas/auction/bid-validation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { correctCardStoreBid } from "@/components/auction-card/store";
 import { BID_ERROR_MESSAGES, placeBid } from "@/lib/mutations/bids";
@@ -27,6 +28,20 @@ export const BID_TIMEOUT_ERROR = "BID_CONFIRMATION_TIMEOUT";
  */
 export function isBidTimeoutError(errors?: string[]): boolean {
 	return errors?.includes(BID_TIMEOUT_ERROR) ?? false;
+}
+
+/**
+ * Whether the bid failed because the buyer's account is suspended from buying
+ * (dispute automation P3). Retrying can never succeed, so the outcome modal
+ * offers a Close button instead of "Try again". Matches on the mapped message
+ * (the source of truth for both the sync API-error map and the worker rejection
+ * path), so it stays correct if the copy changes.
+ */
+export function isBidSuspendedError(errors?: string[]): boolean {
+	return (
+		errors?.includes(BID_ERROR_MESSAGES[BidValidationCode.buyer_suspended]) ??
+		false
+	);
 }
 
 const BID_RESULT_TIMEOUT_MS = 10_000;
