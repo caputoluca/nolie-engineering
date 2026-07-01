@@ -238,6 +238,9 @@ export interface ValidateUserInput {
 	hasPaymentMethod: boolean;
 	hasShippingAddress: boolean;
 	shippingCountry: string | null;
+	/** Dispute automation P3 — buyer suspended from buying. Blocks bidding before
+	 *  any other eligibility check. */
+	buyingSuspended: boolean;
 }
 
 export type UserCanBidResult =
@@ -250,6 +253,13 @@ export function validateUserCanBid(
 	user: ValidateUserInput,
 	auction: Pick<AuctionOut, "itemType">,
 ): UserCanBidResult {
+	if (user.buyingSuspended) {
+		return {
+			valid: false,
+			message: "Your ability to buy on NoLie is paused",
+			code: BidValidationCode.buyer_suspended,
+		};
+	}
 	if (!user.hasPaymentMethod) {
 		return {
 			valid: false,

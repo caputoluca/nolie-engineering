@@ -32,6 +32,7 @@ import type { FulfillmentMethodType } from "@nolie/schemas/fulfillment";
 import { getSpendableBalance, holdCredits } from "@nolie/wallet";
 import { COUNTRY_CODE_US } from "../../constants/country.js";
 import { logger } from "../../logger.js";
+import { assertBuyingNotSuspended } from "../buyer/suspension.js";
 import { apiTx } from "../db/tx.js";
 import {
 	reportError,
@@ -206,6 +207,7 @@ export async function claimCheckout(
 					email: true,
 					phone: true,
 					taxExemptStatus: true,
+					buyingSuspendedAt: true,
 					billing: { select: { customerId: true } },
 					shippingAddresses: quote.shippingAddressId
 						? {
@@ -272,6 +274,10 @@ export async function claimCheckout(
 			code: "BUYER_NOT_FOUND",
 		});
 	}
+
+	// Buying suspension gate (dispute automation P3). Thrown before any charge or
+	// reservation — nothing has moved yet.
+	assertBuyingNotSuspended(buyer);
 	const customerId = buyer.billing?.customerId;
 	// Saved-card and BNPL rails charge a pre-saved customer; the guest rail
 	// charges a freshly-collected method client-side and needs no customer here.

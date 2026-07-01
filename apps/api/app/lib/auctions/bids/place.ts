@@ -113,6 +113,7 @@ export async function validateUserFromCache(
 			hasPaymentMethod: !!user.billing?.defaultPaymentMethodId,
 			hasShippingAddress: !!user.defaultShippingAddressId,
 			shippingCountry: user.defaultShippingAddress?.country ?? null,
+			buyingSuspended: !!user.buyingSuspendedAt,
 		};
 
 		profile = {
