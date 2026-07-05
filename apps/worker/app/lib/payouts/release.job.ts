@@ -3,6 +3,7 @@ import {
 	isPrismaRecordNotFoundError,
 	isPrismaUniqueError,
 	PayoutStatus,
+	RefundStatus,
 } from "@nolie/db";
 import { PaymentErrorCode } from "@nolie/payments";
 import { config } from "../../config.js";
@@ -102,7 +103,19 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 					// Needed to derive the card-charged amount (total − credit)
 					// so we don't pin a transfer to a charge that can't fund it.
 					totalCents: true,
-					appliedCredits: { select: { appliedCents: true } },
+					// `restoredCents` = credit reversed by refunds so far. Paired with
+					// the succeeded refunds below, it derives how much has been
+					// refunded to the CARD (see the source_transaction guard).
+					appliedCredits: {
+						select: { appliedCents: true, restoredCents: true },
+					},
+					// Succeeded refunds against this order. A refund to the card shrinks
+					// the charge's transferable balance, so an absorbed / partially
+					// refunded charge can't fund the seller's pinned transfer.
+					refunds: {
+						where: { status: RefundStatus.succeeded },
+						select: { totalCents: true },
+					},
 					// NL-319: defensive gate against paths that still enqueue
 					// `payout.release` on a cancelled order (the dispute
 					// resolver — its always-queue contract — and any late
@@ -542,24 +555,41 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	const amountInDollars = netToTransferCents / 100;
 
 	// Stripe pins a transfer with `source_transaction` to its charge, and the sum
-	// of transfers against one charge can never exceed the charge amount
-	// (docs.stripe.com/connect/separate-charges-and-transfers). When the buyer
-	// paid partly from wallet credit, the card charge is only
-	// `totalCents − creditApplied` — smaller than the seller's net — and the
-	// credit-covered portion sits in our platform balance, not the charge. Pin to
-	// that undersized charge and Stripe rejects the over-amount. So we attach the
-	// source charge only when it can provably fund the WHOLE earning's payout
-	// (`netAmount`, not just this run's slice — partial releases share one charge
-	// and must not overshoot it in aggregate). Otherwise we transfer straight from
-	// the platform balance, exactly like the full-credit case where there's no
-	// charge to pin to at all. Keeping the source charge wherever it fits
-	// preserves its benefit: the transfer succeeds against unsettled charge funds
-	// instead of failing on a thin available balance.
+	// of transfers against one charge can never exceed the charge's UN-REFUNDED
+	// amount (docs.stripe.com/connect/separate-charges-and-transfers). Two things
+	// shrink that ceiling below the seller's net:
+	//   1. Wallet credit — the card charge is only `totalCents − creditApplied`;
+	//      the credit-covered portion sits in our platform balance, not the charge.
+	//   2. Refunds to the card — an absorbed dispute (buyer refunded, seller still
+	//      paid) or a partial refund_buyer refunds part of the charge back to the
+	//      buyer BEFORE this release runs, so those funds are no longer transferable.
+	// Pin to a charge that can't fund the WHOLE earning's payout (`netAmount`, not
+	// just this run's slice — partial releases share one charge and must not
+	// overshoot it in aggregate) and Stripe rejects the over-amount. So we attach
+	// the source charge only when its remaining balance provably covers `netAmount`;
+	// otherwise we transfer straight from the platform balance, exactly like the
+	// full-credit case where there's no charge to pin to at all. Keeping the source
+	// charge wherever it fits preserves its benefit: the transfer succeeds against
+	// unsettled charge funds instead of failing on a thin available balance.
 	const appliedCreditCents = earning.order.appliedCredits.reduce(
 		(sum, c) => sum + c.appliedCents,
 		0,
 	);
 	const cardChargedCents = earning.order.totalCents - appliedCreditCents;
+
+	// Card-side refunds against the charge = total refunded (all tenders) − the
+	// wallet-credit share reversed (`AppliedCredit.restoredCents`). Refund rows
+	// don't store the card/credit split, so we derive it from the two aggregates.
+	const totalRefundedCents = earning.order.refunds.reduce(
+		(sum, r) => sum + r.totalCents,
+		0,
+	);
+	const creditReversedCents = earning.order.appliedCredits.reduce(
+		(sum, c) => sum + c.restoredCents,
+		0,
+	);
+	const cardRefundedCents = totalRefundedCents - creditReversedCents;
+	const chargeAvailableCents = cardChargedCents - cardRefundedCents;
 
 	// NL-263 fast payout: a transfer pinned with `source_transaction` inherits the
 	// charge's pending status — it only lands AVAILABLE on the seller's Connect
@@ -577,7 +607,7 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 	const sourceChargeId =
 		!isEarlyRelease &&
 		earning.order.paymentChargeId !== null &&
-		earning.netAmount <= cardChargedCents
+		earning.netAmount <= chargeAvailableCents
 			? earning.order.paymentChargeId
 			: null;
 
@@ -596,6 +626,8 @@ export async function release(job: PayoutJob<"release">, ctx: PayoutsContext) {
 			sourcePinned: sourceChargeId !== null,
 			cardChargedCents,
 			appliedCreditCents,
+			cardRefundedCents,
+			chargeAvailableCents,
 		},
 		"payout.release: calling payments.seller.pay",
 	);

@@ -16,6 +16,9 @@ import {
 	DisputeStatus,
 	PayoutStatus,
 	prisma,
+	RefundReason,
+	RefundSource,
+	RefundStatus,
 } from "@nolie/db";
 import { AuctionStatus } from "@nolie/schemas/auction/status";
 import { fixtures } from "@nolie/testing";
@@ -1131,6 +1134,59 @@ describe("Payout Release", () => {
 			// and lands immediately available/withdrawable on the seller's Connect.
 			expect(params.sourceChargeId).toBeNull();
 			// Seller is still paid their full net.
+			expect(params.amount).toBe(earning.netAmount / 100);
+		});
+
+		// P4.2 Bug A: a platform_absorb refunds the buyer BEFORE this release runs,
+		// so the card charge has been (fully) refunded — its transferable balance is
+		// gone even though the seller's net is unchanged (absorbed slice adds back).
+		// Pinning to the refunded charge would hit Stripe's over-amount error. The
+		// guard must subtract card-side refunds from the charge's available amount.
+		it("pays from the platform balance (no source charge) when an absorb refunded the charge, even though the charge nominally covered the net", async () => {
+			const { earning, orderLineItem, order } = await createPendingPayout();
+
+			// Absorb earning shape: both counters bumped to net, so releasable =
+			// net - refunded + absorbed = net (the seller is still paid in full).
+			const line = await prisma.earningLine.findUniqueOrThrow({
+				where: { orderLineItemId: orderLineItem.id },
+			});
+			await prisma.earningLine.update({
+				where: { id: line.id },
+				data: {
+					refundedNetCents: line.netCents,
+					platformAbsorbedNetCents: line.netCents,
+				},
+			});
+
+			// The buyer's refund against the charge (pure card, no credit): the full
+			// 10_000 total went back to the card, leaving 0 transferable on the charge.
+			await prisma.refund.create({
+				data: {
+					orderId: order.id,
+					totalCents: 10_000,
+					itemSubtotalCents: 10_000,
+					itemTaxCents: 0,
+					reason: RefundReason.goodwill,
+					source: RefundSource.dispute,
+					status: RefundStatus.succeeded,
+				},
+			});
+
+			const { ctx, mocks } = createTestPayoutsContext();
+
+			await release(createMockJob({ earningId: earning.id }), ctx);
+
+			const payOps = mocks.payments._getOperationsOfType("seller.pay");
+			expect(payOps).toHaveLength(1);
+			const params = payOps[0]?.params as {
+				sourceChargeId: string | null;
+				amount: number;
+			};
+			// The fix: net (8_000) ≤ card charge (10_000) WOULD have pinned pre-fix,
+			// but the charge is fully refunded (available 0), so we front from the
+			// platform balance instead of pinning to a charge that can't fund it.
+			expect(params.sourceChargeId).toBeNull();
+			// Seller is still paid their full net (the platform ate the refund).
 			expect(params.amount).toBe(earning.netAmount / 100);
 		});
 	});

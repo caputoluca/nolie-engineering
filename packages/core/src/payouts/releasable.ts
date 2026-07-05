@@ -22,6 +22,11 @@
  * Values produced by the Prisma client are assignable to this type.
  *
  *  - `pending`          — open dispute, blocks payout for this line
+ *  - `seller_review`    — P4.1: seller-first — waiting on the seller's Gate-2
+ *                         response; blocks payout exactly like `pending` until
+ *                         it resolves or escalates. A new status defaults to
+ *                         *releasable* in the fall-through below, so it MUST be
+ *                         listed here or payout leaks mid-review.
  *  - `awaiting_return`  — NL-355: resolved for buyer but the refund is
  *                         gated on the item shipping back; blocks payout
  *                         exactly like `pending` until the return is
@@ -33,6 +38,7 @@
  */
 export type ReleasableDisputeStatus =
 	| "pending"
+	| "seller_review"
 	| "awaiting_return"
 	| "refunded"
 	| "released"
@@ -102,7 +108,7 @@ export interface GetReleasableLinesResult {
  *
  * A line is releasable this run when:
  *   • It hasn't been paid yet (paidAt IS NULL).
- *   • Its FulfillmentDispute (if any) is not in `pending`,
+ *   • Its FulfillmentDispute (if any) is not in `pending`, `seller_review`,
  *     `awaiting_return`, or `refunded` state — undisputed, or resolved as
  *     `released` / `absorbed` (both unblock payout).
  *   • Its remaining net
@@ -132,7 +138,10 @@ export function getReleasableLines(earning: {
 
 		const disputeStatus = line.orderLineItem.fulfillmentDispute?.status;
 
-		if (disputeStatus === "pending") {
+		// `seller_review` is a pending-like hold (P4.1): the seller hasn't
+		// answered yet, so the line's payout stays blocked and the Earning stays
+		// pending, same as an open `pending` dispute.
+		if (disputeStatus === "pending" || disputeStatus === "seller_review") {
 			hasPendingDisputes = true;
 			continue;
 		}
