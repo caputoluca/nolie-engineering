@@ -164,6 +164,9 @@ export const alb = new aws.lb.LoadBalancer(`nolie-${stack}`, {
 	loadBalancerType: "application",
 	securityGroups: [albSecurityGroup.id],
 	subnets: vpc.publicSubnetIds,
+	// A replaced ALB gets a new DNS name, killing api.nolie.com until Cloudflare
+	// is updated. Block deletes in prod; flip this off first if teardown is real.
+	enableDeletionProtection: stack === "prod",
 	tags: { Environment: stack },
 });
 

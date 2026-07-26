@@ -494,6 +494,64 @@ if (monitoringEnabled) {
 		tags: { Environment: stack },
 	});
 
+	// =========================================================================
+	// Cost Guardrails (account-level, created once via the prod stack)
+	// =========================================================================
+	// Budget tracks GROSS usage (includeCredit: false). With Activate credits
+	// applied, net spend is $0, so a default budget would never fire.
+
+	const budgetAlertEmail = config.get("budgetAlertEmail");
+
+	if (budgetAlertEmail) {
+		new aws.budgets.Budget("nolie-monthly-cost", {
+			budgetType: "COST",
+			limitAmount: "400",
+			limitUnit: "USD",
+			timeUnit: "MONTHLY",
+			costTypes: {
+				includeCredit: false,
+				includeRefund: false,
+			},
+			notifications: [
+				{
+					comparisonOperator: "GREATER_THAN",
+					threshold: 80,
+					thresholdType: "PERCENTAGE",
+					notificationType: "ACTUAL",
+					subscriberEmailAddresses: [budgetAlertEmail],
+				},
+				{
+					comparisonOperator: "GREATER_THAN",
+					threshold: 100,
+					thresholdType: "PERCENTAGE",
+					notificationType: "FORECASTED",
+					subscriberEmailAddresses: [budgetAlertEmail],
+				},
+			],
+		});
+
+		const anomalyMonitor = new aws.costexplorer.AnomalyMonitor(
+			"nolie-anomaly-monitor",
+			{
+				monitorType: "DIMENSIONAL",
+				monitorDimension: "SERVICE",
+			},
+		);
+
+		new aws.costexplorer.AnomalySubscription("nolie-anomaly-alerts", {
+			monitorArnLists: [anomalyMonitor.arn],
+			frequency: "DAILY",
+			subscribers: [{ type: "EMAIL", address: budgetAlertEmail }],
+			thresholdExpression: {
+				dimension: {
+					key: "ANOMALY_TOTAL_IMPACT_ABSOLUTE",
+					matchOptions: ["GREATER_THAN_OR_EQUAL"],
+					values: ["20"],
+				},
+			},
+		});
+	}
+
 	// 19. NAT Gateway Packets Dropped (one alarm per gateway)
 	natGatewayIds.apply((ids) => {
 		ids.forEach((natGatewayId, i) => {
