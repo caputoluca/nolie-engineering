@@ -23,6 +23,12 @@ const workerMemory = config.requireNumber("workerMemory");
 const workerDesiredCount = config.requireNumber("workerDesiredCount");
 const workerMinCount = config.requireNumber("workerMinCount");
 const workerMaxCount = config.requireNumber("workerMaxCount");
+// Staging runs tasks in public subnets with public IPs instead of paying for a
+// NAT gateway. Ingress is still blocked: the ECS security group only accepts
+// port 8000 from the ALB security group, no CIDR rules.
+const tasksPublicSubnets = config.getBoolean("tasksPublicSubnets") ?? false;
+const healthCheckGraceSeconds =
+	config.getNumber("healthCheckGraceSeconds") ?? 10;
 // Image tags: always required via environment variable
 // For initial deploy, set API_IMAGE_TAG and WORKER_IMAGE_TAG env vars manually
 
@@ -301,9 +307,10 @@ const SENTRY_ENVIRONMENT = stack === "prod" ? "production" : stack;
 export const apiService = new awsx.ecs.FargateService(`nolie-api-${stack}`, {
 	cluster: cluster.arn,
 	desiredCount: apiDesiredCount,
-	healthCheckGracePeriodSeconds: 10, // Wait 10s before ALB health checks count
+	healthCheckGracePeriodSeconds: healthCheckGraceSeconds,
 	networkConfiguration: {
-		subnets: vpc.privateSubnetIds,
+		subnets: tasksPublicSubnets ? vpc.publicSubnetIds : vpc.privateSubnetIds,
+		assignPublicIp: tasksPublicSubnets,
 		securityGroups: [ecsSecurityGroup.id],
 	},
 	loadBalancers: [
@@ -358,7 +365,8 @@ export const workerService = new awsx.ecs.FargateService(
 		cluster: cluster.arn,
 		desiredCount: workerDesiredCount,
 		networkConfiguration: {
-			subnets: vpc.privateSubnetIds,
+			subnets: tasksPublicSubnets ? vpc.publicSubnetIds : vpc.privateSubnetIds,
+			assignPublicIp: tasksPublicSubnets,
 			securityGroups: [ecsSecurityGroup.id],
 		},
 		// No load balancer - worker just processes jobs from Redis
