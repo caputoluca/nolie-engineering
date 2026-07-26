@@ -530,26 +530,10 @@ if (monitoringEnabled) {
 			],
 		});
 
-		const anomalyMonitor = new aws.costexplorer.AnomalyMonitor(
-			"nolie-anomaly-monitor",
-			{
-				monitorType: "DIMENSIONAL",
-				monitorDimension: "SERVICE",
-			},
-		);
-
-		new aws.costexplorer.AnomalySubscription("nolie-anomaly-alerts", {
-			monitorArnLists: [anomalyMonitor.arn],
-			frequency: "DAILY",
-			subscribers: [{ type: "EMAIL", address: budgetAlertEmail }],
-			thresholdExpression: {
-				dimension: {
-					key: "ANOMALY_TOTAL_IMPACT_ABSOLUTE",
-					matchOptions: ["GREATER_THAN_OR_EQUAL"],
-					values: ["20"],
-				},
-			},
-		});
+		// No AnomalyMonitor here: AWS auto-creates Default-Services-Monitor and
+		// the account limit is one dimensional monitor, so creating another fails
+		// (broke prod deploy 2026-07-26). Its Default-Services-Subscription
+		// already emails ops@nolie.com daily.
 	}
 
 	// 19. NAT Gateway Packets Dropped (one alarm per gateway)
