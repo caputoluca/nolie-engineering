@@ -90,44 +90,51 @@ if (monitoringEnabled) {
 	// Critical Alarms
 	// =========================================================================
 
-	// 1. API Running Task Count = 0
+	// 1. API has zero healthy targets
+	// Container Insights is disabled (cost), so RunningTaskCount does not exist.
+	// ALB health is the truer outage signal anyway. Missing data means the target
+	// group has no registered targets at all, which is the same outage.
 	new aws.cloudwatch.MetricAlarm(`api-tasks-down-${stack}`, {
 		alarmDescription:
-			"[CRITICAL] API service has zero running tasks — complete outage",
-		namespace: "ECS/ContainerInsights",
-		metricName: "RunningTaskCount",
+			"[CRITICAL] API has zero healthy targets behind the ALB. Complete outage.",
+		namespace: "AWS/ApplicationELB",
+		metricName: "HealthyHostCount",
 		dimensions: {
-			ClusterName: clusterName,
-			ServiceName: apiServiceName,
+			TargetGroup: targetGroupArnSuffix,
+			LoadBalancer: albArnSuffix,
 		},
-		statistic: "Average",
+		statistic: "Minimum",
 		period: 60,
 		evaluationPeriods: 1,
 		datapointsToAlarm: 1,
-		comparisonOperator: "LessThanOrEqualToThreshold",
-		threshold: 0,
+		comparisonOperator: "LessThanThreshold",
+		threshold: 1,
 		treatMissingData: "breaching",
 		alarmActions: [alertsTopic.arn],
 		okActions: [alertsTopic.arn],
 		tags: { Environment: stack },
 	});
 
-	// 2. Worker Running Task Count = 0
+	// 2. Worker has zero running tasks
+	// Without Container Insights there is no RunningTaskCount, and the worker has
+	// no ALB. A service with zero tasks publishes no AWS/ECS datapoints at all,
+	// so metric absence (treatMissingData: breaching) IS the zero-tasks signal;
+	// the threshold can never trigger on real data.
 	new aws.cloudwatch.MetricAlarm(`worker-tasks-down-${stack}`, {
 		alarmDescription:
-			"[CRITICAL] Worker service has zero running tasks — jobs are not being processed",
-		namespace: "ECS/ContainerInsights",
-		metricName: "RunningTaskCount",
+			"[CRITICAL] Worker service is publishing no metrics, meaning zero running tasks. Jobs are not being processed.",
+		namespace: "AWS/ECS",
+		metricName: "CPUUtilization",
 		dimensions: {
 			ClusterName: clusterName,
 			ServiceName: workerServiceName,
 		},
-		statistic: "Average",
+		statistic: "SampleCount",
 		period: 60,
 		evaluationPeriods: 2,
 		datapointsToAlarm: 2,
-		comparisonOperator: "LessThanOrEqualToThreshold",
-		threshold: 0,
+		comparisonOperator: "LessThanThreshold",
+		threshold: 1,
 		treatMissingData: "breaching",
 		alarmActions: [alertsTopic.arn],
 		okActions: [alertsTopic.arn],
