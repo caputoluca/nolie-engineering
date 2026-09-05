@@ -9,6 +9,7 @@ import type { AuctionItemTypeType } from "@nolie/schemas/auction/type";
 import { v7 as uuidv7 } from "uuid";
 import { logger } from "../../../logger.js";
 import { reportWarning } from "../../observability/sentry/report.js";
+import { assertOrdersOpen } from "../../wind-down.js";
 import { getAuctionForBid, getUserForBidWithProfile } from "./utils.js";
 import { validateBidOrThrow } from "./validate.js";
 
@@ -159,6 +160,7 @@ export async function placeBid(
 	data: { userId: string; auctionId: string; amount: number },
 ) {
 	try {
+		assertOrdersOpen();
 		// Validate auction first to get itemType for user eligibility check
 		const auction = await validateBidFromCache(stateCache, db, data);
 
