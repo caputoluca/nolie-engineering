@@ -39,6 +39,7 @@ import {
 	setReportingContext,
 } from "../observability/sentry/report.js";
 import { fanOutCanceledSiblings } from "../offers/cancel-fanout.js";
+import { assertOrdersOpen } from "../wind-down.js";
 import { BUNDLE_SHIPPING_FORMULA } from "./bundle-shipping.js";
 import {
 	buildAndValidateGroups,
@@ -169,6 +170,10 @@ export async function claimCheckout(
 		incomingPayloadHash: payloadHash,
 	});
 	if (replay) return replay;
+	// Wind-down gate. Above the in-flight resolver on purpose: a retry after the
+	// cutoff must not cancel the PaymentIntent and void the Orders of a claim the
+	// buyer legitimately started before it. Replays above still return.
+	assertOrdersOpen();
 
 	// 2) Pre-flight reads (no tx — fast lookups, run in parallel).
 	const quote = ensureQuoteUsable(
