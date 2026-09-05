@@ -170,6 +170,10 @@ export async function claimCheckout(
 		incomingPayloadHash: payloadHash,
 	});
 	if (replay) return replay;
+	// Wind-down gate. Above the in-flight resolver on purpose: a retry after the
+	// cutoff must not cancel the PaymentIntent and void the Orders of a claim the
+	// buyer legitimately started before it. Replays above still return.
+	assertOrdersOpen();
 
 	// 2) Pre-flight reads (no tx — fast lookups, run in parallel).
 	const quote = ensureQuoteUsable(
@@ -279,7 +283,6 @@ export async function claimCheckout(
 	// Buying suspension gate (dispute automation P3). Thrown before any charge or
 	// reservation — nothing has moved yet.
 	assertBuyingNotSuspended(buyer);
-	assertOrdersOpen();
 	const customerId = buyer.billing?.customerId;
 	// Saved-card and BNPL rails charge a pre-saved customer; the guest rail
 	// charges a freshly-collected method client-side and needs no customer here.
