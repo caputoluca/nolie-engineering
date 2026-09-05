@@ -10,7 +10,11 @@ import {
 import { BidValidationCode } from "@nolie/schemas/auction/bid-validation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { correctCardStoreBid } from "@/components/auction-card/store";
-import { BID_ERROR_MESSAGES, placeBid } from "@/lib/mutations/bids";
+import {
+	BID_ERROR_MESSAGES,
+	MARKETPLACE_CLOSED_BID_MESSAGE,
+	placeBid,
+} from "@/lib/mutations/bids";
 import { reportErrorMessage } from "@/lib/observability/sentry/report-error-message";
 import { usePdpReferrer } from "@/lib/referrer";
 import { useAuctionData } from "./auction-provider";
@@ -42,6 +46,11 @@ export function isBidSuspendedError(errors?: string[]): boolean {
 		errors?.includes(BID_ERROR_MESSAGES[BidValidationCode.buyer_suspended]) ??
 		false
 	);
+}
+
+/** Wind-down cutoff passed. Terminal like suspension: Close, not "Try again". */
+export function isBidClosedError(errors?: string[]): boolean {
+	return errors?.includes(MARKETPLACE_CLOSED_BID_MESSAGE) ?? false;
 }
 
 const BID_RESULT_TIMEOUT_MS = 10_000;
