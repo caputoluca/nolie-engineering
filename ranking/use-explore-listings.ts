@@ -1,3 +1,9 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out is plumbing: the query key, the sort, category and filter hooks,
+ * the HTTP client, the response types.
+ */
+
 "use client";
 
 import type {

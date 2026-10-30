@@ -1,3 +1,16 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - EXPLORE_RANKING_ENABLED_KEY, EXPLORE_FEED_SERVING_ENABLED_KEY,
+ *   EXPLORE_RANK_EPOCH_KEY: the kill switch, the feed-path switch and the
+ *   epoch counter the worker sets.
+ * - loadSortedExploreListings: the buyer-chosen sorts (price, ending soon),
+ *   which skip ranking.
+ * Everything else is plumbing: filters, listing select and shape, database,
+ *   cache, Sentry, logging.
+ */
+
 import type {
 	CacheOf,
 	ExploreSnapshot,

@@ -1,3 +1,13 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - CheckoutListing: the item being bought, carrying the feed query id and
+ *   spot it was added to the cart from (null when it came from no feed).
+ * Everything else is plumbing: totals, fees, order ids, ship-by dates,
+ *   seller vacation, database, errors, Sentry.
+ */
+
 import {
 	computeShipDueColumns,
 	generateDisplayId,

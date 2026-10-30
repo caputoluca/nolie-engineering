@@ -1,3 +1,19 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - matchTokens, maxMatchedDesirabilityWeight, TOKEN_DICTIONARY: match a title
+ *   against a curated list of characters and sets, and return the strongest
+ *   chase character's weight (1.0 when none).
+ * - EXPLORE_RANKING_ENABLED_KEY: the kill switch; the ranked feed serves only
+ *   on "1", and the worker turns it on after its first good run.
+ * - EXPLORE_FEED_SERVING_ENABLED_KEY: picks the feed this job writes over the
+ *   older in-memory snapshot, turned on the same way.
+ * - EXPLORE_RANK_EPOCH_KEY: a counter the job bumps each run; a scroll stays
+ *   on the epoch it started in.
+ * Everything else is plumbing: seller-trust math, database, Sentry, logging.
+ */
+
 import { DAY_MS, SOLD_VISIBILITY_DAYS } from "@nolie/core/constants/listings";
 import { EngagementEventName } from "@nolie/core/engagement/catalog";
 import {

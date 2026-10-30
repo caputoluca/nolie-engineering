@@ -1,3 +1,12 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - priceFilterSql, formFilterSql: the buyer's price band and raw-or-graded
+ *   filter, as SQL.
+ * Everything else is plumbing: listing select and shape, database.
+ */
+
 import { type DbClient, Prisma } from "@nolie/db";
 import {
 	DEFAULT_EXPLORE_LIMIT,

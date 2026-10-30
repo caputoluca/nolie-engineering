@@ -1,3 +1,13 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - EngagementEventEnvelope: one event (a view, a save, a cart add, a sale)
+ *   with its id and time stamped once when the API emits it, plus the feed
+ *   query id and spot it came from.
+ * Everything else is plumbing: the queue's job type, database, worker context.
+ */
+
 import { Prisma } from "@nolie/db";
 import type {
 	EngagementEventEnvelope,

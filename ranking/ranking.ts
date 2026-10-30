@@ -1,3 +1,12 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - SortPriority: the feed's buckets, in order: live auctions (ending
+ *   soonest), live buy-now items, upcoming auctions. No item moves across one.
+ * Everything else is plumbing: the matched-token type.
+ */
+
 /**
  * /explore default-feed ranking — pure scorer + diversity pass (NL-284, NL-310).
  *

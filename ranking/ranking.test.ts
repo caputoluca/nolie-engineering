@@ -1,3 +1,13 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - maxMatchedDesirabilityWeight, matchTokens, TOKEN_DICTIONARY: the chase
+ *   character lookup, as in refresh.job.ts.
+ * - SortPriority: the feed's buckets, as in ranking.ts.
+ * Everything else is plumbing: the test runner, file reads.
+ */
+
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
