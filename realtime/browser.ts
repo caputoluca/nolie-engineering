@@ -1,3 +1,12 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - The subscribers: one per event, listening on a channel by its id.
+ * The Ably client is client.ts here. Everything else is plumbing: the
+ * client cache, types.
+ */
+
 import type { TokenRequestType } from "@nolie/schemas/realtime-auth";
 import type { ChannelStateChange } from "ably";
 import { initializeClient } from "../client/init.js";

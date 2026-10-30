@@ -1,3 +1,8 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out is plumbing: the token's type.
+ */
+
 import type { TokenRequestType } from "@nolie/schemas/realtime-auth";
 import { Realtime, type TokenRequest } from "ably";
 

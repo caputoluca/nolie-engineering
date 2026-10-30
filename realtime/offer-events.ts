@@ -1,3 +1,11 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - OfferRemovedEventSchema: the withdraw event, only enough to find the row.
+ * Everything else is plumbing.
+ */
+
 import {
 	OfferEventSchema,
 	OfferRemovedEventSchema,

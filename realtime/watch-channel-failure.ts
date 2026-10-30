@@ -1,3 +1,8 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * The client it watches is browser.ts here. Nothing else is left out.
+ */
+
 import type { ChannelStateChange } from "ably";
 import type { RealtimeClient } from "./index.js";
 

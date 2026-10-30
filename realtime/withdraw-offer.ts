@@ -1,3 +1,13 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - toOfferOut: the offer as the API sends it.
+ * - RestClient: the server's publishers; the offer ones are
+ *   offer-publishers.ts and user-publishers.ts here.
+ * Everything else is plumbing: database, analytics, errors, error reporting.
+ */
+
 import { offerWithdrawn } from "@nolie/analytics/events";
 import type { ServerAnalytics } from "@nolie/analytics/server";
 import {

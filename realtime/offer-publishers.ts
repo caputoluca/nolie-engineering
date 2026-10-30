@@ -1,3 +1,12 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - createPublishEvent: checks the payload against the event's shape, then
+ *   publishes it to the channel `<prefix>:<id>`, here `listing:<listingId>`.
+ * The events are offer-events.ts here. Everything else is plumbing.
+ */
+
 import {
 	offerAcceptedEvent,
 	offerCounteredEvent,

@@ -1,3 +1,13 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - createPublishEvent: checks the payload against the event's shape, then
+ *   publishes it to the channel `<prefix>:<id>`, here `user:<userId>`.
+ * - The events: each one's name and shape on a user's own channel.
+ * Everything else is plumbing.
+ */
+
 import {
 	bidResultEvent,
 	offerAcceptedEvent,

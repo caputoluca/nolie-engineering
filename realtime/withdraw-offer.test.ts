@@ -1,3 +1,12 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - getMockRealtime: records every publish by publisher, for the assertions.
+ * - postSubmitOffer, postWithdrawOffer: the offer routes, called as a buyer.
+ * Everything else is plumbing: fixtures, the database, assertions.
+ */
+
 /**
  * POST /offers/:offerId/withdraw integration tests.
  *
