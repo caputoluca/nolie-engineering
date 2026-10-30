@@ -1,3 +1,11 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: idempotencyKeyWithVersion (prefixes the key with a version, so a
+ * changed request never collides with an old one) and shouldThrowError (network
+ * errors and rate limits are retried, business errors are returned). Everything
+ * else is plumbing: the Stripe client, error codes and checks.
+ */
+
 import { client } from "../client.js";
 import { PaymentErrorCode, type PaymentErrorCodeType } from "../errors.js";
 import {

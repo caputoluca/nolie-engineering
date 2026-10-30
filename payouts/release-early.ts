@@ -1,3 +1,8 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out is plumbing: types, database, the job queue, logging, error reporting.
+ */
+
 import { PayoutStatus, type PrismaClient } from "@nolie/db";
 import type { QueueOf } from "@nolie/queues";
 import { logger } from "../../logger.js";

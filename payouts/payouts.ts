@@ -1,3 +1,8 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: addBusinessDays, which skips weekends and US federal holidays.
+ */
+
 import { addBusinessDays } from "../business-days.js";
 
 /**

@@ -1,3 +1,11 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: sumUncachedWithdrawalCents (withdrawals still in flight that the cached
+ * balance doesn't reflect yet) and stripePayoutStatusToTerminal (an instant payout
+ * can come back paid straight away). The fee and limits are in payouts.ts.
+ * Everything else is plumbing: types, database, HTTP errors.
+ */
+
 import {
 	computeInstantWithdrawalFeeCents,
 	computeStripeInstantCostCents,

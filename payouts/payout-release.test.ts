@@ -1,3 +1,10 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran in CI.
+ * An integration test: real Postgres and Redis in containers, Stripe mocked.
+ * The job under test is release.job.ts. Left out is plumbing: fixtures, the test
+ * context and a job builder.
+ */
+
 /**
  * Payout release tests.
  *

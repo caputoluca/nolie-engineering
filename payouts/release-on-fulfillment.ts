@@ -1,3 +1,11 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: DISPUTE_WINDOW_DAYS_AFTER_FULFILLMENT, the days after delivery a buyer
+ * can still dispute. The release delay comes from getPayoutReleaseDelayMs in
+ * payouts.ts, passed in by the caller. Everything else is plumbing: types,
+ * database, error reporting.
+ */
+
 import { DISPUTE_WINDOW_DAYS_AFTER_FULFILLMENT } from "@nolie/core/disputes";
 import { PayoutStatus } from "@nolie/db";
 import type { WorkerContextBase } from "../context.js";

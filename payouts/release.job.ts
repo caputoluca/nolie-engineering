@@ -1,3 +1,14 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: applyFeeNetting (takes a seller's unpaid cancellation fees out of the
+ * payout, inside the claim), finalizeReleasedTransfer (marks the transfer and its
+ * lines paid once Stripe accepts it) and reschedulePayoutForInsufficientFunds
+ * (retries when NoLie's own Stripe balance can't cover the transfer).
+ * getReleasableLines is in releasable.ts; paySeller, called as
+ * payments.seller.pay, is in pay.ts. Everything else is plumbing: types, database,
+ * logging, error reporting, notifications.
+ */
+
 import { getReleasableLines } from "@nolie/core/payouts";
 import {
 	isPrismaRecordNotFoundError,
