@@ -1,3 +1,10 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * The cluster, the two services, the load balancer and the target group come
+ * from ecs.ts in this folder. Everything else is plumbing.
+ */
+
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 import { alb, apiService, apiTargetGroup, cluster, workerService } from "./ecs";

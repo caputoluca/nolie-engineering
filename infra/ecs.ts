@@ -1,3 +1,13 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - ecr: the two image repositories; CI pushes each image there tagged with
+ *   its commit, and the services below run it by that tag.
+ * monitoring.ts in this folder reads the cluster, the services and the load
+ * balancer exported below. Everything else is plumbing.
+ */
+
 import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
 import * as pulumi from "@pulumi/pulumi";

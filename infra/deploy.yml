@@ -1,3 +1,9 @@
+# nolie-engineering note, not in the original file; the workflow below is as it ran.
+#
+# Left out of this folder: the two Dockerfiles the build jobs use.
+# `pulumi up` at the end applies ecs.ts and monitoring.ts in this folder.
+# Everything else is plumbing.
+
 name: Deploy
 
 on:
