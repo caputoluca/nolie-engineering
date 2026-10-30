@@ -1,3 +1,9 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Nothing is left out: Fastify's AJV validates what this returns.
+ */
+
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { z } from "zod";

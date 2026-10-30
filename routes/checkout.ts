@@ -1,3 +1,14 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - the @nolie/schemas imports: the Zod schemas for each route's body, query
+ *   and response, shared with the web app.
+ * - app.getErrorSchema: the shape of an error reply, from the errors plugin.
+ * claimCheckout is in payments/. Everything else is plumbing: the checkout
+ * logic behind each route (quotes, guest buyers, the confirmation page).
+ */
+
 import {
 	CheckoutClaimBodySchema,
 	CheckoutClaimSuccessSchema,

@@ -1,3 +1,15 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - getSession: asks better-auth for the session behind the request's cookie.
+ *   A cookie for a session that no longer exists counts as no session (a 401),
+ *   not an error (a 500).
+ * - auth: the better-auth client; its session type is what the factory hands
+ *   a signed-in handler.
+ * Everything else is plumbing: role types, observability.
+ */
+
 import type { UserRoleType } from "@nolie/schemas/user";
 import type { RequestRouteOptions } from "fastify/types/request.js";
 import fp from "fastify-plugin";

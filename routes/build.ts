@@ -1,3 +1,16 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - authPlugin: puts the better-auth client on the app, for protect.ts.
+ * - errorsPlugin: the shared HTTP errors (401, 403, 500) protect.ts sends, and
+ *   `getErrorSchema`, the error shapes a route's response schema lists.
+ * - each route group (meRoutes, adminRoutes, ...): a file like checkout.ts,
+ *   written with createRoutes.
+ * Everything else is plumbing: config, database, cache, queues, the clients
+ * for Stripe, shipping, storage, AI and analytics.
+ */
+
 // deploy-trigger: 2026-05-20
 import type { S3Client } from "@aws-sdk/client-s3";
 import fastifyCookie from "@fastify/cookie";

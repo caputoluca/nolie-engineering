@@ -1,3 +1,12 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - auth: the better-auth client; its session type is what a signed-in
+ *   handler receives, never null.
+ * `fastify.asSchema` is schemas.ts in this folder. Everything else is plumbing.
+ */
+
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { RouteHandler, RouteOptions } from "fastify/types/route.js";
 import type { z } from "zod";

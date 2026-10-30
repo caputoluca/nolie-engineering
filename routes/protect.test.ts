@@ -1,3 +1,16 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - getApp: the full app from build.ts, plus three test routes: /test-public
+ *   (`public: true`), /test-protected (nothing written) and /test-admin
+ *   (`role: "admin"`). They are registered with Fastify directly, not through
+ *   the factory.
+ * - createAuthenticatedUser, createApiClient: a real signed-in user and a
+ *   client that sends its cookie.
+ * Everything else is plumbing.
+ */
+
 /**
  * Protect middleware tests.
  *
