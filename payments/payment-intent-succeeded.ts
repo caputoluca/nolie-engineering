@@ -1,3 +1,12 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: runCheckoutSideEffects (notifications and analytics after a
+ * purchase) and releaseHolds (hands store credit back on a lost race).
+ * finalizeCheckoutTx is in finalize-tx.ts. Everything else is plumbing:
+ * types, a transaction wrapper, error reporting, the offer-cancel fan-out,
+ * and a re-export of the order loader from finalize-tx.ts.
+ */
+
 import {
 	finalizeCheckoutTx,
 	MidPaymentRaceLossSignal,

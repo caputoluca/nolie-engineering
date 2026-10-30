@@ -1,3 +1,8 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: validateIdempotencyKeyFormat, which rejects a malformed key with a 400.
+ */
+
 import { createHash } from "node:crypto";
 
 export { validateIdempotencyKeyFormat } from "../utils/idempotency.js";

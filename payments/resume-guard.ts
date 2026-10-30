@@ -1,3 +1,10 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: the Stripe client, used to read and cancel the unfinished payment.
+ * releaseOrdersTx is in finalize-tx.ts. Everything else is plumbing: types,
+ * database, errors, logging, a transaction wrapper.
+ */
+
 import { releaseOrdersTx } from "@nolie/checkout";
 import type { PrismaClient } from "@nolie/db";
 import { OrderOriginationType, PaymentStatus } from "@nolie/db";

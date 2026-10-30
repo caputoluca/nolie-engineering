@@ -1,3 +1,15 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - reserveListings: the hold. A conditional UPDATE per seller flips the
+ *   cards to reserved; when claims race, exactly one wins.
+ * - materializeOrders: creates the orders, pending, with no payment linked.
+ * - computeCheckoutTotals: the price, shared with the quote for the drift check.
+ * - holdCredits: holds the buyer's store credit, all or nothing.
+ * Everything else is plumbing: types, database, errors, logging, gates.
+ */
+
 import { randomUUID } from "node:crypto";
 import type { ServerAnalytics } from "@nolie/analytics/server";
 import {

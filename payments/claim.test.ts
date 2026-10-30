@@ -1,3 +1,10 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran in CI.
+ * An integration test: real Postgres and Redis in containers, Stripe mocked.
+ * Left out is plumbing: fixtures, API clients, and builders for test buyers,
+ * sellers, listings and quotes.
+ */
+
 /**
  * POST /checkout/claim integration tests.
  *

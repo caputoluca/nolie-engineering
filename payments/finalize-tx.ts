@@ -1,3 +1,9 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: captureHolds (spends the held store credit) and the shipping presets
+ * used to size labels. Everything else is plumbing.
+ */
+
 import { getSortFieldsForTransition } from "@nolie/core/auctions";
 import { generatePickupCode } from "@nolie/core/orders";
 import {
