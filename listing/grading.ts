@@ -1,3 +1,8 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Nothing is left out: zod is the only import.
+ */
+
 import { z } from "zod";
 
 /**

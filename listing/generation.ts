@@ -1,3 +1,12 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - CATEGORY_ABSTAIN: "unknown", the model's answer when it can't tell an
+ *   item's category.
+ * Everything else is plumbing: database types, logging, Sentry.
+ */
+
 import type { Prisma, PrismaClient } from "@nolie/db";
 import { CATEGORY_ABSTAIN } from "@nolie/schemas/ai/categories";
 import type {

@@ -1,3 +1,14 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - ListingCopySchema: the copy model answers with a title and a description,
+ *   nothing else.
+ * - TITLE_MAX_LENGTH, DESCRIPTION_MAX_LENGTH: the same limits the listing form
+ *   enforces.
+ * Everything else is plumbing: errors, logging, Sentry context.
+ */
+
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { errors } from "@nolie/errors/http";
 import { ListingCopySchema } from "@nolie/schemas/ai/listing-extraction";

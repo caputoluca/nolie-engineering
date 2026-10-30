@@ -1,3 +1,9 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out is plumbing: the database client, the category list, and the test
+ * helpers that create a seller and call the API.
+ */
+
 /**
  * Integration tests for NL-349 — AI generation log + category linkage.
  *

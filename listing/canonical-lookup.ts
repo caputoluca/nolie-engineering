@@ -1,3 +1,8 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out is plumbing: the extraction's type and logging.
+ */
+
 import type { ExtractedCardFacts } from "@nolie/schemas/ai/listing-extraction";
 import { logger } from "../../logger.js";
 

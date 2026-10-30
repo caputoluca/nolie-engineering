@@ -1,3 +1,7 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out is plumbing: the response's type and the browser's HTTP client.
+ */
 "use client";
 
 import type { GenerateListingFromPhotoResponse } from "@nolie/schemas/ai/listing-extraction";

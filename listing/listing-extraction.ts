@@ -1,3 +1,14 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ *
+ * Left out of this folder:
+ * - ExtractedCardFactsSchema: the shape the model must answer in. One branch
+ *   per kind (slab, raw Pokemon, raw sports, other TCG, other), each with a
+ *   confidence from 0 to 1 and an empty string for anything it can't read.
+ * - getPresignedReadURL: the photos reach the model as short-lived S3 links.
+ * Everything else is plumbing: types, errors, logging, upload paths.
+ */
+
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import type { S3Client } from "@aws-sdk/client-s3";
 import { errors } from "@nolie/errors/http";
