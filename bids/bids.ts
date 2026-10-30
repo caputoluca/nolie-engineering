@@ -1,3 +1,11 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: auctionsConfig (the anti-snipe window, 120 seconds unless an
+ * environment variable sets it, and the largest bid allowed) and
+ * auctionRequiresShipping (true for a physical item). Everything else is
+ * plumbing: types and the shared validation codes.
+ */
+
 import { type AuctionOut, AuctionStatus } from "@nolie/schemas/auction";
 import {
 	BidValidationCode,

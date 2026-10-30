@@ -1,3 +1,8 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out is plumbing: the auction status type.
+ */
+
 import type { AuctionStatusType } from "@nolie/schemas/auction/status";
 
 /**

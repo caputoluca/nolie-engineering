@@ -1,3 +1,8 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Nothing is left out: it imports nothing.
+ */
+
 /**
  * Calculates the clearing price for a proxy bid using second-price auction logic.
  *

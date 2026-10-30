@@ -1,3 +1,15 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: validateBidOrThrow (runs validateBid, in bids.ts, on the cached
+ * auction and turns a refusal into a 400), getAuctionForBid and
+ * getUserForBidWithProfile (the Postgres reads on a cache miss; the second fills
+ * the bidder's eligibility and profile caches in one query) and assertOrdersOpen
+ * (refuses bids once the marketplace's wind-down cutoff has passed).
+ * validateUserCanBid is in bids.ts, the inbox in inbox.ts; q.drain queues
+ * drain.job.ts, one job per auction. Everything else is plumbing: types,
+ * caches, errors, logging.
+ */
+
 import type { CacheOf } from "@nolie/cache";
 import { validateUserCanBid } from "@nolie/core/auctions";
 import type { PrismaClient } from "@nolie/db";

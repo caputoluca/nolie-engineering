@@ -1,3 +1,11 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran in CI.
+ * An integration test: real Postgres and Redis in containers, the socket and
+ * the job queues mocked. drainBids runs drain.job.ts over the inbox, then any
+ * proxy job it queued. Left out is plumbing: fixtures, the test context, and
+ * builders for auctions and bidders.
+ */
+
 /**
  * Sequential bid processing tests.
  *

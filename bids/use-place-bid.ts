@@ -1,3 +1,12 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: placeBid (the HTTP call, with the error messages per refusal),
+ * useNextBidAmount (the lowest bid allowed, from the highest bid on screen) and
+ * usePlaceBidShared (the modal's open, submit and outcome states). The result
+ * wait is in bid-result-subscription-provider.tsx, the card price in store.ts.
+ * Everything else is plumbing: types, React, error reporting, referral tags.
+ */
+
 "use client";
 
 import { fail } from "@nolie/actions";

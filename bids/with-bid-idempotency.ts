@@ -1,3 +1,10 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: acquireIdempotency, markIdempotencyProcessed and releaseIdempotency,
+ * a Redis key per bid request that is taken, marked done, or let go on an error.
+ * Everything else is plumbing: types, logging, error reporting.
+ */
+
 import type { BidInboxItem } from "@nolie/inbox";
 import {
 	acquireIdempotency,

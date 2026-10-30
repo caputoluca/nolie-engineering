@@ -1,3 +1,14 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: getCachedAuctionState (the auction's live state from Redis, loaded
+ * from Postgres on a miss; null when it can't be read), validateAndAcceptBid
+ * (runs the Lua script in validate-and-accept.ts and unpacks its answer) and
+ * extendAuction (moves the closing job to the new end time, then tells every
+ * open page). queues.bids.persist runs persist.job.ts; triggerProxies runs the
+ * proxy job, whose bids come back through the same inbox. Everything else is
+ * plumbing: types, logging, error reporting, image URLs.
+ */
+
 import { shouldExtendAuction } from "@nolie/core/auctions";
 import { JobIdUnique } from "@nolie/queues";
 import { logger } from "../../logger.js";

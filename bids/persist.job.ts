@@ -1,3 +1,11 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: pendingBidsCache, a count per auction of bids Redis accepted that
+ * Postgres hasn't saved yet; settling the winner waits up to five seconds for
+ * it to reach zero. Everything else is plumbing: types, a transaction wrapper,
+ * logging, error reporting, notifications.
+ */
+
 import { isPrismaUniqueError } from "@nolie/db";
 import { workerTx } from "../../db/tx.js";
 import { logger } from "../../logger.js";

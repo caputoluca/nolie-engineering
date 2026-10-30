@@ -1,3 +1,10 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out: the realtime client (useRealtime, useRealtimeContext), which holds
+ * the page's one socket and renews its token; realtime/ tells that story.
+ * Everything else is plumbing: types, React, the user, logging, error reporting.
+ */
+
 "use client";
 
 import type { BidResultEventSchema } from "@nolie/schemas/auction/bid";

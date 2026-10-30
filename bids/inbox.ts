@@ -1,3 +1,8 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out is plumbing: the Redis client.
+ */
+
 import { redis } from "@nolie/redis";
 
 const DIRTY_TTL_SECONDS = 3600; // 1 hour safety TTL

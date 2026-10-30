@@ -1,3 +1,10 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * The worker registers this script as a Redis command and calls it through
+ * validateAndAcceptBid, left out, which unpacks its answer. Everything else is
+ * plumbing: the shared validation codes.
+ */
+
 // IMPORTANT:
 // Redis SOT assumes this idempotency guard runs BEFORE Lua.
 // If drain jobs become retryable after Lua or parallelized,

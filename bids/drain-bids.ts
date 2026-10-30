@@ -1,3 +1,8 @@
+/*
+ * nolie-engineering note, not in the original file; the code below is as it ran.
+ * Left out is plumbing: types and the logger. The inbox is inbox.ts.
+ */
+
 import type { BidInboxItem, NoLieInbox } from "@nolie/inbox";
 import type { NoLieLogger } from "@nolie/logger";
 import type { BidJob } from "./types.js";
