@@ -1,16 +1,18 @@
 # NoLie engineering
 
-The core of NoLie, a marketplace I built with my cofounder, one topic per folder, with each file's real commit history.
+The core of NoLie, the marketplace I built with my cofounder. Each folder holds one topic, and each file keeps its real commit history.
 
 ## What NoLie was
 
 A marketplace where anything can be listed and sold, by checkout, by offer or at a live auction. We built it for trading cards and collectibles, and marketed it to their buyers and sellers. It ran in production from January to September 2026.
 
+From May it took 336 marketplace payments, $13,547 in all, with no double charge. Over its life it paid $12,324 to 83 sellers, held 3,631 listings, and its API answered 99.995% of 3.60M requests without a server error.
+
 The stack: TypeScript, Fastify and Postgres (through Prisma) for the API, BullMQ on Redis for the workers, Next.js and React in the browser, Stripe for money, Ably for realtime. The API and workers ran on AWS, written in Pulumi; the web app on Vercel.
 
 ## The folders
 
-Six folders each carry one flow end to end, with the browser code it needs; routes/ and infra/ show the patterns every flow stands on. Each README tells the story: the problem, the numbers, the rules and what enforces them, the bugs I fixed, and what I'd change now.
+Six folders each carry one flow end to end, with the browser code it needs. routes/ shows how every endpoint is written, and infra/ how it all ran on AWS. Every README follows the same order, from the problem to what I'd change now.
 
 | Folder | What it does |
 |---|---|

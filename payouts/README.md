@@ -4,17 +4,17 @@ A seller is paid for every sale they bring to the marketplace, and moves the mon
 
 ## The problem
 
-Payouts landing are what keep a seller coming back to list the next item. payouts/ pays a seller for every item the buyer keeps, onto the seller's own Stripe balance.
+payouts/ pays a seller for every item the buyer keeps, onto the seller's own Stripe balance.
 
-This folder is the logic that decides which items are paid, sends the money, and lets the seller take it out.
+Its code decides which items a run pays, sends each transfer, and handles the seller's withdrawal.
 
 ## By the numbers
 
 | Paid to sellers | Transfers | Sellers paid |
 |:-:|:-:|:-:|
-| **$18,059** | **462** | **84** |
+| **$12,324** | **454** | **83** |
 
-Every transfer to a seller's Stripe balance, January to September 2026, NoLie's own store is one of the 84, paid $5,735 for its April sales.
+Every transfer to a seller's Stripe balance, January to September 2026. NoLie's own store was paid an extra $5,735 in 8 transfers, for its own cards in April.
 
 ## The rules
 
@@ -63,7 +63,7 @@ sequenceDiagram
 
 ### 3. NoLie never holds a seller's cash
 
-- Paying out and withdrawing are two separate steps. The payout lands on the seller's own Stripe balance; the seller chooses when to move it to the bank.
+- The payout lands on the seller's own Stripe balance; the seller chooses when to move it to the bank.
 - Before, Stripe swept every payout straight to the bank, and the seller had no say over when.
 - Stripe holds the money for the seller, which keeps NoLie out of money-transmitter rules.
 - The seller withdraws when they like: free, or instant for 1.75%.
@@ -71,12 +71,12 @@ sequenceDiagram
 ### 4. Two days, to cover the dispute window
 
 - A buyer can dispute for 2 days after delivery. The payout used to go out after 1, so a seller could be paid while the buyer could still dispute.
-- The window now matches the dispute window, so a seller is never paid while the buyer can still dispute.
+- Now the payout waits the same 2 days.
 - A letter has no tracking, so it is paid 7 business days after its label.
 
 ### 5. Trusted sellers are paid at the label
 
-- Being paid and the item arriving are two separate clocks. A trusted seller's payout fires when they buy the label; the dispute window still starts at delivery.
+- A trusted seller's payout fires when they buy the label, while the dispute window still starts at delivery.
 - The buyer's payment hasn't cleared by then, so an early payout comes from NoLie's own Stripe balance and the seller can withdraw it the same day.
 
 ## Start here
@@ -104,7 +104,7 @@ sequenceDiagram
 
 ### A seller could be paid while the buyer could still dispute
 - **What:** payouts went out 1 day after delivery, inside the 2-day dispute window.
-- **In production:** until Jul 1. Two sellers were paid for items they never shipped, and I took the three payouts back by hand in Stripe (transfers export).
+- **In production:** until Jul 1. Two sellers were paid for items they never shipped, and I took the three payouts, $30.50 in all, back by hand in Stripe.
 - **Fix:** `299548727`
 
 ## What I'd change now

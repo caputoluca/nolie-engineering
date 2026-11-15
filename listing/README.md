@@ -6,7 +6,7 @@ Take photos, and the listing writes itself.
 
 listing/ lets a seller create a listing on the marketplace from just its photos: the AI reads the photos and fills in everything it can check.
 
-This folder is the two AI calls, the card lookup between them, the log of every generation, and the browser half that hands the result to the seller.
+The code is two AI calls with a card lookup between them, the log of every generation, and the browser half that hands the result to the seller.
 
 ## By the numbers
 
@@ -52,28 +52,28 @@ The writer never sees the photos, and an ungraded card with no match never reach
 
 ### 1. The AI's reading is checked against a real card
 
-- **A record, not a guess.** The reader returns the name and number off the card; TCGdex, a public card database, must find that card. The set, number and rarity in the listing come from TCGdex's record.
-- **No match, no copy.** For an ungraded card with no match, the AI writes nothing. Only Pokémon has a database wired in, so every other ungraded card is left to the seller.
-- **Slabs are read off the label.** A grader prints the card's details on the slab, and the cert lets any buyer check them on the grader's site.
-- **Each language searched in its own.** Japanese, Korean and Chinese cards search TCGdex in their language ([`canonical-lookup.ts`](canonical-lookup.ts#L52-L64)).
+- The reader returns the name and number off the card, and TCGdex, a public card database, must find that card. The set, number and rarity in the listing come from TCGdex's record.
+- For an ungraded card with no match, the AI writes nothing. Only Pokémon has a database wired in, so every other ungraded card is left to the seller.
+- A slab (a card graded and sealed in the grader's case) is read off its label: the grader prints the card's details there, and the cert, the grader's serial number, lets any buyer check them on the grader's site.
+- Japanese, Korean and Chinese cards search TCGdex in their own language ([`canonical-lookup.ts`](canonical-lookup.ts#L52-L64)).
 
-### 2. The AI's confidence is never what decides
+### 2. The AI's confidence fills nothing
 
-- The reader reports a confidence from 0 to 1. Nothing branches on it: it's logged and kept, never trusted to fill a field.
+- The reader reports a confidence from 0 to 1. Nothing branches on it; it's only logged.
 - A card's set, number and rarity come from a database match, and a slab's details from its label. The year and language come from the AI's reading, and its category is a pre-fill the seller confirms.
 
-### 3. Reading and writing are two separate AI calls
+### 3. One AI call reads, another writes
 
-- The reader only extracts what's printed and never writes copy. The writer only sees the checked record, never the photo, so it can't invent a card's details from memory.
-- I chose this over one call that reads and writes at once.
+- I chose two calls over one that reads and writes at once. The reader only extracts what's printed and never writes copy.
+- The writer only sees the checked record, never the photo, so it can't invent a card's details from memory.
 
 ### 4. Every generation is logged
 
 - One row per AI run since June 8, written on the server: the model, the prompt and schema versions, the AI's raw reading, the matched record, and the suggested copy.
-- **Abandoned runs too.** Re-runs are grouped by the seller's session. Writing the row is best-effort: a failure is reported and the seller carries on.
-- **AI against seller, side by side.** When a listing is created from a run, the row links to it. Everything the AI suggested (title, description, the card's details, the category) can be compared with what the seller published.
-- **For debugging and for training.** Those edits show what sellers want: the data to fix a prompt with, or to train our own model on.
-- **The browser can't change it.** The prediction is stored server-side, so a client can't fake a correction.
+- Abandoned runs are logged too, and re-runs are grouped by the seller's session. Writing the row is best-effort: a failure is reported and the seller carries on.
+- When a listing is created from a run, the row links to it, so everything the AI suggested (title, description, the card's details, the category) can be compared with what the seller published.
+- The seller's edits are the data to fix a prompt with, or to train our own model on.
+- The prediction is stored on the server, so a client can't fake a correction.
 
 ### 5. The seller's words win
 
@@ -83,14 +83,14 @@ The writer never sees the photos, and an ungraded card with no match never reach
 ## Start here
 
 1. [`canonical-lookup.ts`](canonical-lookup.ts#L241-L294): the AI's reading checked against TCGdex, and what's dropped on a miss.
-2. [`generate-listing.ts`](generate-listing.ts#L178-L194): no match, no copy.
+2. [`generate-listing.ts`](generate-listing.ts#L178-L194): an ungraded card with no match gets no copy.
 3. [`generation.ts`](generation.ts#L44-L86): the log of every generation, and why it's written on the server.
 
 ## Bugs I fixed
 
 ### Made-up rarities and wrong card numbers on ungraded cards
 - **What:** the writer trusted every field, so the AI's own guesses ("Holo Rare" on a non-holo) reached the copy. Japanese cards always missed TCGdex, since the language was mapped wrong.
-- **In production:** yes, May 4 to May 10. I caught it in production and fixed it as soon as I spotted it.
+- **In production:** yes, May 4 to May 10. I spotted it scrolling the explore page.
 - **Fix:** `67b226d8b`
 
 ### Made-up cert numbers on TAG slabs
@@ -100,7 +100,7 @@ The writer never sees the photos, and an ungraded card with no match never reach
 
 ### "091/86" instead of the card's "091/086"
 - **What:** TCGdex pads the card's number but not the set's total, so the listing showed a number the card doesn't print.
-- **In production:** yes, May 10 to June 27. Caught in production, which is how I knew to fix it.
+- **In production:** yes, May 10 to June 27. I spotted it scrolling the explore page.
 - **Fix:** `033a59c7a`
 
 ## What I'd change now

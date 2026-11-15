@@ -4,9 +4,9 @@ Checkout for one-of-a-kind items: one item, one buyer, one charge.
 
 ## The problem
 
-Checkout is the one path where a bug costs money and trust at once. Every listing on NoLie is a one-of-a-kind item (NoLie was built for trading cards and collectibles), so payments/ charges each buyer once, for an item they get, and sells each item to one buyer.
+Checkout is the one path where a bug costs money and trust at once. Every listing on NoLie is a single item with no second copy, so payments/ charges each buyer once, for an item they get, and sells each item to one buyer.
 
-This folder is the logic that takes a buyer from cart to paid order, holding the three rules below even when the client, the network or Stripe sends something twice.
+The code takes a buyer from cart to paid order, and holds even when the app, the network or Stripe sends something twice.
 
 ## By the numbers
 
@@ -45,7 +45,7 @@ sequenceDiagram
 
 ### 1. Whoever taps Pay first gets the item
 
-Stripe confirms a successful payment asynchronously, by webhook. If someone else tapped Pay during that confirmation window, two people could buy the same one-of-a-kind item, which breaks the business rule.
+Stripe confirms a successful payment asynchronously, by webhook. If someone else tapped Pay during that confirmation window, two people could buy the same item.
 
 ```mermaid
 sequenceDiagram
@@ -58,11 +58,11 @@ sequenceDiagram
     DB-->>B: 0 rows, item is gone
 ```
 
-- **The database decides.** The hold is a conditional write in Postgres, one per seller in the cart. Two buyers at once: exactly one wins.
-- **Every system reads the same flag.** The webhook marks the item sold only if this order still holds it. A sweeper frees lapsed holds every two minutes.
-- **10 minutes, invisible.** Long enough to finish 3DS; 25 for Affirm or Klarna. No countdown on screen.
-- **At Pay, not at add-to-cart.** A cart hold would let anyone block an item without ever buying it.
-- **The safety net.** If a hold lapses and someone else takes the item, the late payment is refunded automatically. The hold keeps that rare.
+- The hold is a conditional write in Postgres, one per seller in the cart. Two buyers at once: exactly one wins.
+- The webhook marks the item sold only if this order still holds it. A sweeper frees lapsed holds every two minutes.
+- A hold lasts 10 minutes, long enough to finish 3DS, or 25 for Affirm or Klarna. The buyer sees no countdown.
+- The hold is taken at Pay, not at add-to-cart: a cart hold would let anyone block an item without ever buying it.
+- If a hold lapses and someone else takes the item, the late payment is refunded automatically. The hold keeps that rare.
 
 ### 2. A reused key can't charge the wrong cart
 
@@ -110,7 +110,7 @@ sequenceDiagram
 
 ## What I'd change now
 
-The logic held up: every marketplace payment went through it, with no double charge. The shape is what I'd change.
+The logic held up. The shape is what I'd change.
 
 - **Split it into named steps.** `claimCheckout` is one 740-line function. To follow it, you have to remember everything that happened above. Each step would be its own small function, and the top would read like the checkout itself.
 - **The same for finalize.** Seven business steps sit in one 280-line function: mark paid, clear the cart, mark sold, cancel competing offers, record earnings, create labels, capture credit. Each would get a name.

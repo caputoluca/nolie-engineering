@@ -4,9 +4,9 @@ Live auctions: a crowd bidding on one item, the price on every screen moving wit
 
 ## The problem
 
-bids/ runs every auction the way an auctioneer would. An auction sells one item (a trading card, say), to the highest bidder, even when a crowd bids in the same second.
+bids/ runs every auction: one item (a trading card, say) sold to the highest bidder, even when a crowd bids in the same second.
 
-Bidders can also set a maximum and let the platform bid for them, only as much as it takes to stay ahead (a proxy bid). This folder runs from the bid button to the saved bid, and back to every screen watching.
+Bidders can also set a maximum and let the platform bid for them, only as much as it takes to stay ahead (a proxy bid). The code runs from the bid button to the saved bid, and back to every screen watching.
 
 ## By the numbers
 
@@ -45,7 +45,7 @@ sequenceDiagram
     B->>API: Bid
     API->>R: first check, then into the auction's inbox
     API-->>B: 202, processing
-    W->>R: take bids in order; check and set the new highest, atomically
+    W->>R: take bids in order, then check and set the new highest in one atomic step
     W-->>B: accepted or rejected, over the socket
     W-->>B: the new price, to everyone watching
     W->>DB: save the bid, behind
@@ -56,10 +56,10 @@ sequenceDiagram
 ### 1. One inbox per auction, one reader
 
 - Every bid goes into the auction's inbox, first in, first out. Bids from a person and bids a proxy places go through the same inbox.
-- One drain job per auction reads it, so bids are judged one by one, like clockwork. Every bid is treated the same, with few edge cases.
+- One drain job per auction reads it, so bids are judged one at a time, in the order they arrived.
 - One inbox per auction keeps that order while a busy auction never slows another.
 
-### 2. Redis decides, Postgres saves behind
+### 2. Redis judges the bid, Postgres saves it after
 
 - Earlier: each bid was decided inside a Postgres transaction, 1.1 seconds a bid under load.
 - Now one Lua script in Redis checks the bid and sets the new highest in one step. The worker queues the save and moves on.
@@ -92,17 +92,17 @@ sequenceDiagram
 
 ### Two bids could win at the same price
 - **What:** when an auction's price wasn't in the cache yet, two bids at the same exact moment could both miss the first one and both be accepted.
-- **In production:** Jan 2 to Feb 5, the early launch period. It needed two people bidding in the same moment on an auction not yet cached; caught in load testing, and nothing on record shows it happened in production.
+- **In production:** Jan 2 to Feb 5. It needed two people bidding in the same moment on an auction not yet cached; caught in load testing, and nothing on record shows it happened in production.
 - **Fix:** `ec2700fdf`
 
 ### A proxy's tie bid was turned away
 - **What:** a proxy may match the current price to break a tie, but the Redis check demanded more than the current price.
-- **In production:** Jan 2 to Jan 27, the early launch period.
+- **In production:** Jan 2 to Jan 27. Auctions were rare then and, as far as I know, no one set a proxy, so it never fired.
 - **Fix:** `822525194`
 
 ### "You've been outbid" while your proxy was still bidding
 - **What:** the email went out the moment a bid passed you, before your proxy answered. Now it waits five seconds and is sent only if you're still beaten.
-- **In production:** Jan 18, when outbid emails started, to Feb 23, the early launch period.
+- **In production:** Jan 18, when outbid emails started, to Feb 23. No one set a proxy in that time either, so it never fired.
 - **Fix:** `097423fd7`
 
 ## What I'd change now

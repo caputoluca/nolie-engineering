@@ -4,9 +4,7 @@ How we ran NoLie on AWS: a fix reaches production in about eight minutes, a brok
 
 ## The problem
 
-infra/ is how we ran NoLie on AWS, written as code. A merged fix reached production in about eight minutes. A new version only took over once it was healthy, and rolled itself back if it wasn't. If the site went down anyway, AWS told us in Slack within a minute or two.
-
-The next engineer gets these rules without writing a line.
+A merged fix went out on its own, with no one at a console. A new version only took over once it was healthy, and rolled itself back if it wasn't. If the site went down anyway, AWS told us in Slack within a minute or two.
 
 The services and their rollback are in [`ecs.ts`](ecs.ts), the alarms and the budget in [`monitoring.ts`](monitoring.ts), and [`deploy.yml`](deploy.yml) builds each version and hands it to them.
 
@@ -45,8 +43,8 @@ flowchart LR
 
 ## Why it's built this way
 
-### 1. As code, not clicks
-- I wrote the whole setup in Pulumi so it was portable, and rebuilding it never depended on a run of clicks in a console.
+### 1. Everything in Pulumi
+- I wrote the whole setup in Pulumi, so rebuilding it never depended on a run of clicks in a console.
 - Changes went through a commit and the same pipeline: 149 updates to the prod stack.
 
 ### 2. AWS, not Render
@@ -60,14 +58,14 @@ flowchart LR
 ### 4. Alarms on free metrics, missing data counted as down
 - Container Insights cost about $16 a month, and only the two outage alarms used it. I moved them to free metrics (`a504ad117`).
 - The API alarm watches the load balancer's healthy targets. The worker has no load balancer, so a worker that sends no metrics at all is the alarm.
-- Either way, no data means down. A service with no tasks reports nothing, and silence must not read as fine.
+- A service with no tasks reports nothing, so both alarms count missing data as down.
 
 ### 5. A cap and a budget
 - The API could scale to 480 tasks, about $8.6k a month if traffic held it there, with no alarm on it. Before an expected traffic spike, a load test on 100 tasks, four times the size prod ran day to day, served 10,695 requests a second with no errors. So I cut the cap to 100 (`71f899fc0`).
 - The budget watches gross spend. Credits kept our net bill at $0, so a default budget would never have fired.
 
-### 6. Fast deploys, everything that can run at once does
-- I kept deploys fast to keep momentum going and fixes rolling out quickly. A merged change reached production in 8.4 minutes at the median.
+### 6. Deploys run everything they can at once
+- A merged change reached production in 8.4 minutes at the median.
 - The web build starts right after change detection and never waits on the database. The API and worker images build side by side once migrations pass.
 - Only what changed is rebuilt. An unchanged service keeps its current image, so a web-only change never restarts the API.
 - Integration tests ran on the pull request, before the merge, so they never held a deploy up.
@@ -87,12 +85,12 @@ flowchart LR
 
 ### A cost monitor broke the prod deploy
 - **What:** AWS allows one spend monitor of its kind per account and had already made one, so creating ours failed the deploy partway.
-- **In production:** Jul 26. The site kept serving: two healthy targets in every window that day. Green again in 21 minutes.
+- **In production:** Jul 26. The site kept serving: two healthy targets in every window that day. Green again 17 minutes after the failure.
 - **Fix:** `40c9d5d25`
 
 ## What I'd change now
 
-The deploys held: no window without a healthy server. Two things I'd set up differently.
+The deploys held: no window without a healthy server.
 
 - **Keep slow endpoints out of the latency alarm.** Some endpoints are slow by design, like the AI writing a listing from its photos, which could take a few seconds. The latency alarm watched every request at once, so those calls set it off with nothing wrong.
   - **How:** the load balancer can't tell endpoints apart, so I'd send the slow ones to their own target group from the start, and point the latency alarm at the fast group, not the whole load balancer.

@@ -1,12 +1,12 @@
 # ranking/ — the explore feed
 
-The items buyers want, first on their screen.
+New and popular items near the top of the buyer's screen, cheap ones and merch below.
 
 ## The problem
 
-ranking/ puts the items we want buyers to see at the top of the feed, so they keep scrolling and buying. Every view and sale is logged with where it was on the feed, so we learn what buyers want.
+ranking/ orders the explore feed so buyers keep scrolling and buying: fresh listings and the items buyers look for (a popular character's card, say) near the top, items under $15 and merch below. Every view and sale is logged with its spot on the feed, so we learn what buyers want.
 
-This folder is the worker that orders the feed every 10 minutes, the API that serves it a page at a time, the browser half that keeps the logging honest, and the writer that stores every event.
+The code is a worker that orders the feed every 10 minutes, the API that serves it a page at a time, the browser half that logs each view once, and the writer that stores every event.
 
 ## By the numbers
 
@@ -51,7 +51,7 @@ sequenceDiagram
 
 ### 1. Freshness leads, because there was too little data to rank on
 
-- The score reached its 11th version in under four weeks. Each sparse signal misbehaved in its own way.
+- The score reached its 11th version in under four weeks, because each signal had too little data behind it.
 - A popularity boost built on cart adds and sales rewarded a lack of evidence: 24 of 940 listings got any boost, and popular characters got none.
 - Seller reviews sat at a low weight because only a handful of 50 sellers had any.
 - A feed led by engagement (views, saves, cart adds) barely moved between runs, so it looked like nobody was posting.
@@ -82,7 +82,7 @@ sequenceDiagram
 ### 5. Log every spot now, train later
 
 - A model that learns ranking needs to know where each item was shown, and what sold from where.
-- With so few sales, testing one ranking against another wasn't possible, so I logged instead, for a richer recommender once data is no longer the limit.
+- With so few sales, testing one ranking against another wasn't possible, so I logged instead, to train a recommender once there were enough sales.
 - A tab refocus in the browser doesn't count as a new view.
 - Events are written up to 100 at a time, or after a second. A job counts as done only once its batch is written, and a duplicate is dropped by its event id.
 
@@ -90,7 +90,7 @@ sequenceDiagram
 
 1. [`refresh.job.ts`](refresh.job.ts#L961-L1073): the run that orders the feed, step by step: score, sort, shuffle, space out sellers, write.
 2. [`ranking.ts`](ranking.ts#L1190-L1236): the live score, freshness first, the items that sit below, and the lifts.
-3. [`write.job.ts`](write.job.ts#L37-L171): how every event is stored: batched, retried, and kept once.
+3. [`write.job.ts`](write.job.ts#L37-L171): how every event is stored, in batches, each one kept once.
 
 ## Bugs I fixed
 
@@ -111,8 +111,8 @@ sequenceDiagram
 
 ## What I'd change now
 
-The logging was the right bet. Around it, I'd change three things.
+The logging was the right bet.
 
 - **Pick the feed by the score it serves.** The feed build takes the top 5,000 items by the older engagement score, then re-scores them by freshness. A new item outside those 5,000 never gets its freshness counted. Every listing fit, so it never bit; at scale it would ([`refresh.job.ts`](refresh.job.ts#L1000)).
 - **Give the score its own table.** The order has one, but the score is a column on the listing row, rewritten every 10 minutes, and the freshness score that served is never stored. A score table would let the build pick by the score it serves, which fixes the point above.
-- **Build for the catalog we had.** Three serving paths with fallbacks and a feed written ahead, for a few thousand listings: one sort per run would have done. The code is forward-looking, and where that paid off was the data, not the serving.
+- **Build for the catalog we had.** Three serving paths with fallbacks and a feed written ahead, for a few thousand listings: one sort per run would have done. Building ahead paid off in the data, not in the serving.
